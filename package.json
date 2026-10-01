@@ -1,0 +1,15 @@
+{
+  "name": "peel",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "start": "bun src/index.ts",
+    "connect": "bun src/index.ts --connect",
+    "test": "bun test",
+    "check": "tsc --noEmit",
+    "verify:live": "bun scripts/verify-live.ts"
+  },
+  "dependencies": { "@opentui/core": "0.5.14" },
+  "devDependencies": { "@types/bun": "^1.3.14", "typescript": "^5.9.3" }
+}
