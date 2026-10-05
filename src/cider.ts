@@ -11,8 +11,13 @@ export function media(item: Resource, type = "songs"): Media {
     name: attrs.name ?? "Untitled", artist: attrs.artistName ?? "", album: attrs.albumName ?? "",
     duration: (attrs.durationInMillis ?? attrs.durationMs ?? 0) / 1000,
     favourite: attrs.tags?.includes("favorited") ?? false,
+    artwork: attrs.artwork?.url, releaseDate: attrs.releaseDate, trackCount: attrs.trackCount,
+    prerelease: attrs.isPrerelease,
   };
 }
+
+const collections = ["albums", "playlists", "library-albums", "library-playlists"];
+const releaseWindow = 120 * 24 * 60 * 60 * 1000;
 
 export class Cider implements Player {
   constructor(readonly base = process.env.CIDER_API_BASE ?? "http://127.0.0.1:10767", private token = "") {}
@@ -61,6 +66,40 @@ export class Cider implements Player {
     }
     return items;
   }
+
+  private async raw(path: string) { return (await this.request(`/amapi/raw/${path}`)).data; }
+
+  async recent(): Promise<Media[]> {
+    // Apple serves recently played collections ten at a time.
+    const pages = await Promise.all([0, 10].map(offset => this.raw(`v1/me/recent/played?limit=10&offset=${offset}`)));
+    const items = pages.flatMap(page => page.data ?? []).filter((item: Resource) => collections.includes(item.type));
+    return [...new Map(items.map((item: Resource) => [item.id, media(item)])).values()];
+  }
+
+  async releases(): Promise<Media[]> {
+    // Favourite artists are library artists with Apple's inFavorites flag. Pagination
+    // links drop the extend parameter, so request each offset explicitly.
+    const scan = (offset: number) => this.raw(`v1/me/library/artists?limit=100&offset=${offset}&extend=inFavorites&include=catalog`);
+    const first = await scan(0);
+    const offsets = Array.from({ length: Math.max(0, Math.ceil((first.meta?.total ?? 0) / 100) - 1) }, (_, index) => (index + 1) * 100);
+    const artists = [first, ...await Promise.all(offsets.map(scan))].flatMap(page => page.data ?? [])
+      .filter((artist: Resource) => artist.attributes?.inFavorites)
+      .map((artist: Resource) => artist.relationships?.catalog?.data?.[0]?.id).filter(Boolean);
+    const batches = Array.from({ length: Math.ceil(artists.length / 25) }, (_, index) => artists.slice(index * 25, index * 25 + 25));
+    const catalog = await Promise.all(batches.map(ids => this.raw(`v1/catalog/$STOREFRONT/artists?ids=${ids.join(",")}&views=latest-release`)));
+    const since = Date.now() - releaseWindow;
+    const releases = catalog.flatMap(page => page.data ?? []).flatMap((artist: Resource) => artist.views?.["latest-release"]?.data ?? [])
+      .map((item: Resource) => media(item, "albums")).filter((item: Media) => Date.parse(item.releaseDate ?? "") >= since);
+    return [...new Map(releases.map((item: Media) => [item.id, item])).values()]
+      .sort((a, b) => (b.releaseDate ?? "").localeCompare(a.releaseDate ?? "")).slice(0, 48);
+  }
+
+  async playlist(id: string, offset = 0): Promise<Page> {
+    const response = await this.raw(`v1/catalog/$STOREFRONT/playlists/${encodeURIComponent(id)}/tracks?offset=${offset}&limit=100`);
+    return { items: (response.data ?? []).map((item: Resource) => media(item)), more: !!response.next };
+  }
+
+  async rating(): Promise<number> { return (await this.request("/library/now-playing/status")).data?.rating ?? 0; }
 
   async search(term: string): Promise<Media[]> {
     if (!term.trim()) return [];

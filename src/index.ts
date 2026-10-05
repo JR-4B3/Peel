@@ -1,6 +1,6 @@
 import { createCliRenderer } from "@opentui/core";
 import { Cider } from "./cider";
-import { readPreferences, readToken, saveJson } from "./config";
+import { cacheDir, readCache, readPreferences, readToken, saveJson } from "./config";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { ensureCider } from "./startup";
@@ -19,7 +19,9 @@ try {
     const token = await readToken();
     const player = new Cider(undefined, token);
     const renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true, targetFps: 10 });
-    const model = new Model(player, preferences, value => saveJson("layout.json", value));
+    const model = new Model(player, preferences, value => saveJson("layout.json", value), {
+      read: () => readCache("home.json"), write: value => saveJson("home.json", value, cacheDir),
+    });
     const startup = new AbortController();
     let interval: ReturnType<typeof setInterval> | undefined;
     const ui = new PeelUI(renderer, model, () => { clearInterval(interval); ui.dispose(); renderer.destroy(); });

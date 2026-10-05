@@ -26,6 +26,8 @@ chmod 755 "$peel_launcher"
 peel_apps_dir="$HOME/.local/share/applications"
 mkdir -p "$peel_apps_dir"
 peel_desktop="$peel_apps_dir/peel.desktop"
+# Ghostty requires a GTK application ID, which needs at least one dot.
+peel_window_class=io.github.jr4b3.peel
 if [[ -e "$peel_desktop" ]] && ! rg -q '^X-Peel-Launcher=true$' "$peel_desktop"; then
   echo 'An existing peel.desktop belongs to another program. Leaving it in place.' >&2
   exit 1
@@ -40,7 +42,12 @@ peel_desktop_launcher=${peel_desktop_launcher//%/%%}
   printf '[Desktop Entry]\nType=Application\nName=Peel\n'
   printf 'Comment=Search your Apple Music library and control playback\n'
   printf 'Icon=multimedia-player\nCategories=AudioVideo;Audio;Music;\nX-Peel-Launcher=true\n'
-  if command -v alacritty >/dev/null 2>&1; then
+  # Ghostty shows album covers through the kitty graphics protocol and includes
+  # the Nerd Font symbols Peel uses for its controls.
+  if command -v ghostty >/dev/null 2>&1; then
+    printf 'Terminal=false\nStartupWMClass=%s\n' "$peel_window_class"
+    printf 'Exec=ghostty --class=%s --title=Peel --gtk-single-instance=false --confirm-close-surface=false -e "%s"\n' "$peel_window_class" "$peel_desktop_launcher"
+  elif command -v alacritty >/dev/null 2>&1; then
     printf 'Terminal=false\nExec=alacritty --title Peel --class peel -e "%s"\n' "$peel_desktop_launcher"
   elif command -v konsole >/dev/null 2>&1; then
     printf 'Terminal=false\nExec=konsole --separate -p tabtitle=Peel -e "%s"\n' "$peel_desktop_launcher"

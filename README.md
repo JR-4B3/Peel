@@ -5,9 +5,11 @@ Peel is an OpenTUI interface for Apple Music on Linux. Cider handles sign-in and
 The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34ccfee77448`:
 
 - A labelled search input stays visible in wide and narrow terminals.
-- Favourite Songs starts above your playlists. All songs, Albums, and Queue follow them.
+- Home opens first. It shows albums and playlists you played recently, and new releases from artists you marked as favourites in Apple Music.
+- Favourite Songs follows Home, above your playlists. All songs, Albums, and Queue follow them.
+- Albums shows your library as a grid of covers. Selecting an album or playlist opens a page with its cover and songs.
 - The layout editor saves sidebar order and hidden entries. Search and the player stay visible.
-- Playback controls have text labels and space between them. There is one player strip at the bottom.
+- Playback controls use icons with their keyboard shortcut beside them when the terminal is at least 100 columns wide. There is one player strip at the bottom with the current cover and a favourite heart.
 - Mouse clicks and keyboard shortcuts control the same actions.
 - Optional animated bars indicate confirmed playback. They are a playback indicator, not a measured audio spectrum. They stop when paused or disconnected.
 - Lyrics are deferred.
@@ -22,13 +24,13 @@ bun run connect
 bun start
 ```
 
-For a `peel` command and a Peel entry in your application menu, run `bash scripts/install-local.sh` on the playback PC. Then use `peel --connect` and `peel`, or open Peel from the application menu. The launcher is installed to `~/.local/bin` and runs this checkout. The application entry opens the interface in Alacritty or Konsole when available, otherwise your desktop's default terminal.
+For a `peel` command and a Peel entry in your application menu, run `bash scripts/install-local.sh` on the playback PC. Then use `peel --connect` and `peel`, or open Peel from the application menu. The launcher is installed to `~/.local/bin` and runs this checkout. The application entry opens the interface in Ghostty when available, then Alacritty or Konsole, otherwise your desktop's default terminal.
 
 Approve Peel's request in Cider. Peel requests playback, queue, library, and audio permissions. It does not request your Apple credentials. The token is saved to `~/.config/peel/auth.json` with private file permissions.
 
 If the consent request times out or Cider closes the connection, run `bun run connect` again and approve the dialog promptly. Existing application tokens can also be supplied through `CIDER_API_TOKEN`. Generate one in Cider's external application access settings.
 
-Use a terminal of at least 48 columns and 24 rows. Mouse interaction requires a terminal that forwards mouse events. Shift-click behaviour for selecting terminal text depends on your terminal.
+Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font symbols, which Ghostty includes. Other terminals need a Nerd Font. Covers use the kitty graphics protocol in Ghostty and kitty. Other terminals show covers as coloured blocks. Peel does not paint a background, so the terminal's own background and transparency show through. Its colours match the DankMaterialShell palette used by Ghostty and Niri on the main PC. Mouse interaction requires a terminal that forwards mouse events. Shift-click behaviour for selecting terminal text depends on your terminal.
 
 ## Controls
 
@@ -40,8 +42,11 @@ Use a terminal of at least 48 columns and 24 rows. Mouse interaction requires a 
 | Seek ten seconds | Left / Right | Click the progress bar |
 | Volume | `-` / `+` | Vol - / Vol + |
 | Shuffle / repeat | `s` / `r` | Shuffle / Repeat |
-| Navigate music | Tab or Shift+Tab, then Up/Down and Enter | Click a playlist, album, or song |
-| Load another page | `m` | Load more |
+| Navigate music | Tab or Shift+Tab, then arrow keys and Enter | Click a playlist, cover, or song |
+| Seek while covers have focus | Shift+Left / Shift+Right | Click the progress bar |
+| Back from an album or playlist | Escape or Backspace | Back |
+| Favourite the current song | `f` | Heart |
+| Load another page | `m`, or move to the last row of covers | Scroll down |
 | Edit sidebar layout | `l` | Layout |
 | Move a layout entry | `K` / `J` | Up / Down in the editor |
 | Hide/show a layout entry | `h` | Hide/show in the editor |
@@ -53,9 +58,15 @@ Plain playback shortcut letters remain text while the search input has focus. Qu
 
 Selecting a song in a playlist or album starts that song directly, then adds its collection and restores its position in the displayed order. The collection's first song never starts as an intermediate step. Next and Previous continue through the collection. A double-click on the same song starts it once. Shuffle can change the order afterwards. Manual Next and Previous still change tracks in repeat-one mode and preserve the repeat setting.
 
+Left and Right move between covers on Home and Albums, and seek in song lists. On Home, each row scrolls sideways. Click the arrows beside a row's title to page through it.
+
+The heart sets Apple Music's favourite rating through Cider, then reads the stored rating back before it changes. Apple Music may also add the song to your library.
+
 ## Settings
 
-Layout changes save to `~/.config/peel/layout.json`. `XDG_CONFIG_HOME` selects another configuration root, and `PEEL_CONFIG_DIR` overrides Peel's directory directly. `CIDER_API_BASE` defaults to `http://127.0.0.1:10767`.
+Layout changes save to `~/.config/peel/layout.json`. Home is always first and is not part of the layout editor. `XDG_CONFIG_HOME` selects another configuration root, and `PEEL_CONFIG_DIR` overrides Peel's directory directly. `CIDER_API_BASE` defaults to `http://127.0.0.1:10767`.
+
+Peel keeps Home's shelves and downloaded covers in `~/.cache/peel`. `XDG_CACHE_HOME` and `PEEL_CACHE_DIR` change that location. New releases come from the latest release of each library artist with Apple's favourite flag, from the last 120 days or not yet released, newest first. Peel checks again after six hours, because the check reads every library artist. Recently played reloads each time Home opens.
 
 Peel targets the v2 API in the installed Cider 4.0.17 build. Search uses Cider's read-only Apple Music proxy. Favourite Songs uses Apple's `favorited` playlist tag, so it also works when that playlist has a translated name. Library views load another page on demand.
 

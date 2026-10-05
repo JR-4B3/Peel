@@ -1,9 +1,16 @@
 import { EventEmitter } from "node:events";
 import type { Preferences } from "./config";
 import { defaults } from "./config";
-import { stopped, type Media, type Page, type Playback, type Player } from "./types";
+import { stopped, type Home, type Media, type Page, type Playback, type Player } from "./types";
 
 export interface Navigation { id: string; name: string; media?: Media; hidden?: boolean }
+export interface HomeStore { read(): Promise<Home | undefined>; write(home: Home): Promise<void> }
+type Display = "home" | "grid" | "list";
+interface Snapshot { view: string; title: string; items: Media[]; more: boolean; detail?: Media; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string } }
+
+// New releases need one request per hundred library artists, so reuse them for a while.
+const releasesFresh = 6 * 60 * 60 * 1000;
+const memoryStore: HomeStore = { read: async () => undefined, write: async () => {} };
 
 export class Model extends EventEmitter {
   playback: Playback = structuredClone(stopped);
@@ -11,8 +18,12 @@ export class Model extends EventEmitter {
   status = "Connecting to Cider...";
   playlists: Media[] = [];
   items: Media[] = [];
-  title = "Favourite Songs";
-  view = "favourites";
+  title = "Home";
+  view = "home";
+  home: Home = { recent: [], releases: [] };
+  homeLoading = { recent: false, releases: false };
+  detail?: Media;
+  history: Snapshot[] = [];
   loading = false;
   more = false;
   layout = false;
@@ -23,11 +34,21 @@ export class Model extends EventEmitter {
   private collection?: { id: string; type: string };
   private commands: Promise<unknown> = Promise.resolve();
   private activation?: { key: string; started: number; pending: boolean; promise: Promise<void> };
+  private loved?: { key: string; value: boolean };
+  private homeRead = false;
+  releases: Promise<void> = Promise.resolve();
 
-  constructor(readonly player: Player, public preferences: Preferences = structuredClone(defaults), private save: (value: Preferences) => Promise<void> = async () => {}) { super(); }
+  constructor(readonly player: Player, public preferences: Preferences = structuredClone(defaults), private save: (value: Preferences) => Promise<void> = async () => {}, private store: HomeStore = memoryStore) { super(); }
   changed() { this.emit("change"); }
 
+  get display(): Display { return this.view === "home" ? "home" : this.view === "albums" ? "grid" : "list"; }
+
+  // Home stays first. The layout editor arranges the entries after it.
   navigation(includeHidden = false): Navigation[] {
+    return [{ id: "home", name: "Home" }, ...this.entries(includeHidden)];
+  }
+
+  entries(includeHidden = false): Navigation[] {
     const entries: Navigation[] = [
       { id: "favourites", name: "Favourite Songs", media: this.playlists.find(p => p.favourite) },
       ...this.playlists.filter(p => !p.favourite).map(p => ({ id: `playlist:${p.id}`, name: p.name, media: p })),
@@ -70,10 +91,16 @@ export class Model extends EventEmitter {
 
   async open(id: string) {
     this.collection = undefined;
+    this.detail = undefined;
+    this.history = [];
     this.view = id;
     this.layout = false;
     const navigation = this.navigation(true).find(item => item.id === id);
     this.title = navigation?.name ?? id;
+    if (id === "home") {
+      this.generation++; this.loader = undefined; this.items = []; this.more = false; this.loading = false;
+      this.changed(); await this.loadHome(); return;
+    }
     if (id === "favourites" || id.startsWith("playlist:")) {
       if (!navigation?.media) {
         this.generation++; this.items = []; this.more = false; this.loading = false;
@@ -87,9 +114,55 @@ export class Model extends EventEmitter {
     await this.load(false);
   }
 
+  async loadHome(force = false) {
+    if (!this.homeRead) {
+      this.homeRead = true;
+      const cached = await this.store.read().catch(() => undefined);
+      if (cached && !this.home.updated) { this.home = cached; this.changed(); }
+    }
+    // The release scan takes seconds. Playback polling must not wait for it.
+    if (!this.homeLoading.releases && (force || !this.home.updated || Date.now() - this.home.updated > releasesFresh)) {
+      this.releases = this.homeShelf("releases", () => this.player.releases());
+    }
+    if (!this.homeLoading.recent) await this.homeShelf("recent", () => this.player.recent());
+  }
+
+  private async homeShelf(shelf: "recent" | "releases", load: () => Promise<Media[]>) {
+    this.homeLoading[shelf] = true; this.changed();
+    try {
+      const items = await load();
+      this.home = { ...this.home, [shelf]: items, ...(shelf === "releases" ? { updated: Date.now() } : {}) };
+      await this.store.write(this.home).catch(() => {});
+    } catch (error) { this.fail(error); }
+    finally { this.homeLoading[shelf] = false; this.changed(); }
+  }
+
+  // Albums and playlists open as their own view. Back returns to the previous one.
+  async openCollection(item: Media) {
+    this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, loader: this.loader, collection: this.collection });
+    this.view = `collection:${item.type}:${item.id}`; this.title = item.name; this.detail = item; this.layout = false;
+    this.collection = { id: item.id, type: item.type };
+    this.loader = item.type === "library-playlists" ? offset => this.player.songs(item.id, offset)
+      : item.type === "playlists" ? offset => this.player.playlist(item.id, offset)
+      : offset => this.player.album(item.id, offset);
+    await this.load(false);
+  }
+
+  back(): Media | undefined {
+    const previous = this.history.pop();
+    if (!previous) return undefined;
+    const closed = this.detail;
+    this.generation++; this.loading = false;
+    ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, loader: this.loader, collection: this.collection } = previous);
+    this.changed();
+    return closed;
+  }
+
   async search(term: string) {
     if (!term.trim()) return;
     this.collection = undefined;
+    this.detail = undefined;
+    this.history = [];
     const generation = ++this.generation;
     this.layout = false; this.view = "search"; this.title = `Search: ${term}`;
     this.loading = true; this.items = []; this.more = false; this.changed();
@@ -117,13 +190,7 @@ export class Model extends EventEmitter {
   }
 
   async activate(item: Media) {
-    if (item.type.includes("albums")) {
-      this.view = `album:${item.id}`; this.title = item.name;
-      this.collection = { id: item.id, type: item.type };
-      this.loader = offset => this.player.album(item.id, offset);
-      await this.load(false);
-      return;
-    }
+    if (item.type.includes("albums") || item.type.includes("playlists")) return this.openCollection(item);
     const key = JSON.stringify([this.view, item.type, item.id, item.queueIndex]);
     const previous = this.activation;
     if (previous?.key === key && (previous.pending || Date.now() - previous.started < 500)) {
@@ -182,8 +249,41 @@ export class Model extends EventEmitter {
     } catch (error) { this.fail(error); return false; }
   }
 
+  get favourite() {
+    const key = this.songKey();
+    return this.loved?.key === key ? this.loved.value : !!this.playback.nowPlaying?.inFavorites;
+  }
+
+  private songKey() {
+    const song = this.playback.nowPlaying;
+    return song ? song.playParams?.catalogId ?? song.playParams?.id ?? `${song.name}/${song.artistName}` : "";
+  }
+
+  async toggleFavourite() {
+    const key = this.songKey();
+    if (!key || !this.connected) return;
+    const value = !this.favourite;
+    this.loved = { key, value }; this.changed();
+    const done = await this.execute(() => value
+      ? this.player.command("/library/now-playing/rating", { rating: 1 }, "PUT")
+      : this.player.command("/library/now-playing/rating", {}, "DELETE"));
+    // Cider applies ratings asynchronously. Read the stored rating before claiming it.
+    let saved = !value;
+    try {
+      for (let attempt = 0; done && attempt < 30 && saved !== value; attempt++) {
+        saved = await this.player.rating() === 1;
+        if (saved !== value) await Bun.sleep(100);
+      }
+    } catch {}
+    if (this.songKey() !== key) return;
+    this.loved = { key, value: saved };
+    if (saved !== value) this.status = "Cider did not save the favourite. Try again.";
+    else this.status = value ? "Added to Favourite Songs" : "Removed from Favourite Songs";
+    this.changed();
+  }
+
   async reorder(id: string, direction: number) {
-    const entries = this.navigation(true).map(item => item.id);
+    const entries = this.entries(true).map(item => item.id);
     const index = entries.indexOf(id), target = index + direction;
     if (index < 0 || target < 0 || target >= entries.length) return;
     [entries[index], entries[target]] = [entries[target], entries[index]];

@@ -9,6 +9,7 @@ export interface Preferences {
 }
 
 export const configDir = process.env.PEEL_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "peel");
+export const cacheDir = process.env.PEEL_CACHE_DIR ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "peel");
 export const defaults: Preferences = { order: [], hidden: [], playbackBars: true };
 
 export async function readPreferences(dir = configDir): Promise<Preferences> {
@@ -32,6 +33,10 @@ export async function saveJson(name: string, value: unknown, dir = configDir) {
   await writeFile(temporary, JSON.stringify(value, null, 2) + "\n", { mode: 0o600 });
   await chmod(temporary, 0o600);
   await rename(temporary, path);
+}
+
+export async function readCache<T>(name: string, dir = cacheDir): Promise<T | undefined> {
+  try { return JSON.parse(await readFile(join(dir, name), "utf8")); } catch { return undefined; }
 }
 
 export async function readToken(): Promise<string> {

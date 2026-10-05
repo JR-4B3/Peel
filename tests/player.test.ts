@@ -3,7 +3,9 @@ import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testin
 import { Cider } from "../src/cider";
 import { Model } from "../src/model";
 import { PeelUI } from "../src/ui";
-import { type Media } from "../src/types";
+import { type Home, type Media } from "../src/types";
+import { icon } from "../src/theme";
+import { artworkUrl } from "../src/artwork";
 import { defaults, readPreferences, saveJson } from "../src/config";
 import { mkdtemp, rm, stat } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -15,14 +17,18 @@ const cleanup: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 
 
-async function setup(width = 120, height = 36) {
+async function setup(width = 120, height = 36, view?: string, cached?: Home) {
   const api = fixture(); cleanup.push(() => api.server.stop(true));
   const setup = await createTestRenderer({ width, height }); cleanup.push(() => setup.renderer.destroy());
   const saved: unknown[] = [];
-  const model = new Model(api.player, structuredClone(defaults), async value => { saved.push(structuredClone(value)); });
+  const stored: Home[] = [];
+  const model = new Model(api.player, structuredClone(defaults), async value => { saved.push(structuredClone(value)); },
+    { read: async () => cached, write: async value => { stored.push(structuredClone(value)); } });
   const ui = new PeelUI(setup.renderer, model); cleanup.push(() => ui.dispose());
-  await model.start(); await setup.flush();
-  return { ...setup, ...api, model, ui, saved };
+  await model.start(); await model.releases;
+  if (view) await model.open(view);
+  await setup.flush();
+  return { ...setup, ...api, model, ui, saved, stored };
 }
 
 export async function click(setup: TestRendererSetup, id: string) {
@@ -38,18 +44,20 @@ async function waitFor(predicate: () => boolean) {
 
 describe("the rendered player", () => {
   test("shows search, tagged favourites first, playlists, and one player strip", async () => {
-    const app = await setup();
+    const app = await setup(120, 36, "favourites");
     const frame = app.captureCharFrame();
     expect(frame).toContain("Search songs and albums");
-    expect(frame.indexOf("Favourite Songs")).toBeLessThan(frame.indexOf("Background Chill"));
-    expect(frame).toContain("Previous [p]"); expect(frame).toContain("1  Soma");
+    const sidebar = frame.split("\n").map(line => line.slice(0, 30)).join("\n");
+    expect(sidebar.indexOf("Home")).toBeLessThan(sidebar.indexOf("Favourite Songs"));
+    expect(sidebar.indexOf("Favourite Songs")).toBeLessThan(sidebar.indexOf("Background Chill"));
+    expect(frame).toContain(icon.previous); expect(frame).toContain("Soma");
     expect(app.model.items[0].type).toBe("library-songs");
   });
 
   test("mouse and keyboard both change the observed playback state", async () => {
     const app = await setup();
     await click(app, "play-pause"); await waitFor(() => app.model.playback.state === "playing");
-    await app.flush(); expect(app.captureCharFrame()).toContain("Pause [Space]");
+    await app.flush(); expect(app.captureCharFrame()).toContain(`${icon.pause} space`);
     app.mockInput.pressKey(" "); await waitFor(() => app.model.playback.state === "paused");
     await app.flush(); expect(app.captureCharFrame()).toContain("Paused");
     for (const [id, path, key] of [["previous", "/playback/previous", "p"], ["next", "/playback/next", "n"], ["shuffle", "/playback/shuffle/toggle", "s"], ["repeat", "/playback/repeat/toggle", "r"]]) {
@@ -60,7 +68,7 @@ describe("the rendered player", () => {
   });
 
   test("selecting a playlist track starts only that song and retains the collection order", async () => {
-    const app = await setup();
+    const app = await setup(120, 36, "favourites");
     await click(app, "tracks:row:1");
     await waitFor(() => app.calls.some(call => call.path === "/queue/move"));
     expect(app.audible).toEqual(["i.selected"]);
@@ -71,7 +79,7 @@ describe("the rendered player", () => {
   });
 
   test("a double-click activates its song once without playing the collection's first song", async () => {
-    const app = await setup();
+    const app = await setup(120, 36, "favourites");
     await click(app, "tracks:row:1");
     await app.flush();
     await click(app, "tracks:row:1");
@@ -84,7 +92,7 @@ describe("the rendered player", () => {
   });
 
   test("different rapid selections finish in order without interleaving queue construction", async () => {
-    const app = await setup();
+    const app = await setup(120, 36, "favourites");
     await Promise.all([app.model.activate(app.model.items[1]), app.model.activate(app.model.items[2])]);
     expect(app.audible).toEqual(["i.selected", "i.last"]);
     expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.soma", "i.selected", "i.last"]);
@@ -92,7 +100,7 @@ describe("the rendered player", () => {
   });
 
   test("selecting the first track retains one copy of it in its collection", async () => {
-    const app = await setup();
+    const app = await setup(120, 36, "favourites");
     await app.model.activate(app.model.items[0]);
     expect(app.audible).toEqual(["i.soma"]);
     expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.soma", "i.selected", "i.last"]);
@@ -130,13 +138,13 @@ describe("the rendered player", () => {
     await click(app, "search"); await app.mockInput.typeText("hello world");
     expect(app.ui.search.value).toBe("hello world");
     app.mockInput.pressTab(); expect(app.ui.sidebar.focused).toBe(true);
-    app.mockInput.pressTab(); expect(app.ui.tracks.focused).toBe(true);
+    app.mockInput.pressTab(); expect(app.ui.grid.focused).toBe(true);
     app.mockInput.pressTab({ shift: true }); expect(app.ui.sidebar.focused).toBe(true);
-    app.mockInput.pressEscape(); await waitFor(() => app.ui.tracks.focused); expect(app.ui.tracks.focused).toBe(true);
+    app.mockInput.pressEscape(); await waitFor(() => app.ui.grid.focused); expect(app.ui.grid.focused).toBe(true);
   });
 
   test("click and keyboard seek and volume write correct units and clamp values", async () => {
-    const app = await setup();
+    const app = await setup(120, 36, "favourites");
     app.mockInput.pressArrow("right"); await waitFor(() => app.model.playback.time.currentTime === 40);
     const seek = app.renderer.root.findDescendantById("seek")!;
     await app.mockMouse.click(seek.x + 5 + 49, seek.y);
@@ -150,7 +158,7 @@ describe("the rendered player", () => {
   test("layout editor changes the actual sidebar and saves preferences", async () => {
     const app = await setup();
     await click(app, "layout"); await app.flush();
-    await click(app, "move-down"); await waitFor(() => app.model.navigation()[0].id === "playlist:p.chill");
+    await click(app, "move-down"); await waitFor(() => app.model.entries()[0].id === "playlist:p.chill");
     await app.flush();
     expect(app.captureCharFrame().indexOf("Background Chill")).toBeLessThan(app.captureCharFrame().indexOf("Favourite Songs"));
     await click(app, "hide"); await waitFor(() => !app.model.navigation().some(row => row.id === "favourites"));
@@ -186,13 +194,13 @@ describe("the rendered player", () => {
 
   test("the interface fits the documented minimum size and survives resizing", async () => {
     const app = await setup(48, 24);
-    expect(app.captureCharFrame()).toContain("1  Soma");
-    expect(app.captureCharFrame()).toContain("Vol +");
+    expect(app.captureCharFrame()).toContain("SOMA");
+    expect(app.captureCharFrame()).toContain("50%");
     app.resize(120, 36); await app.flush();
     expect(app.captureCharFrame()).toContain("Favourite Songs");
-    expect(app.captureCharFrame()).toContain("1  Soma");
+    expect(app.captureCharFrame()).toContain("Recently played");
     app.resize(48, 24); await app.flush();
-    expect(app.captureCharFrame()).toContain("1  Soma");
+    expect(app.captureCharFrame()).toContain("SOMA");
     await click(app, "play-pause"); await waitFor(() => app.model.playback.state === "playing");
   });
 
@@ -236,4 +244,78 @@ test("a slow earlier search cannot overwrite a later search", async () => {
   const model = new Model(player);
   const old = model.search("old"); await model.search("new"); resolve([{ id: "old", type: "songs", name: "Old result", artist: "", album: "", duration: 0 }]); await old;
   expect(model.items[0].id).toBe("new");
+});
+
+describe("home, albums, and favourites", () => {
+  test("home shows recently played collections and recent releases from favourite artists", async () => {
+    const app = await setup();
+    const frame = app.captureCharFrame();
+    expect(frame).toContain("Recently played"); expect(frame).toContain("New from your favourite artists");
+    expect(app.model.home.recent.map(item => item.id)).toEqual(["a.soma", "pl.mix"]);
+    expect(app.model.home.releases.map(item => item.id)).toEqual(["a.soon", "a.new"]);
+    expect(frame).toContain("Out ");
+    expect(app.stored.at(-1)?.releases).toHaveLength(2);
+  });
+
+  test("a fresh cached home is shown without scanning artists again", async () => {
+    const cached: Home = { recent: [], releases: [{ id: "a.cached", type: "albums", name: "Cached Album", artist: "Someone", album: "", duration: 0, releaseDate: "2026-01-01" }], updated: Date.now() };
+    const app = await setup(120, 36, undefined, cached);
+    expect(app.captureCharFrame()).toContain("Cached");
+    expect(app.model.home.releases.map(item => item.id)).toEqual(["a.cached"]);
+    expect(app.calls.some(call => call.path === "/amapi/raw/v1/me/library/artists")).toBe(false);
+    expect(app.model.home.recent.map(item => item.id)).toEqual(["a.soma", "pl.mix"]);
+  });
+
+  test("clicking an album cover opens the album, and Escape returns to the same cover", async () => {
+    const app = await setup(120, 36, "albums");
+    expect(app.captureCharFrame()).toContain("Other Album");
+    await click(app, "grid:tile:albums:1");
+    await waitFor(() => app.model.detail?.id === "l.other" && app.model.items.length === 3);
+    await app.flush();
+    const frame = app.captureCharFrame();
+    expect(frame).toContain("Other Album"); expect(frame).toContain("3 songs"); expect(frame).toContain("Back");
+    await click(app, "tracks:row:1");
+    await waitFor(() => app.calls.some(call => call.path === "/queue/move"));
+    expect(app.calls.find(call => call.path === "/queue/add-later")?.body).toEqual({ id: "l.other", type: "library-albums" });
+    app.mockInput.pressEscape(); await waitFor(() => app.model.view === "albums");
+    expect(app.ui.grid.selected()?.media.id).toBe("l.other");
+    expect(app.ui.grid.focused).toBe(true);
+  });
+
+  test("a recently played catalog playlist opens its tracks", async () => {
+    const app = await setup();
+    app.ui.grid.select("pl.mix"); app.mockInput.pressEnter();
+    await waitFor(() => app.model.items.length === 3);
+    expect(app.model.title).toBe("Favourites Mix");
+    expect(app.calls.some(call => call.path === "/amapi/raw/v1/catalog/$STOREFRONT/playlists/pl.mix/tracks")).toBe(true);
+  });
+
+  test("arrow keys move through covers, and Shift seeks", async () => {
+    const app = await setup();
+    app.mockInput.pressArrow("right"); await app.flush();
+    expect(app.ui.grid.selected()?.media.id).toBe("pl.mix");
+    app.mockInput.pressArrow("down"); await app.flush();
+    expect(app.ui.grid.selected()?.media.id).toBe("a.new");
+    expect(app.calls.some(call => call.path === "/playback/seek")).toBe(false);
+    app.mockInput.pressArrow("right", { shift: true });
+    await waitFor(() => app.calls.some(call => call.path === "/playback/seek"));
+  });
+
+  test("the heart favourites the playing song and confirms Cider's stored rating", async () => {
+    const app = await setup();
+    expect(app.captureCharFrame()).toContain(icon.heartOutline);
+    await click(app, "favourite");
+    await waitFor(() => app.model.status === "Added to Favourite Songs");
+    expect(app.calls.find(call => call.path === "/library/now-playing/rating")).toMatchObject({ method: "PUT", body: { rating: 1 } });
+    await app.flush(); expect(app.captureCharFrame()).toContain(icon.heart);
+    app.mockInput.pressKey("f");
+    await waitFor(() => app.model.status === "Removed from Favourite Songs");
+    expect(app.calls.filter(call => call.path === "/library/now-playing/rating").at(-1)?.method).toBe("DELETE");
+    expect(app.model.favourite).toBe(false);
+  });
+});
+
+test("artwork templates request a fixed square JPEG", () => {
+  expect(artworkUrl("https://example.test/a.jpg/{w}x{h}bb.{f}")).toBe("https://example.test/a.jpg/240x240bb.jpg");
+  expect(artworkUrl("https://example.test/a.jpg/600x600bb.png")).toBe("https://example.test/a.jpg/240x240bb.jpg");
 });

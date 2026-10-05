@@ -13,13 +13,17 @@ export function fixture(options: { waitForDecoder?: boolean } = {}) {
   let queue = collection.map(item => ({ track: { id: item.id, type: "songs", attributes: item } }));
   let position = 1;
   const audible: string[] = [];
+  let rating = 0;
+  const album = (id: string, name: string, artistName: string, releaseDate = "2026-01-01") => ({ id, type: "albums", attributes: { name, artistName, releaseDate, trackCount: 3 } });
+  const soon = new Date(Date.now() + 9 * 86400000).toISOString().slice(0, 10);
+  const recent = new Date(Date.now() - 9 * 86400000).toISOString().slice(0, 10);
   const server = Bun.serve({ port: 0, async fetch(request) {
     const url = new URL(request.url), path = url.pathname.replace("/api/v2", "");
     if (request.headers.get("apptoken") !== "test-token") return Response.json({ error: "UNAUTHORIZED_APP_TOKEN" }, { status: 403 });
     const body = request.method === "GET" ? undefined : await request.json();
     calls.push({ path, method: request.method, body });
     let data: any = {};
-    if (path === "/playback") data = playback;
+    if (path === "/playback") data = { ...playback, nowPlaying: playback.nowPlaying && { ...playback.nowPlaying, inFavorites: rating === 1 } };
     else if (path === "/playback/toggle") playback.state = playback.state === "playing" ? "paused" : "playing";
     else if (path === "/playback/pause") playback.state = "paused";
     else if (path === "/playback/play") playback.state = "playing";
@@ -55,12 +59,31 @@ export function fixture(options: { waitForDecoder?: boolean } = {}) {
       { id: "p.chill", type: "library-playlists", attributes: { name: "Background Chill" } },
       { id: "p.favourites", type: "library-playlists", attributes: { name: "Lieblingstitel", ...(url.searchParams.get("extend[library-playlists]") === "tags" ? { tags: ["favorited"] } : {}) } },
     ] };
+    else if (path === "/library/now-playing/rating") rating = request.method === "PUT" ? body.rating : 0;
+    else if (path === "/library/now-playing/status") data = { inLibrary: false, rating };
+    else if (path === "/amapi/raw/v1/me/recent/played") data = Number(url.searchParams.get("offset")) ? { data: [] } : { data: [
+      album("a.soma", "SOMA", "Skrillex"), { id: "st.radio", type: "stations", attributes: { name: "Radio" } },
+      { id: "pl.mix", type: "playlists", attributes: { name: "Favourites Mix", curatorName: "Apple Music" } },
+    ] };
+    else if (path === "/amapi/raw/v1/me/library/artists") data = Number(url.searchParams.get("offset")) ? { data: [] } : { meta: { total: 2 }, data: [
+      { id: "r.one", attributes: { name: "Skrillex", inFavorites: url.searchParams.get("extend") === "inFavorites" }, relationships: { catalog: { data: [{ id: "100" }] } } },
+      { id: "r.two", attributes: { name: "Other", inFavorites: false }, relationships: { catalog: { data: [{ id: "200" }] } } },
+    ] };
+    else if (path === "/amapi/raw/v1/catalog/$STOREFRONT/artists") data = { data: (url.searchParams.get("ids") ?? "").split(",").map(id => ({ id, views: { "latest-release": { data: [
+      id === "100" ? album("a.new", "Fresh Album", "Skrillex", recent) : album("a.old", "Old Album", "Other", "2020-01-01"),
+      ...(id === "100" ? [album("a.soon", "Coming Soon", "Skrillex", soon)] : []),
+    ] } } })) };
+    else if (path === "/amapi/raw/v1/catalog/$STOREFRONT/playlists/pl.mix/tracks") data = { data: collection.map(item => ({ id: item.id, type: "songs", attributes: item })) };
     else if (path === "/amapi/search") data = { results: { songs: { data: [{ id: "123", type: "songs", attributes: { name: "Search result", artistName: "Artist", durationInMillis: 180000 } }] }, albums: { data: [{ id: "456", type: "albums", attributes: { name: "An album", artistName: "Artist" } }] } } };
     else if (path === "/queue") {
       const offset = Number(url.searchParams.get("offset") ?? 0), limit = Number(url.searchParams.get("limit") ?? 100);
       data = { items: queue.slice(offset, offset + limit), position, total: queue.length };
     }
     else if (path === "/queue/position") data = { position, total: queue.length };
+    else if (path === "/library/albums") data = { items: [
+      { id: "l.soma", name: "SOMA", artistName: "Skrillex", trackCount: 3, releaseDate: "2026-01-01" },
+      { id: "l.other", name: "Other Album", artistName: "Other", trackCount: 3 },
+    ] };
     else if (path.startsWith("/library/")) data = { items: collection };
     return Response.json({ data, meta: { offset: 0, limit: 100, total: data.items?.length ?? 0 } });
   } });

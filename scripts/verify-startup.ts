@@ -101,7 +101,7 @@ async function monitorDesktop() {
 }
 async function openPeel() {
   await run(["niri", "msg", "action", "spawn", "--", "gio", "launch", join(process.env.HOME!, ".local/share/applications/peel.desktop")]);
-  return wait(async () => (await windows()).find(window => window.app_id === "peel"), "Peel window");
+  return wait(async () => (await windows()).find(window => ["peel", "io.github.jr4b3.peel"].includes(window.app_id)), "Peel window");
 }
 try {
   await mkdir("evidence", { recursive: true });
@@ -110,7 +110,7 @@ try {
   record("Cider is stopped before launching Peel", initial);
   monitoring = monitorDesktop();
   await wait(async () => liveWorkspaces.size && liveWindows.size ? true : undefined, "desktop event stream");
-  const old = (await windows()).filter(window => window.app_id === "peel");
+  const old = (await windows()).filter(window => ["peel", "io.github.jr4b3.peel"].includes(window.app_id));
   if (old.length > 1) throw new Error("Close extra Peel windows before this check");
   if (old[0]) {
     await run(["niri", "msg", "action", "close-window", "--id", String(old[0].id)]);

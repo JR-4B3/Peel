@@ -115,7 +115,7 @@ try {
       ui.tracks.move(albumIndex - ui.tracks.index);
       await click(`tracks:row:${albumIndex}`);
       const deadline = Date.now() + 35000;
-      while ((model.loading || !model.view.startsWith("album:")) && Date.now() < deadline) await Bun.sleep(50);
+      while ((model.loading || !model.view.startsWith("collection:")) && Date.now() < deadline) await Bun.sleep(50);
       if (model.items.length < 3) throw new Error(`The real album did not load: ${model.status}`);
       const selected = model.items[1], next = model.items[2];
       await click("tracks:row:1");

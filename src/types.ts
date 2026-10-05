@@ -7,11 +7,18 @@ export interface Media {
   duration: number;
   favourite?: boolean;
   queueIndex?: number;
+  artwork?: string;
+  releaseDate?: string;
+  trackCount?: number;
+  prerelease?: boolean;
 }
 
 export interface Playback {
   state: "playing" | "paused" | "stopped";
-  nowPlaying: { name?: string; artistName?: string; albumName?: string } | null;
+  nowPlaying: {
+    name?: string; artistName?: string; albumName?: string; artwork?: { url?: string };
+    inFavorites?: boolean; playParams?: { id?: string; catalogId?: string };
+  } | null;
   time: { currentTime: number; duration: number; remaining?: number };
   volume: number;
   repeatMode: "none" | "one" | "all";
@@ -23,8 +30,18 @@ export interface Page {
   more: boolean;
 }
 
+export interface Home {
+  recent: Media[];
+  releases: Media[];
+  updated?: number;
+}
+
 export interface Player {
   snapshot(): Promise<Playback>;
+  recent(): Promise<Media[]>;
+  releases(): Promise<Media[]>;
+  playlist(id: string, offset?: number): Promise<Page>;
+  rating(): Promise<number>;
   playlists(): Promise<Media[]>;
   search(term: string): Promise<Media[]>;
   songs(id?: string, offset?: number): Promise<Page>;

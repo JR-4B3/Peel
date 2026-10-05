@@ -36,7 +36,7 @@ try {
   const windows: { id: number; title: string; app_id: string; pid: number }[] = JSON.parse(output);
   if (windows.some(window => window.app_id.toLowerCase() === "cider")) throw new Error("Cider's window is still visible");
   record("Cider window is hidden", true);
-  const peel = windows.find(window => window.app_id === "peel");
+  const peel = windows.find(window => ["peel", "io.github.jr4b3.peel"].includes(window.app_id));
   if (!peel) throw new Error("The installed Peel desktop window is not open");
   record("Peel interface is visible on main", peel);
 
