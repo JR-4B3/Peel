@@ -71,7 +71,12 @@ export class Cider implements Player {
   // Counts playback starts, so a queue still being built stops when another song starts.
   private starts = 0;
 
-  async playCollectionTrack(collection: { id: string; type: string }, track: Media, index: number, following: Media[] = []) {
+  playItem(item: Media) { return this.command("/playback/play-item", { id: item.id, type: item.type }); }
+
+  async playCollectionTrack(collection: { id: string; type: string }, items: Media[], index: number) {
+    const track = items[index]!;
+    // Songs queued after a selection beyond the collection's first page.
+    const following = items.slice(index + 1, index + 1 + collectionPage);
     const matches = (resource: Resource | undefined) => {
       if (!resource) return false;
       const item = resource.track ?? resource, attrs = item.attributes ?? item;

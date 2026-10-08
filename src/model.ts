@@ -12,8 +12,6 @@ interface Snapshot { view: string; title: string; items: Media[]; more: boolean;
 // New releases need one request per hundred library artists, so reuse them for a while.
 const releasesFresh = 6 * 60 * 60 * 1000;
 const navigationRetry = 10000;
-// Songs queued after a selection beyond the first hundred of a collection.
-const queueTail = 100;
 const memoryStore: HomeStore = { read: async () => undefined, write: async () => {} };
 
 export class Model extends EventEmitter {
@@ -104,7 +102,7 @@ export class Model extends EventEmitter {
         this.playbackError = undefined;
         const recovering = !this.connected;
         this.connected = true;
-        if (recovering && !this.starting) this.status = "Connected to Cider";
+        if (recovering && !this.starting) this.status = "Ready to play";
         this.changed();
       } catch (error) {
         // Cider not running yet is normal. Losing a working connection is reported.
@@ -124,8 +122,8 @@ export class Model extends EventEmitter {
         // A poll that began before Cider opened its API can still be in flight.
         await this.refresh();
         if (!this.connected) await this.refresh();
-        if (!this.connected) throw this.playbackError ?? new Error("Cider is not responding.");
-        this.status = "Connected to Cider";
+        if (!this.connected) throw this.playbackError ?? new Error("The player is not responding.");
+        this.status = "Ready to play";
       } finally { this.starting = false; this.engine = undefined; this.changed(); }
     })();
   }
@@ -292,8 +290,8 @@ export class Model extends EventEmitter {
     activation.promise = (async () => {
       try {
         if (item.queueIndex !== undefined) await this.act("/queue/jump", { index: item.queueIndex });
-        else if (collection && index >= 0) await this.execute(() => this.player.playCollectionTrack(collection, item, index, this.items.slice(index + 1, index + 1 + queueTail)));
-        else await this.act("/playback/play-item", { id: item.id, type: item.type });
+        else if (collection && index >= 0) await this.execute(() => this.player.playCollectionTrack(collection, this.items, index));
+        else await this.execute(() => this.player.playItem(item));
       } finally { activation.pending = false; }
     })();
     await activation.promise;
@@ -366,7 +364,7 @@ export class Model extends EventEmitter {
     } catch {}
     if (this.songKey() !== key) return;
     this.loved = { key, value: saved };
-    if (saved !== value) this.status = "Cider did not save the favourite. Try again.";
+    if (saved !== value) this.status = "Apple Music did not save the favourite. Try again.";
     else this.status = value ? "Added to Favourite Songs" : "Removed from Favourite Songs";
     this.changed();
   }

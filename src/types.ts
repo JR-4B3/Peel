@@ -61,7 +61,9 @@ export interface Player {
   rating(): Promise<number>;
   queue(offset?: number): Promise<Page>;
   queuePosition(): Promise<{ position: number; total: number }>;
-  playCollectionTrack(collection: { id: string; type: string }, track: Media, index: number, following?: Media[]): Promise<void>;
+  playItem(item: Media): Promise<void>;
+  // items is the collection as loaded so far, with the selected track at index.
+  playCollectionTrack(collection: { id: string; type: string }, items: Media[], index: number): Promise<void>;
   command(path: string, body?: unknown, method?: string): Promise<void>;
 }
 

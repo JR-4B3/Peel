@@ -147,7 +147,7 @@ try {
 } finally {
   if (original && collection && restoredTrack) {
     try {
-      await player.playCollectionTrack(collection, restoredTrack, originalPosition);
+      await player.playCollectionTrack(collection, model.items, originalPosition);
       const restored = await player.queue();
       const queueRestored = JSON.stringify(await queueIdentity()) === JSON.stringify(originalIds);
       await player.command("/playback/shuffle", { enabled: original.shuffleMode }, "PUT");

@@ -260,7 +260,7 @@ describe("the rendered player", () => {
 test("collection queue construction waits for the selected decoder to begin playback", async () => {
   const api = fixture({ waitForDecoder: true }); cleanup.push(() => api.server.stop(true));
   const items = await api.library.songs("p.favourites");
-  const starting = api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, items.items[1], 1);
+  const starting = api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, items.items, 1);
   await waitFor(() => api.calls.some(call => call.path === "/playback") && api.playback.nowPlaying?.name === "Selected song");
   expect(api.playback.time.currentTime).toBe(0);
   expect(api.calls.some(call => call.path === "/queue/add-later")).toBe(false);
@@ -302,7 +302,8 @@ test("a song beyond a collection's first hundred starts at once and queues the f
   const api = fixture(); cleanup.push(() => api.server.stop(true));
   const song = (id: string): Media => ({ id, type: "library-songs", name: id, artist: "Skrillex", album: "SOMA", duration: 200 });
   const started = Date.now();
-  await api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, song("i.selected"), 810, [song("i.811"), song("i.812")]);
+  const items = [...Array.from({ length: 810 }, (_, n) => song(`i.${n}`)), song("i.selected"), song("i.811"), song("i.812")];
+  await api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, items, 810);
   expect(Date.now() - started).toBeLessThan(2000);
   await waitFor(() => api.calls.filter(call => call.path === "/queue/add-later").length === 2);
   expect(api.calls.filter(call => call.path === "/queue/add-later").map(call => call.body.id)).toEqual(["i.811", "i.812"]);
@@ -312,7 +313,8 @@ test("a song beyond a collection's first hundred starts at once and queues the f
 test("starting another song stops queueing the rest of a long collection", async () => {
   const api = fixture({ queueDelay: 20 }); cleanup.push(() => api.server.stop(true));
   const following = Array.from({ length: 50 }, (_, n): Media => ({ id: `i.${n}`, type: "library-songs", name: `${n}`, artist: "", album: "", duration: 0 }));
-  await api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, { ...following[0]!, id: "i.selected" }, 500, following);
+  const items = [...Array.from({ length: 500 }, (): Media => ({ ...following[0]!, id: "i.before" })), { ...following[0]!, id: "i.selected" }, ...following];
+  await api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, items, 500);
   await waitFor(() => api.calls.some(call => call.path === "/queue/add-later"));
   await api.player.command("/playback/play-item", { id: "123", type: "songs" });
   await Bun.sleep(100);

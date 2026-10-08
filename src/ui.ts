@@ -662,7 +662,7 @@ export class PeelUI {
     this.layoutControls.visible = model.layout;
     this.arrange(display);
     this.empty.visible = display === "list" && !model.layout && !model.items.length;
-    this.empty.content = model.loading ? "Loading..." : model.view === "queue" && !model.connected ? "Cider is not running yet. The queue starts with your first song."
+    this.empty.content = model.loading ? "Loading..." : model.view === "queue" && !model.connected ? "The player is not running yet. The queue starts with your first song."
       : "Nothing here yet. Search above or choose something on the left.";
     if (model.detail) {
       const detail = model.detail;
@@ -740,7 +740,7 @@ export class PeelUI {
     const connected = this.model.connected;
     const song = state.nowPlaying;
     this.title.content = song ? song.name ?? "Untitled" : "Nothing playing";
-    this.subtitle.content = song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : this.model.starting ? "Starting Cider..." : "Choose a song to start";
+    this.subtitle.content = song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : this.model.starting ? "Starting the player..." : "Choose a song to start";
     this.playerCover.setArt(song?.artwork?.url);
     const favourite = this.model.favourite;
     this.favouriteButton.visible = !!song;
