@@ -15,6 +15,13 @@ export function fixture(options: { waitForDecoder?: boolean } = {}) {
   const audible: string[] = [];
   let rating = 0;
   const album = (id: string, name: string, artistName: string, releaseDate = "2026-01-01") => ({ id, type: "albums", attributes: { name, artistName, releaseDate, trackCount: 3 } });
+  const skrillex = { id: "100", type: "artists", attributes: { name: "Skrillex", genreNames: ["Dance"] } };
+  const top = [1, 2, 3, 4, 5, 6].map(n => ({ id: `t${n}`, type: "songs", attributes: { name: `Top song ${n}`, artistName: "Skrillex", albumName: "SOMA", durationInMillis: 180000 } }));
+  const artistViews: Record<string, unknown[]> = {
+    "top-songs": top, "full-albums": [album("a.soma", "SOMA", "Skrillex")],
+    singles: [album("a.single", "CONTRABAND - Single", "Naisha, Skrillex, BEAM & Dilip")],
+    "appears-on-albums": [album("a.guest", "Guest Spot", "Someone Else")],
+  };
   const soon = new Date(Date.now() + 9 * 86400000).toISOString().slice(0, 10);
   const recent = new Date(Date.now() - 9 * 86400000).toISOString().slice(0, 10);
   const server = Bun.serve({ port: 0, async fetch(request) {
@@ -66,15 +73,19 @@ export function fixture(options: { waitForDecoder?: boolean } = {}) {
       { id: "pl.mix", type: "playlists", attributes: { name: "Favourites Mix", curatorName: "Apple Music" } },
     ] };
     else if (path === "/amapi/raw/v1/me/library/artists") data = Number(url.searchParams.get("offset")) ? { data: [] } : { meta: { total: 2 }, data: [
-      { id: "r.one", attributes: { name: "Skrillex", inFavorites: url.searchParams.get("extend") === "inFavorites" }, relationships: { catalog: { data: [{ id: "100" }] } } },
+      { id: "r.one", attributes: { name: "Skrillex", inFavorites: url.searchParams.get("extend") === "inFavorites" }, relationships: { catalog: { data: [skrillex] } } },
       { id: "r.two", attributes: { name: "Other", inFavorites: false }, relationships: { catalog: { data: [{ id: "200" }] } } },
     ] };
     else if (path === "/amapi/raw/v1/catalog/$STOREFRONT/artists") data = { data: (url.searchParams.get("ids") ?? "").split(",").map(id => ({ id, views: { "latest-release": { data: [
       id === "100" ? album("a.new", "Fresh Album", "Skrillex", recent) : album("a.old", "Old Album", "Other", "2020-01-01"),
       ...(id === "100" ? [album("a.soon", "Coming Soon", "Skrillex", soon)] : []),
     ] } } })) };
+    else if (path === "/amapi/raw/v1/catalog/$STOREFRONT/artists/100") data = { data: [skrillex] };
+    else if (path.startsWith("/amapi/raw/v1/catalog/$STOREFRONT/artists/100/view/")) data = { data: artistViews[path.split("/").at(-1)!] ?? [] };
+    else if (path === "/amapi/raw/v1/me/library/albums/l.soma/artists") data = { data: [{ id: "r.one", type: "library-artists", relationships: { catalog: { data: [skrillex] } } }] };
     else if (path === "/amapi/raw/v1/catalog/$STOREFRONT/playlists/pl.mix/tracks") data = { data: collection.map(item => ({ id: item.id, type: "songs", attributes: item })) };
-    else if (path === "/amapi/search") data = { results: { songs: { data: [{ id: "123", type: "songs", attributes: { name: "Search result", artistName: "Artist", durationInMillis: 180000 } }] }, albums: { data: [{ id: "456", type: "albums", attributes: { name: "An album", artistName: "Artist" } }] } } };
+    else if (path === "/amapi/search" && url.searchParams.get("types") === "artists") data = { results: { artists: { data: url.searchParams.get("term") === "Skrillex" ? [skrillex] : [] } } };
+    else if (path === "/amapi/search") data = { results: { artists: { data: [skrillex] }, songs: { data: [{ id: "123", type: "songs", attributes: { name: "Search result", artistName: "Artist", durationInMillis: 180000 } }] }, albums: { data: [{ id: "456", type: "albums", attributes: { name: "An album", artistName: "Artist" } }] } } };
     else if (path === "/queue") {
       const offset = Number(url.searchParams.get("offset") ?? 0), limit = Number(url.searchParams.get("limit") ?? 100);
       data = { items: queue.slice(offset, offset + limit), position, total: queue.length };

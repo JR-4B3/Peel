@@ -46,7 +46,7 @@ describe("the rendered player", () => {
   test("shows search, tagged favourites first, playlists, and one player strip", async () => {
     const app = await setup(120, 36, "favourites");
     const frame = app.captureCharFrame();
-    expect(frame).toContain("Search songs and albums");
+    expect(frame).toContain("Search Apple Music");
     const sidebar = frame.split("\n").map(line => line.slice(0, 30)).join("\n");
     expect(sidebar.indexOf("Home")).toBeLessThan(sidebar.indexOf("Favourite Songs"));
     expect(sidebar.indexOf("Favourite Songs")).toBeLessThan(sidebar.indexOf("Background Chill"));
@@ -126,9 +126,10 @@ describe("the rendered player", () => {
     await app.mockInput.typeText("n p s r q / a song");
     expect(app.ui.search.value).toBe("n p s r q / a song");
     expect(app.calls.filter(call => call.method !== "GET")).toHaveLength(0);
-    app.mockInput.pressEnter(); await waitFor(() => app.model.items[0]?.name === "Search result");
+    app.mockInput.pressEnter(); await waitFor(() => app.model.items[1]?.name === "Search result");
     await app.flush(); expect(app.captureCharFrame()).toContain("An album");
-    await click(app, "tracks:row:0");
+    expect(app.model.items[0]).toMatchObject({ id: "100", type: "artists" });
+    await click(app, "tracks:row:1");
     await waitFor(() => app.calls.some(call => call.path === "/playback/play-item"));
     expect(app.calls.find(call => call.path === "/playback/play-item")?.body).toEqual({ id: "123", type: "songs" });
   });
@@ -178,7 +179,7 @@ describe("the rendered player", () => {
   test.each([48, 60, 80, 120])("search and essential controls remain visible at %i columns", async width => {
     const app = await setup(width, 28);
     const frame = app.captureCharFrame();
-    expect(frame).toContain("Search songs and albums");
+    expect(frame).toContain("Search Apple Music");
     for (const id of ["search", "previous", "play-pause", "next", "volume-down", "volume-up", "shuffle", "repeat"]) {
       const target = app.renderer.root.findDescendantById(id)!;
       expect(target.width).toBeGreaterThan(0);
@@ -312,6 +313,62 @@ describe("home, albums, and favourites", () => {
     await waitFor(() => app.model.status === "Removed from Favourite Songs");
     expect(app.calls.filter(call => call.path === "/library/now-playing/rating").at(-1)?.method).toBe("DELETE");
     expect(app.model.favourite).toBe(false);
+  });
+});
+
+describe("artists", () => {
+  test("an album's artist opens a page with top songs and every release shelf, and Escape returns", async () => {
+    const app = await setup(120, 36, "albums");
+    await click(app, "grid:tile:albums:0");
+    await waitFor(() => app.model.detail?.id === "l.soma" && app.model.items.length === 3); await app.flush();
+    await click(app, "collection-artist");
+    await waitFor(() => app.model.display === "artist" && !app.model.loading); await app.flush();
+    const frame = app.captureCharFrame();
+    for (const text of ["Artist", "Skrillex", "Dance", "Top songs", "Top song 1", "Albums", "Singles and EPs", "1 album", "1 single or EP"]) expect(frame).toContain(text);
+    expect(app.ui.grid.shelves.find(shelf => shelf.id === "singles")?.tiles[0].caption).toBe("CONTRABAND");
+    expect(frame).not.toContain("Live albums");
+    expect(app.model.items).toHaveLength(6);
+    expect(app.calls.some(call => call.path === "/amapi/raw/v1/me/library/albums/l.soma/artists")).toBe(true);
+    await click(app, "tracks:row:0");
+    await waitFor(() => app.calls.some(call => call.path === "/playback/play-item"));
+    expect(app.calls.find(call => call.path === "/playback/play-item")?.body).toEqual({ id: "t1", type: "songs" });
+    app.mockInput.pressEscape(); await waitFor(() => app.model.detail?.id === "l.soma");
+    expect(app.model.items).toHaveLength(3);
+  });
+
+  test("arrow keys move from top songs into the album shelves and back", async () => {
+    const app = await setup(120, 36, "albums");
+    app.ui.grid.select("l.soma"); app.mockInput.pressKey("a");
+    await waitFor(() => app.model.display === "artist" && !app.model.loading); await app.flush();
+    expect(app.ui.grid.focused).toBe(true);
+    app.mockInput.pressArrow("up"); expect(app.ui.tracks.focused).toBe(true);
+    for (let row = 0; row < 6; row++) app.mockInput.pressArrow("down");
+    expect(app.ui.grid.focused).toBe(true);
+    expect(app.ui.grid.selected()?.media.id).toBe("a.soma");
+    app.mockInput.pressArrow("down"); expect(app.ui.grid.selected()?.media.id).toBe("a.single");
+    app.mockInput.pressEnter(); await waitFor(() => app.model.detail?.id === "a.single");
+    app.mockInput.pressEscape(); await waitFor(() => app.model.display === "artist");
+    expect(app.ui.grid.focused).toBe(true); expect(app.ui.grid.selected()?.media.id).toBe("a.single");
+  });
+
+  test("the player's artist name and the Artists section open artist pages", async () => {
+    const app = await setup(120, 36);
+    await click(app, "now-playing-artist");
+    await waitFor(() => app.model.view === "artist:100" && !app.model.loading);
+    expect(app.calls.some(call => call.path === "/amapi/search")).toBe(true);
+    await app.model.open("artists"); await app.flush();
+    expect(app.captureCharFrame()).toContain("Skrillex");
+    expect(app.model.items[0]).toMatchObject({ id: "100", type: "artists", genre: "Dance" });
+    await click(app, "grid:tile:artists:0");
+    await waitFor(() => app.model.view === "artist:100" && !app.model.loading);
+    app.mockInput.pressEscape(); await waitFor(() => app.model.view === "artists");
+  });
+
+  test("an artist page fits the minimum terminal size", async () => {
+    const app = await setup(48, 24);
+    await app.model.openArtist({ id: "100", type: "artists", name: "Skrillex", artist: "", album: "", duration: 0 }); await app.flush();
+    expect(app.captureCharFrame()).toContain("Top songs");
+    expect(app.captureCharFrame()).toContain("50%");
   });
 });
 

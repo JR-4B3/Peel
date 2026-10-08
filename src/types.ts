@@ -11,6 +11,7 @@ export interface Media {
   releaseDate?: string;
   trackCount?: number;
   prerelease?: boolean;
+  genre?: string;
 }
 
 export interface Playback {
@@ -36,6 +37,9 @@ export interface Home {
   updated?: number;
 }
 
+export interface ArtistShelf { id: string; title: string; items: Media[] }
+export interface ArtistPage { artist: Media; top: Media[]; shelves: ArtistShelf[] }
+
 export interface Player {
   snapshot(): Promise<Playback>;
   recent(): Promise<Media[]>;
@@ -47,6 +51,9 @@ export interface Player {
   songs(id?: string, offset?: number): Promise<Page>;
   album(id: string, offset?: number): Promise<Page>;
   albums(offset?: number): Promise<Page>;
+  artists(offset?: number): Promise<Page>;
+  artistId(item: Media): Promise<string | undefined>;
+  artist(id: string): Promise<ArtistPage>;
   queue(offset?: number): Promise<Page>;
   queuePosition(): Promise<{ position: number; total: number }>;
   playCollectionTrack(collection: { id: string; type: string }, track: Media, index: number): Promise<void>;

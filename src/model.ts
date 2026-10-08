@@ -1,12 +1,12 @@
 import { EventEmitter } from "node:events";
 import type { Preferences } from "./config";
 import { defaults } from "./config";
-import { stopped, type Home, type Media, type Page, type Playback, type Player } from "./types";
+import { stopped, type ArtistShelf, type Home, type Media, type Page, type Playback, type Player } from "./types";
 
 export interface Navigation { id: string; name: string; media?: Media; hidden?: boolean }
 export interface HomeStore { read(): Promise<Home | undefined>; write(home: Home): Promise<void> }
-type Display = "home" | "grid" | "list";
-interface Snapshot { view: string; title: string; items: Media[]; more: boolean; detail?: Media; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string } }
+type Display = "home" | "grid" | "list" | "artist";
+interface Snapshot { view: string; title: string; items: Media[]; more: boolean; detail?: Media; shelves: ArtistShelf[]; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string } }
 
 // New releases need one request per hundred library artists, so reuse them for a while.
 const releasesFresh = 6 * 60 * 60 * 1000;
@@ -23,6 +23,8 @@ export class Model extends EventEmitter {
   home: Home = { recent: [], releases: [] };
   homeLoading = { recent: false, releases: false };
   detail?: Media;
+  // An artist page's albums. Its top songs are the items.
+  shelves: ArtistShelf[] = [];
   history: Snapshot[] = [];
   loading = false;
   more = false;
@@ -41,7 +43,9 @@ export class Model extends EventEmitter {
   constructor(readonly player: Player, public preferences: Preferences = structuredClone(defaults), private save: (value: Preferences) => Promise<void> = async () => {}, private store: HomeStore = memoryStore) { super(); }
   changed() { this.emit("change"); }
 
-  get display(): Display { return this.view === "home" ? "home" : this.view === "albums" ? "grid" : "list"; }
+  get display(): Display {
+    return this.view === "home" ? "home" : this.view === "albums" || this.view === "artists" ? "grid" : this.view.startsWith("artist:") ? "artist" : "list";
+  }
 
   // Home stays first. The layout editor arranges the entries after it.
   navigation(includeHidden = false): Navigation[] {
@@ -52,7 +56,7 @@ export class Model extends EventEmitter {
     const entries: Navigation[] = [
       { id: "favourites", name: "Favourite Songs", media: this.playlists.find(p => p.favourite) },
       ...this.playlists.filter(p => !p.favourite).map(p => ({ id: `playlist:${p.id}`, name: p.name, media: p })),
-      { id: "songs", name: "All songs" }, { id: "albums", name: "Albums" }, { id: "queue", name: "Queue" },
+      { id: "songs", name: "All songs" }, { id: "albums", name: "Albums" }, { id: "artists", name: "Artists" }, { id: "queue", name: "Queue" },
     ];
     const rank = (id: string) => { const index = this.preferences.order.indexOf(id); return index < 0 ? 1e6 : index; };
     entries.sort((a, b) => rank(a.id) - rank(b.id));
@@ -92,6 +96,7 @@ export class Model extends EventEmitter {
   async open(id: string) {
     this.collection = undefined;
     this.detail = undefined;
+    this.shelves = [];
     this.history = [];
     this.view = id;
     this.layout = false;
@@ -109,6 +114,7 @@ export class Model extends EventEmitter {
       this.loader = offset => this.player.songs(navigation.media!.id, offset);
       this.collection = { id: navigation.media.id, type: navigation.media.type };
     } else if (id === "albums") this.loader = offset => this.player.albums(offset);
+    else if (id === "artists") this.loader = offset => this.player.artists(offset);
     else if (id === "queue") this.loader = offset => this.player.queue(offset);
     else this.loader = offset => this.player.songs(undefined, offset);
     await this.load(false);
@@ -139,8 +145,8 @@ export class Model extends EventEmitter {
 
   // Albums and playlists open as their own view. Back returns to the previous one.
   async openCollection(item: Media) {
-    this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, loader: this.loader, collection: this.collection });
-    this.view = `collection:${item.type}:${item.id}`; this.title = item.name; this.detail = item; this.layout = false;
+    this.remember();
+    this.view = `collection:${item.type}:${item.id}`; this.title = item.name; this.detail = item; this.layout = false; this.shelves = [];
     this.collection = { id: item.id, type: item.type };
     this.loader = item.type === "library-playlists" ? offset => this.player.songs(item.id, offset)
       : item.type === "playlists" ? offset => this.player.playlist(item.id, offset)
@@ -148,12 +154,50 @@ export class Model extends EventEmitter {
     await this.load(false);
   }
 
+  private remember() {
+    this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection });
+  }
+
+  // The artist of a song, album, or artist. Back returns to the page it was opened from.
+  async openArtist(item: Media) {
+    const artist = item.type.includes("artists");
+    const name = artist ? item.name : item.artist;
+    if (!name || item.type.includes("playlists")) { this.status = "Playlists have no artist page."; this.changed(); return; }
+    if (this.display === "artist" && (this.detail?.id === item.id || this.detail?.name === name)) return;
+    this.remember();
+    const generation = ++this.generation;
+    this.view = `artist:${artist ? item.id : name}`; this.title = name; this.layout = false;
+    this.detail = artist ? item : { id: "", type: "artists", name, artist: "", album: "", duration: 0 };
+    this.collection = undefined; this.loader = undefined;
+    this.items = []; this.shelves = []; this.more = false; this.loading = true; this.changed();
+    try {
+      const id = await this.player.artistId(item);
+      if (generation !== this.generation) return;
+      if (!id) { this.status = `Apple Music has no artist page for ${name}.`; return; }
+      // A collaboration can lead back to the artist page it was opened from.
+      if (this.history.at(-1)?.view === `artist:${id}`) { this.back(); return; }
+      const page = await this.player.artist(id);
+      if (generation !== this.generation) return;
+      this.view = `artist:${id}`; this.title = page.artist.name; this.detail = page.artist;
+      this.items = page.top; this.shelves = page.shelves;
+      this.status = page.artist.name;
+    } catch (error) { if (generation === this.generation) this.fail(error); }
+    finally { if (generation === this.generation) { this.loading = false; this.changed(); } }
+  }
+
+  // The playing song as an item, so its artist can be opened.
+  get playing(): Media | undefined {
+    const song = this.playback.nowPlaying;
+    if (!song?.artistName) return undefined;
+    return { id: song.playParams?.catalogId ?? song.playParams?.id ?? "", type: "songs", name: song.name ?? "", artist: song.artistName, album: song.albumName ?? "", duration: 0 };
+  }
+
   back(): Media | undefined {
     const previous = this.history.pop();
     if (!previous) return undefined;
     const closed = this.detail;
     this.generation++; this.loading = false;
-    ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, loader: this.loader, collection: this.collection } = previous);
+    ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection } = previous);
     this.changed();
     return closed;
   }
@@ -162,6 +206,7 @@ export class Model extends EventEmitter {
     if (!term.trim()) return;
     this.collection = undefined;
     this.detail = undefined;
+    this.shelves = [];
     this.history = [];
     const generation = ++this.generation;
     this.layout = false; this.view = "search"; this.title = `Search: ${term}`;
@@ -190,6 +235,7 @@ export class Model extends EventEmitter {
   }
 
   async activate(item: Media) {
+    if (item.type.includes("artists")) return this.openArtist(item);
     if (item.type.includes("albums") || item.type.includes("playlists")) return this.openCollection(item);
     const key = JSON.stringify([this.view, item.type, item.id, item.queueIndex]);
     const previous = this.activation;

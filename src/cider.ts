@@ -1,4 +1,4 @@
-import type { Media, Page, Playback, Player } from "./types";
+import type { ArtistPage, Media, Page, Playback, Player } from "./types";
 
 type Resource = Record<string, any>;
 interface Envelope { data: any; meta?: { offset: number; limit: number; total?: number }; error?: string | { code: string; message?: string } }
@@ -12,12 +12,17 @@ export function media(item: Resource, type = "songs"): Media {
     duration: (attrs.durationInMillis ?? attrs.durationMs ?? 0) / 1000,
     favourite: attrs.tags?.includes("favorited") ?? false,
     artwork: attrs.artwork?.url, releaseDate: attrs.releaseDate, trackCount: attrs.trackCount,
-    prerelease: attrs.isPrerelease,
+    prerelease: attrs.isPrerelease, genre: attrs.genreNames?.[0],
   };
 }
 
 const collections = ["albums", "playlists", "library-albums", "library-playlists"];
 const releaseWindow = 120 * 24 * 60 * 60 * 1000;
+// Apple's artist views, in the order the artist page shows them.
+const artistViews = [
+  ["full-albums", "Albums"], ["singles", "Singles and EPs"], ["live-albums", "Live albums"],
+  ["compilation-albums", "Compilations"], ["appears-on-albums", "Appears on"],
+];
 
 export class Cider implements Player {
   constructor(readonly base = process.env.CIDER_API_BASE ?? "http://127.0.0.1:10767", private token = "") {}
@@ -103,8 +108,10 @@ export class Cider implements Player {
 
   async search(term: string): Promise<Media[]> {
     if (!term.trim()) return [];
-    const response = (await this.request(`/amapi/search?${new URLSearchParams({ term, types: "songs,albums", limit: "25" })}`)).data;
-    return ["songs", "albums"].flatMap(type => (response.results?.[type]?.data ?? []).map((item: Resource) => media(item, type)));
+    const response = (await this.request(`/amapi/search?${new URLSearchParams({ term, types: "artists,songs,albums", limit: "25" })}`)).data;
+    // A few artists lead the results. More would push the songs out of view.
+    const results = (type: string) => (response.results?.[type]?.data ?? []).map((item: Resource) => media(item, type));
+    return [...results("artists").slice(0, 3), ...results("songs"), ...results("albums")];
   }
 
   private async page(path: string, type: string, offset: number, limit = 100): Promise<Page> {
@@ -124,6 +131,68 @@ export class Cider implements Player {
     const response = (await this.request(`/amapi/raw/v1/catalog/$STOREFRONT/albums/${encodeURIComponent(id)}/tracks?offset=${offset}&limit=100`)).data;
     return { items: (response.data ?? []).map((item: Resource) => media(item)), more: !!response.next };
   }
+  // Library artists carry their catalog artist, which has the photo and the artist page.
+  async artists(offset = 0): Promise<Page> {
+    // Pagination links drop the include parameter, so request each offset explicitly.
+    const response = await this.raw(`v1/me/library/artists?limit=100&offset=${offset}&include=catalog`);
+    const items = (response.data ?? []).map((artist: Resource) => {
+      const catalog = artist.relationships?.catalog?.data?.[0];
+      return catalog?.attributes ? { ...media(catalog, "artists"), name: artist.attributes?.name ?? catalog.attributes.name } : media(artist, "library-artists");
+    });
+    return { items, more: !!response.next };
+  }
+
+  // Songs and albums link to their artists. Library items reach them through the
+  // catalog. Uploads and other unlinked items fall back to a search by name.
+  async artistId(item: Media): Promise<string | undefined> {
+    if (item.type === "artists") return item.id;
+    const name = item.type === "library-artists" ? item.name : item.artist;
+    let artists: Resource[] = [];
+    try {
+      if (item.type === "library-artists") artists = (await this.raw(`v1/me/library/artists/${encodeURIComponent(item.id)}/catalog`)).data ?? [];
+      else if (/^\d+$/.test(item.id)) artists = (await this.raw(`v1/catalog/$STOREFRONT/${item.type.includes("album") ? "albums" : "songs"}/${item.id}/artists`)).data ?? [];
+      else if (/^[il]\./.test(item.id)) {
+        const linked = (await this.raw(`v1/me/library/${item.id.startsWith("l.") ? "albums" : "songs"}/${encodeURIComponent(item.id)}/artists?include=catalog`)).data ?? [];
+        artists = linked.map((artist: Resource) => artist.relationships?.catalog?.data?.[0]).filter(Boolean);
+      }
+    } catch {}
+    // Collaborations list every artist. Prefer the one named in the credit.
+    const linked = artists.find(artist => artist.attributes?.name === name) ?? artists[0];
+    if (linked) return String(linked.id);
+    if (!name) return undefined;
+    // Cider's raw proxy rejects paths containing "..", which some artist names do.
+    const found = (await this.request(`/amapi/search?${new URLSearchParams({ term: name, types: "artists", limit: "5" })}`)).data.results?.artists?.data ?? [];
+    return (found.find((artist: Resource) => artist.attributes?.name?.toLowerCase() === name.toLowerCase()) ?? found[0])?.id;
+  }
+
+  // Apple has no per-listener play counts. Top songs are the artist's most played songs on Apple Music.
+  async artist(id: string): Promise<ArtistPage> {
+    const path = `v1/catalog/$STOREFRONT/artists/${encodeURIComponent(id)}`;
+    const [info, top, ...views] = await Promise.all([
+      this.raw(path), this.raw(`${path}/view/top-songs?limit=20`),
+      // A view the storefront does not offer must not hide the rest of the page.
+      ...artistViews.map(([view]) => this.view(`${path}/view/${view}`).catch(() => [])),
+    ]);
+    const artist = info.data?.[0];
+    if (!artist) throw new Error("Apple Music returned no artist page.");
+    return {
+      artist: media(artist, "artists"),
+      top: (top.data ?? []).map((item: Resource) => media(item)),
+      shelves: artistViews.map(([id, title], index) => ({ id, title, items: views[index].map((item: Resource) => media(item, "albums")) })),
+    };
+  }
+
+  // View links drop the limit, so request each offset explicitly. Three pages cover nearly every discography.
+  private async view(path: string): Promise<Resource[]> {
+    const items: Resource[] = [];
+    for (let offset = 0; offset < 300; offset += 100) {
+      const response = await this.raw(`${path}?limit=100&offset=${offset}`);
+      items.push(...response.data ?? []);
+      if (!response.next) break;
+    }
+    return items;
+  }
+
   queue(offset = 0) { return this.page("/queue", "songs", offset); }
   async queuePosition(): Promise<{ position: number; total: number }> { return (await this.request("/queue/position")).data; }
   async command(path: string, body: unknown = {}, method = "POST") { await this.request(path, body, method); }

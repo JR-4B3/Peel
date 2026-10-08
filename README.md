@@ -6,8 +6,9 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 
 - A labelled search input stays visible in wide and narrow terminals.
 - Home opens first. It shows albums and playlists you played recently, and new releases from artists you marked as favourites in Apple Music.
-- Favourite Songs follows Home, above your playlists. All songs, Albums, and Queue follow them.
+- Favourite Songs follows Home, above your playlists. All songs, Albums, Artists, and Queue follow them.
 - Albums shows your library as a grid of covers. Selecting an album or playlist opens a page with its cover and songs.
+- Artists shows your library's artists as a grid of photos. An artist page lists their top songs, then rows of their albums, singles and EPs, live albums, compilations, and albums they appear on.
 - The layout editor saves sidebar order and hidden entries. Search and the player stay visible.
 - Playback controls use icons with their keyboard shortcut beside them when the terminal is at least 100 columns wide. There is one player strip at the bottom with the current cover and a favourite heart.
 - Mouse clicks and keyboard shortcuts control the same actions.
@@ -44,7 +45,8 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Shuffle / repeat | `s` / `r` | Shuffle / Repeat |
 | Navigate music | Tab or Shift+Tab, then arrow keys and Enter | Click a playlist, cover, or song |
 | Seek while covers have focus | Shift+Left / Shift+Right | Click the progress bar |
-| Back from an album or playlist | Escape or Backspace | Back |
+| Open an artist | `a` on a highlighted song or album, otherwise the playing song's artist | The artist name on an album page or in the player |
+| Back from an album, playlist, or artist | Escape or Backspace | Back |
 | Favourite the current song | `f` | Heart |
 | Load another page | `m`, or move to the last row of covers | Scroll down |
 | Edit sidebar layout | `l` | Layout |
@@ -58,7 +60,9 @@ Plain playback shortcut letters remain text while the search input has focus. Qu
 
 Selecting a song in a playlist or album starts that song directly, then adds its collection and restores its position in the displayed order. The collection's first song never starts as an intermediate step. Next and Previous continue through the collection. A double-click on the same song starts it once. Shuffle can change the order afterwards. Manual Next and Previous still change tracks in repeat-one mode and preserve the repeat setting.
 
-Left and Right move between covers on Home and Albums, and seek in song lists. On Home, each row scrolls sideways. Click the arrows beside a row's title to page through it.
+Left and Right move between covers on Home, Albums, Artists, and artist pages, and seek in song lists. On Home and artist pages, each row scrolls sideways. Click the arrows beside a row's title to page through it. On an artist page, Down from the last top song moves into the album rows, and Up from the first row returns to the songs.
+
+Apple Music does not report how often you played a song, so an artist page shows Apple's top songs for that artist, its most played songs across Apple Music. Selecting one plays that song. Search shows up to three matching artists above the songs and albums.
 
 The heart sets Apple Music's favourite rating through Cider, then reads the stored rating back before it changes. Apple Music may also add the song to your library.
 
@@ -68,7 +72,7 @@ Layout changes save to `~/.config/peel/layout.json`. Home is always first and is
 
 Peel keeps Home's shelves and downloaded covers in `~/.cache/peel`. `XDG_CACHE_HOME` and `PEEL_CACHE_DIR` change that location. New releases come from the latest release of each library artist with Apple's favourite flag, from the last 120 days or not yet released, newest first. Peel checks again after six hours, because the check reads every library artist. Recently played reloads each time Home opens.
 
-Peel targets the v2 API in the installed Cider 4.0.17 build. Search uses Cider's read-only Apple Music proxy. Favourite Songs uses Apple's `favorited` playlist tag, so it also works when that playlist has a translated name. Library views load another page on demand.
+Peel targets the v2 API in the installed Cider 4.0.17 build. Search uses Cider's read-only Apple Music proxy. Artist pages use the catalog artist linked to a song or album. Library items without a catalog link, such as uploads, fall back to a search for the artist's name, so a collaboration credit may open the first matching artist. Favourite Songs uses Apple's `favorited` playlist tag, so it also works when that playlist has a translated name. Library views load another page on demand.
 
 Cider must keep running. Replacing its interface does not remove the playback engine's resource use. Playback format and subscription restrictions remain those of the running Cider engine.
 

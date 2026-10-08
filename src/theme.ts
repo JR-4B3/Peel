@@ -20,6 +20,7 @@ export const icon = {
   playlist: "\u{F0CB8}",
   songs: "\u{F0387}",
   album: "\u{F0025}",
+  artist: "\u{F0803}",
   queue: "\u{F0411}",
   search: "\u{F0349}",
   play: "\u{F040A}",
