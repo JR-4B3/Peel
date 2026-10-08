@@ -131,6 +131,17 @@ class ClickList extends BoxRenderable {
   }
 }
 
+// Shortened names end in an ellipsis, so a cut-off name does not read as a complete one.
+function fit(text: string, width: number) {
+  if (Bun.stringWidth(text) <= width) return text;
+  let result = "";
+  for (const char of text) {
+    if (Bun.stringWidth(result + char) > width - 1) break;
+    result += char;
+  }
+  return result.trimEnd() + "…";
+}
+
 // Covers laid out as shelves that scroll sideways (Home), or as a wrapping grid (Albums).
 class CoverGrid extends BoxRenderable {
   shelves: Shelf[] = [];
@@ -151,6 +162,7 @@ class CoverGrid extends BoxRenderable {
   // Covers shrink until a whole tile row and its heading fit. Cells are about twice as tall as wide.
   private get headings() { return this.shelves.some(shelf => shelf.title) && this.height >= 9; }
   private get coverWidth() {
+    if (this.wrap) return this.gridCover();
     let width = this.width >= 120 ? 16 : this.width >= 80 ? 14 : this.width >= 56 ? 12 : 10;
     const tile = (cover: number) => cover / 2 + 4 + (this.notes ? 1 : 0) + (this.headings ? 1 : 0);
     // Home keeps every shelf on screen while covers stay readable.
@@ -159,7 +171,29 @@ class CoverGrid extends BoxRenderable {
     while (width > 4 && tile(width) > this.height) width -= 2;
     return width;
   }
+  // A wrapping grid shows only whole rows. Pick the cover size whose rows and
+  // columns fill most of the panel, preferring larger covers when the fit is close.
+  // Keep three columns where they fit, so narrow windows still show a choice.
+  private gridCover() {
+    const extra = 4 + (this.notes ? 1 : 0);
+    const minimum = Math.min(3, Math.floor((this.width - 1) / 13));
+    let best = 0, score = 0;
+    for (let width = 10; width <= 24; width += 2) {
+      const columns = Math.floor((this.width - 1) / (width + 3)), rows = Math.floor(this.height / (width / 2 + extra));
+      const used = columns * (width + 2) * rows * (width / 2 + extra) / (this.width * this.height);
+      if (columns >= Math.max(1, minimum) && rows && used > score - 0.03) { best = width; score = Math.max(score, used); }
+    }
+    if (best) return best;
+    let width = 10;
+    while (width > 4 && width / 2 + extra > this.height) width -= 2;
+    return width;
+  }
   private get tileWidth() { return this.coverWidth + 2; }
+  // The space left after the last column is shared between the columns.
+  private get tileGap() {
+    const columns = this.columns;
+    return columns > 1 ? Math.min(6, Math.max(1, Math.floor((this.width - 2 - columns * this.tileWidth) / (columns - 1)))) : 1;
+  }
   private get notes() { return this.shelves.some(shelf => shelf.tiles.some(tile => tile.note)); }
   private get tileHeight() { return this.coverWidth / 2 + 4 + (this.notes ? 1 : 0); }
   get columns() { return Math.max(1, Math.floor(this.width / (this.tileWidth + 1))); }
@@ -226,7 +260,7 @@ class CoverGrid extends BoxRenderable {
   draw() {
     if (!this.shelves || this.width <= 0) return;
     for (const child of this.getChildren()) { this.remove(child); child.destroyRecursively(); }
-    const columns = this.columns, tileWidth = this.tileWidth, tileHeight = this.tileHeight;
+    const columns = this.columns, tileWidth = this.tileWidth, tileHeight = this.tileHeight, gap = this.tileGap;
     // Lay out every block first, then scroll so the selected tile row is whole.
     type Block = { y: number; height: number; draw: (top: number) => void; shelf: number; tiles?: number[] };
     const blocks: Block[] = [];
@@ -254,7 +288,7 @@ class CoverGrid extends BoxRenderable {
         ? Array.from({ length: Math.ceil(shelf.tiles.length / columns) }, (_, row) => shelf.tiles.slice(row * columns, row * columns + columns).map((_, column) => row * columns + column))
         : [Array.from({ length: Math.min(columns, shelf.tiles.length) }, (_, column) => (this.starts.get(shelf.id) ?? 0) + column)];
       for (const indexes of rows) {
-        blocks.push({ y, height: tileHeight, shelf: shelfIndex, tiles: indexes, draw: top => indexes.forEach((index, column) => this.drawTile(shelf, shelfIndex, index, 1 + column * (tileWidth + 1), top)) });
+        blocks.push({ y, height: tileHeight, shelf: shelfIndex, tiles: indexes, draw: top => indexes.forEach((index, column) => this.drawTile(shelf, shelfIndex, index, 1 + column * (tileWidth + gap), top)) });
         y += tileHeight;
       }
       y += 1;
@@ -267,6 +301,8 @@ class CoverGrid extends BoxRenderable {
       if (current.y + current.height > this.scrollTop + this.height) this.scrollTop = current.y + current.height - this.height;
     }
     this.scrollTop = Math.max(0, Math.min(this.scrollTop, Math.max(0, y - 1 - this.height)));
+    // Start at a whole row. A partly hidden row would leave a blank band at the top.
+    this.scrollTop = blocks.find(block => block.y >= this.scrollTop)?.y ?? this.scrollTop;
     for (const block of blocks) {
       if (block.y >= this.scrollTop && block.y + block.height <= this.scrollTop + this.height) block.draw(block.y - this.scrollTop);
     }
@@ -299,8 +335,8 @@ class CoverGrid extends BoxRenderable {
       },
     });
     box.add(new Cover(this.ctx, { width: this.coverWidth, height: this.coverWidth / 2, art: tile.media.artwork, glyph: glyph(tile.media) }));
-    box.add(new TextRenderable(this.ctx, { content: tile.caption, fg: colour.text, attributes: selected ? 1 : 0, height: 1, width: this.coverWidth, truncate: true, selectable: false }));
-    box.add(new TextRenderable(this.ctx, { content: tile.detail, fg: colour.muted, height: 1, width: this.coverWidth, truncate: true, selectable: false }));
+    box.add(new TextRenderable(this.ctx, { content: fit(tile.caption, this.coverWidth), fg: colour.text, attributes: selected ? 1 : 0, height: 1, width: this.coverWidth, truncate: true, selectable: false }));
+    box.add(new TextRenderable(this.ctx, { content: fit(tile.detail, this.coverWidth), fg: colour.muted, height: 1, width: this.coverWidth, truncate: true, selectable: false }));
     if (tile.note) box.add(new TextRenderable(this.ctx, { content: tile.note, fg: tile.noteColour ?? colour.faint, height: 1, width: this.coverWidth, truncate: true, selectable: false }));
     this.add(box);
   }
