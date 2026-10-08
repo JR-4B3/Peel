@@ -1,6 +1,6 @@
 # Peel
 
-Peel is an OpenTUI interface for Apple Music on Linux. Cider handles sign-in and audio playback. Peel handles search, your music, and player controls. It uses Cider's local API, so it does not need a separate Apple developer membership. You need Cider and an Apple Music subscription.
+Peel is an OpenTUI interface for Apple Music on Linux. Cider handles sign-in and audio playback. Peel reads search, your library, Home, and artist pages from Apple Music directly, so they appear while Cider is still starting. It uses Cider's local API for playback and the token of Apple's own web player for the library, so it does not need a separate Apple developer membership. You need Cider and an Apple Music subscription.
 
 The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34ccfee77448`:
 
@@ -27,7 +27,7 @@ bun start
 
 For a `peel` command and a Peel entry in your application menu, run `bash scripts/install-local.sh` on the playback PC. Then use `peel --connect` and `peel`, or open Peel from the application menu. The launcher is installed to `~/.local/bin` and runs this checkout. The application entry opens the interface in Ghostty when available, then Alacritty or Konsole, otherwise your desktop's default terminal.
 
-Approve Peel's request in Cider. Peel requests playback, queue, library, and audio permissions. It does not request your Apple credentials. The token is saved to `~/.config/peel/auth.json` with private file permissions.
+Approve Peel's request in Cider. Peel requests playback, queue, library, audio, and account permissions. The account permission lets Peel copy Cider's Apple Music user token, which Peel uses to read your library from Apple. It does not request your Apple password. Cider's token is saved to `~/.config/peel/auth.json` and the Apple Music user token to `~/.config/peel/apple.json`, both with private file permissions. If you connected Peel before it read the library directly, run `bun run connect` once more to grant the account permission. `APPLE_MUSIC_USER_TOKEN` overrides the saved user token.
 
 If the consent request times out or Cider closes the connection, run `bun run connect` again and approve the dialog promptly. Existing application tokens can also be supplied through `CIDER_API_TOKEN`. Generate one in Cider's external application access settings.
 
@@ -72,7 +72,7 @@ Layout changes save to `~/.config/peel/layout.json`. Home is always first and is
 
 Peel keeps Home's shelves and downloaded covers in `~/.cache/peel`. `XDG_CACHE_HOME` and `PEEL_CACHE_DIR` change that location. New releases come from the latest release of each library artist with Apple's favourite flag, from the last 120 days or not yet released, newest first. Peel checks again after six hours, because the check reads every library artist. Recently played reloads each time Home opens.
 
-Peel targets the v2 API in the installed Cider 4.0.17 build. Search uses Cider's read-only Apple Music proxy. Artist pages use the catalog artist linked to a song or album. Library items without a catalog link, such as uploads, fall back to a search for the artist's name, so a collaboration credit may open the first matching artist. Favourite Songs uses Apple's `favorited` playlist tag, so it also works when that playlist has a translated name. Library views load another page on demand.
+Peel targets the v2 API in the installed Cider 4.0.17 build for playback, the queue, and the favourite heart. Everything else comes from `api.music.apple.com`. Peel reads the developer token from the script of Apple's web player at music.apple.com and caches it in `~/.cache/peel/apple-developer-token.json` until a day before it expires. When Apple rejects it, Peel fetches it again once. When Apple rejects the user token, Peel copies a fresh one from Cider if Cider is running. Apple does not document this use of its web player's token, and Apple can change or revoke it. Artist pages use the catalog artist linked to a song or album. Library items without a catalog link, such as uploads, fall back to a search for the artist's name, so a collaboration credit may open the first matching artist. Favourite Songs uses Apple's `favorited` playlist tag, so it also works when that playlist has a translated name. Library views load another page on demand.
 
 Cider must keep running. Replacing its interface does not remove the playback engine's resource use. Playback format and subscription restrictions remain those of the running Cider engine.
 
@@ -82,7 +82,7 @@ The finished player runs entirely on the main PC. That PC has its own checkout, 
 
 Sign in to Apple Music in Cider. Peel uses that signed-in session to show your personal library and play music. Your Apple credentials stay in Cider. If Apple expires the session, open Cider to sign in again.
 
-Opening Peel starts Cider if it is stopped, waits for its local API, and hides its window through the tray. Cider stays running when you quit Peel. Reopening Peel reuses the running Cider process. Linux startup uses the desktop's systemd user manager and requires `systemd-run`, `pgrep`, `busctl`, and `gdbus`. Automatic startup applies to the default local API on port 10767. A custom remote API must already be running.
+Opening Peel shows Home and your playlists at once and starts Cider in the background if it is stopped. Peel waits for its local API and hides its window through the tray. The player strip shows Starting until Cider answers. A song or playback control selected before then plays once Cider is ready. Until Cider runs, the Queue is empty. Cider stays running when you quit Peel. Reopening Peel reuses the running Cider process. Linux startup uses the desktop's systemd user manager and requires `systemd-run`, `pgrep`, `busctl`, and `gdbus`. Automatic startup applies to the default local API on port 10767. A custom remote API must already be running.
 
 On main's Niri desktop, Peel installs a startup rule before launching Cider. The rule puts Cider on a temporary inactive workspace, prevents focus, and makes its window transparent, including in the workspace overview. After Cider hides to the tray, Peel clears the rule and removes the temporary named workspace. Your existing desktop configuration stays in place, with a backup at `~/.config/niri/config.kdl.before-peel` and an include for `peel-cider.kdl`. Other desktops currently hide Cider after startup and may show its window briefly.
 

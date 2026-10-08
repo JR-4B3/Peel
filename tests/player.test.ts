@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
+import { AppleMusic } from "../src/apple";
 import { Cider } from "../src/cider";
 import { Model } from "../src/model";
 import { PeelUI } from "../src/ui";
@@ -22,7 +23,7 @@ async function setup(width = 120, height = 36, view?: string, cached?: Home) {
   const setup = await createTestRenderer({ width, height }); cleanup.push(() => setup.renderer.destroy());
   const saved: unknown[] = [];
   const stored: Home[] = [];
-  const model = new Model(api.player, structuredClone(defaults), async value => { saved.push(structuredClone(value)); },
+  const model = new Model(api.library, api.player, structuredClone(defaults), async value => { saved.push(structuredClone(value)); },
     { read: async () => cached, write: async value => { stored.push(structuredClone(value)); } });
   const ui = new PeelUI(setup.renderer, model); cleanup.push(() => ui.dispose());
   await model.start(); await model.releases;
@@ -205,20 +206,50 @@ describe("the rendered player", () => {
     await click(app, "play-pause"); await waitFor(() => app.model.playback.state === "playing");
   });
 
-  test("disconnected player reports the required connection instead of claiming playback", async () => {
+  test("an unauthorised Cider still shows the library, and playing reports the required connection", async () => {
     const setup = await createTestRenderer({ width: 90, height: 28 }); cleanup.push(() => setup.renderer.destroy());
     const api = fixture(); cleanup.push(() => api.server.stop(true));
-    const model = new Model(new Cider(`http://127.0.0.1:${api.server.port}`, "wrong-token"));
+    const model = new Model(api.library, new Cider(`http://127.0.0.1:${api.server.port}`, "wrong-token"));
     const ui = new PeelUI(setup.renderer, model); cleanup.push(() => ui.dispose());
     await model.start(); await setup.flush();
-    expect(setup.captureCharFrame()).toContain("Disconnected");
-    expect(model.status).toContain("bun run connect");
+    expect(model.playlists.map(item => item.name)).toContain("Background Chill");
+    expect(setup.captureCharFrame()).toContain("Stopped");
+    await click(setup, "play-pause");
+    await waitFor(() => model.status.includes("bun run connect"));
+    expect(model.connected).toBe(false);
+  });
+
+  test("browsing loads while Cider starts, and the first song waits for Cider once", async () => {
+    const api = fixture(); cleanup.push(() => api.server.stop(true));
+    const model = new Model(api.library, api.player);
+    let wakes = 0, open!: () => void;
+    const ready = new Promise<void>(done => { open = done; });
+    model.wake = async () => { wakes++; await ready; };
+    // Cider has not opened its API yet.
+    const snapshot = api.player.snapshot.bind(api.player);
+    let up = false;
+    api.player.snapshot = () => up ? snapshot() : Promise.reject(new Error("Cannot reach Cider."));
+    await model.start();
+    expect(model.playlists.length).toBe(2);
+    expect(model.home.recent.length).toBeGreaterThan(0);
+    expect(model.connected).toBe(false);
+    expect(model.status).not.toContain("Cannot reach Cider");
+    await model.open("songs");
+    const first = model.activate(model.items[0]!), second = model.act("/playback/next");
+    await Bun.sleep(20);
+    expect(model.starting).toBe(true);
+    expect(api.calls.some(call => call.path === "/playback/play-item")).toBe(false);
+    up = true; open();
+    await Promise.all([first, second]);
+    expect(wakes).toBe(1);
+    expect(model.connected).toBe(true);
+    expect(api.calls.filter(call => call.path === "/playback/play-item" || call.path === "/playback/next").map(call => call.path)).toEqual(["/playback/play-item", "/playback/next"]);
   });
 });
 
 test("collection queue construction waits for the selected decoder to begin playback", async () => {
   const api = fixture({ waitForDecoder: true }); cleanup.push(() => api.server.stop(true));
-  const items = await api.player.songs("p.favourites");
+  const items = await api.library.songs("p.favourites");
   const starting = api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, items.items[1], 1);
   await waitFor(() => api.calls.some(call => call.path === "/playback") && api.playback.nowPlaying?.name === "Selected song");
   expect(api.playback.time.currentTime).toBe(0);
@@ -227,6 +258,21 @@ test("collection queue construction waits for the selected decoder to begin play
   await starting;
   expect(api.audible).toEqual(["i.selected"]);
   expect(await api.player.queuePosition()).toEqual({ position: 1, total: 3 });
+});
+
+test("Apple Music renews a rejected developer token once and a rejected user token from Cider", async () => {
+  const api = fixture(); cleanup.push(() => api.server.stop(true));
+  // Like the real cache, a refreshed developer token is kept for later requests.
+  const refreshes: boolean[] = [];
+  let current = "stale";
+  const library = new AppleMusic("expired", {
+    base: api.library.base, developerToken: async refresh => { refreshes.push(refresh); if (refresh) current = "dev-token"; return current; },
+    renewUser: async () => "user-token",
+  });
+  expect((await library.playlists()).length).toBe(2);
+  expect(refreshes).toEqual([false, true, false]);
+  const rejected = new AppleMusic("expired", { base: api.library.base, developerToken: async () => "dev-token" });
+  await expect(rejected.playlists()).rejects.toThrow("bun run connect");
 });
 
 test("layout preferences survive a restart and use private file permissions", async () => {
@@ -239,10 +285,10 @@ test("layout preferences survive a restart and use private file permissions", as
 
 test("a slow earlier search cannot overwrite a later search", async () => {
   const api = fixture(); cleanup.push(() => api.server.stop(true));
-  const player = api.player;
+  const library = api.library;
   let resolve!: (items: Media[]) => void;
-  player.search = term => term === "old" ? new Promise(done => { resolve = done; }) : Promise.resolve([{ id: "new", type: "songs", name: "New result", artist: "", album: "", duration: 0 }]);
-  const model = new Model(player);
+  library.search = term => term === "old" ? new Promise(done => { resolve = done; }) : Promise.resolve([{ id: "new", type: "songs", name: "New result", artist: "", album: "", duration: 0 }]);
+  const model = new Model(library, api.player);
   const old = model.search("old"); await model.search("new"); resolve([{ id: "old", type: "songs", name: "Old result", artist: "", album: "", duration: 0 }]); await old;
   expect(model.items[0].id).toBe("new");
 });
@@ -263,7 +309,7 @@ describe("home, albums, and favourites", () => {
     const app = await setup(120, 36, undefined, cached);
     expect(app.captureCharFrame()).toContain("Cached");
     expect(app.model.home.releases.map(item => item.id)).toEqual(["a.cached"]);
-    expect(app.calls.some(call => call.path === "/amapi/raw/v1/me/library/artists")).toBe(false);
+    expect(app.calls.some(call => call.path === "/v1/me/library/artists")).toBe(false);
     expect(app.model.home.recent.map(item => item.id)).toEqual(["a.soma", "pl.mix"]);
   });
 
@@ -288,7 +334,7 @@ describe("home, albums, and favourites", () => {
     app.ui.grid.select("pl.mix"); app.mockInput.pressEnter();
     await waitFor(() => app.model.items.length === 3);
     expect(app.model.title).toBe("Favourites Mix");
-    expect(app.calls.some(call => call.path === "/amapi/raw/v1/catalog/$STOREFRONT/playlists/pl.mix/tracks")).toBe(true);
+    expect(app.calls.some(call => call.path === "/v1/catalog/de/playlists/pl.mix/tracks")).toBe(true);
   });
 
   test("arrow keys move through covers, and Shift seeks", async () => {
@@ -328,7 +374,7 @@ describe("artists", () => {
     expect(app.ui.grid.shelves.find(shelf => shelf.id === "singles")?.tiles[0].caption).toBe("CONTRABAND");
     expect(frame).not.toContain("Live albums");
     expect(app.model.items).toHaveLength(6);
-    expect(app.calls.some(call => call.path === "/amapi/raw/v1/me/library/albums/l.soma/artists")).toBe(true);
+    expect(app.calls.some(call => call.path === "/v1/me/library/albums/l.soma/artists")).toBe(true);
     await click(app, "tracks:row:0");
     await waitFor(() => app.calls.some(call => call.path === "/playback/play-item"));
     expect(app.calls.find(call => call.path === "/playback/play-item")?.body).toEqual({ id: "t1", type: "songs" });
@@ -355,7 +401,7 @@ describe("artists", () => {
     const app = await setup(120, 36);
     await click(app, "now-playing-artist");
     await waitFor(() => app.model.view === "artist:100" && !app.model.loading);
-    expect(app.calls.some(call => call.path === "/amapi/search")).toBe(true);
+    expect(app.calls.some(call => call.path === "/v1/catalog/de/search")).toBe(true);
     await app.model.open("artists"); await app.flush();
     expect(app.captureCharFrame()).toContain("Skrillex");
     expect(app.model.items[0]).toMatchObject({ id: "100", type: "artists", genre: "Dance" });

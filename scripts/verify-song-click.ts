@@ -1,7 +1,8 @@
 import { createTestRenderer } from "@opentui/core/testing";
 import { mkdir } from "node:fs/promises";
+import { AppleMusic } from "../src/apple";
 import { Cider } from "../src/cider";
-import { readToken } from "../src/config";
+import { readAppleSignIn, readToken } from "../src/config";
 import { Model } from "../src/model";
 import { PeelUI } from "../src/ui";
 import type { Playback } from "../src/types";
@@ -11,8 +12,10 @@ import { captureCiderAudio } from "./audio";
 // direct-play references for that track and the playlist's first track.
 // All audio and fingerprints stay in memory. Only measurements are saved.
 const player = new Cider(undefined, await readToken());
+const signIn = await readAppleSignIn();
+const library = new AppleMusic(signIn.userToken, { storefront: signIn.storefront });
 const setup = await createTestRenderer({ width: 120, height: 60 });
-const model = new Model(player);
+const model = new Model(library, player);
 const ui = new PeelUI(setup.renderer, model);
 const report: { checkedAt: string; checks: { name: string; value: unknown }[]; error?: string; restorationError?: string } = { checkedAt: new Date().toISOString(), checks: [] };
 const record = (name: string, value: unknown) => { report.checks.push({ name, value }); console.log(`PASS ${name}: ${JSON.stringify(value)}`); };

@@ -1,7 +1,8 @@
 import { createTestRenderer } from "@opentui/core/testing";
 import { mkdir } from "node:fs/promises";
+import { AppleMusic } from "../src/apple";
 import { Cider } from "../src/cider";
-import { readToken } from "../src/config";
+import { readAppleSignIn, readToken } from "../src/config";
 import { Model } from "../src/model";
 import { PeelUI } from "../src/ui";
 import type { Playback } from "../src/types";
@@ -10,12 +11,14 @@ import { captureCiderAudio } from "./audio";
 // This check controls the signed-in Cider instance. It restores playback settings
 // and the initial position/state afterwards. Run it while no one else is controlling Cider.
 const player = new Cider(undefined, await readToken());
+const signIn = await readAppleSignIn();
+const library = new AppleMusic(signIn.userToken, { storefront: signIn.storefront });
 const report: { checkedAt: string; backend: string; checks: { name: string; value: unknown }[]; error?: string; restorationError?: string } = {
   checkedAt: new Date().toISOString(), backend: player.base, checks: [],
 };
 const record = (name: string, value: unknown) => { report.checks.push({ name, value }); console.log(`PASS ${name}: ${JSON.stringify(value)}`); };
 const setup = await createTestRenderer({ width: 120, height: 36 });
-const model = new Model(player);
+const model = new Model(library, player);
 const ui = new PeelUI(setup.renderer, model);
 let original: Playback | undefined;
 let restoreCollection: { type: string; id: string; position: number; ids: string[] } | undefined;

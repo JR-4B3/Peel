@@ -1,7 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { Preferences } from "./config";
 import { defaults } from "./config";
-import { stopped, type ArtistShelf, type Home, type Media, type Page, type Playback, type Player } from "./types";
+import { stopped, type ArtistShelf, type Home, type Library, type Media, type Page, type Playback, type Player } from "./types";
 
 export interface Navigation { id: string; name: string; media?: Media; hidden?: boolean }
 export interface HomeStore { read(): Promise<Home | undefined>; write(home: Home): Promise<void> }
@@ -10,12 +10,15 @@ interface Snapshot { view: string; title: string; items: Media[]; more: boolean;
 
 // New releases need one request per hundred library artists, so reuse them for a while.
 const releasesFresh = 6 * 60 * 60 * 1000;
+const navigationRetry = 10000;
 const memoryStore: HomeStore = { read: async () => undefined, write: async () => {} };
 
 export class Model extends EventEmitter {
   playback: Playback = structuredClone(stopped);
+  // Cider answers with an authorised playback state. Browsing does not need it.
   connected = false;
-  status = "Connecting to Cider...";
+  starting = false;
+  status = "Loading your library...";
   playlists: Media[] = [];
   items: Media[] = [];
   title = "Home";
@@ -30,8 +33,12 @@ export class Model extends EventEmitter {
   more = false;
   layout = false;
   private generation = 0;
-  private refreshing = false;
+  private refreshing?: Promise<void>;
+  private playbackError?: unknown;
+  private engine?: Promise<void>;
   private browsingReady = false;
+  private navigating?: Promise<void>;
+  private navigationTried = 0;
   private loader?: (offset: number) => Promise<Page>;
   private collection?: { id: string; type: string };
   private commands: Promise<unknown> = Promise.resolve();
@@ -40,7 +47,10 @@ export class Model extends EventEmitter {
   private homeRead = false;
   releases: Promise<void> = Promise.resolve();
 
-  constructor(readonly player: Player, public preferences: Preferences = structuredClone(defaults), private save: (value: Preferences) => Promise<void> = async () => {}, private store: HomeStore = memoryStore) { super(); }
+  // Starts Cider when it is not running. Tests and custom API addresses need nothing started.
+  wake: () => Promise<void> = async () => {};
+
+  constructor(readonly library: Library, readonly player: Player, public preferences: Preferences = structuredClone(defaults), private save: (value: Preferences) => Promise<void> = async () => {}, private store: HomeStore = memoryStore) { super(); }
   changed() { this.emit("change"); }
 
   get display(): Display {
@@ -63,34 +73,58 @@ export class Model extends EventEmitter {
     return entries.map(item => ({ ...item, hidden: this.preferences.hidden.includes(item.id) })).filter(item => includeHidden || !item.hidden);
   }
 
+  // Home and the sidebar come from Apple Music, so they load while Cider is still starting.
   async start() {
-    await this.refresh();
+    await Promise.all([this.loadNavigation(), this.loadHome(), this.refresh()]);
   }
 
-  private async loadNavigation() {
-    const generation = this.generation;
-    try {
-      this.playlists = await this.player.playlists();
-      this.browsingReady = true;
-      this.changed();
-      if (generation === this.generation) await this.open(this.navigation()[0]?.id ?? "songs");
-    } catch (error) { this.fail(error); }
+  private loadNavigation() {
+    this.navigationTried = Date.now();
+    return this.navigating ??= (async () => {
+      try {
+        this.playlists = await this.library.playlists();
+        this.browsingReady = true;
+        this.changed();
+      } catch (error) { this.fail(error); }
+      finally { this.navigating = undefined; }
+    })();
   }
 
   fail(error: unknown) { this.status = error instanceof Error ? error.message : String(error); this.changed(); }
 
-  async refresh() {
-    if (this.refreshing) return;
-    this.refreshing = true;
-    try {
-      this.playback = await this.player.snapshot();
-      const recovering = !this.connected;
-      this.connected = true;
-      if (recovering) this.status = "Connected to Cider";
-      this.changed();
-      if (!this.browsingReady) await this.loadNavigation();
-    } catch (error) { this.connected = false; this.fail(error); }
-    finally { this.refreshing = false; }
+  // Concurrent callers share one playback request and its result.
+  refresh() {
+    if (!this.browsingReady && Date.now() - this.navigationTried > navigationRetry) void this.loadNavigation();
+    return this.refreshing ??= (async () => {
+      try {
+        this.playback = await this.player.snapshot();
+        this.playbackError = undefined;
+        const recovering = !this.connected;
+        this.connected = true;
+        if (recovering && !this.starting) this.status = "Connected to Cider";
+        this.changed();
+      } catch (error) {
+        // Cider not running yet is normal. Losing a working connection is reported.
+        if (this.connected) this.fail(error);
+        this.connected = false; this.playbackError = error; this.changed();
+      } finally { this.refreshing = undefined; }
+    })();
+  }
+
+  // Playback commands wait here. Concurrent commands share one Cider startup, and a failure allows a retry.
+  ensurePlayback(): Promise<void> {
+    if (this.connected) return Promise.resolve();
+    return this.engine ??= (async () => {
+      this.starting = true; this.changed();
+      try {
+        await this.wake();
+        // A poll that began before Cider opened its API can still be in flight.
+        await this.refresh();
+        if (!this.connected) await this.refresh();
+        if (!this.connected) throw this.playbackError ?? new Error("Cider is not responding.");
+        this.status = "Connected to Cider";
+      } finally { this.starting = false; this.engine = undefined; this.changed(); }
+    })();
   }
 
   async open(id: string) {
@@ -111,12 +145,13 @@ export class Model extends EventEmitter {
         this.generation++; this.items = []; this.more = false; this.loading = false;
         this.status = "No Favourite Songs playlist returned by Apple Music."; this.changed(); return;
       }
-      this.loader = offset => this.player.songs(navigation.media!.id, offset);
+      this.loader = offset => this.library.songs(navigation.media!.id, offset);
       this.collection = { id: navigation.media.id, type: navigation.media.type };
-    } else if (id === "albums") this.loader = offset => this.player.albums(offset);
-    else if (id === "artists") this.loader = offset => this.player.artists(offset);
-    else if (id === "queue") this.loader = offset => this.player.queue(offset);
-    else this.loader = offset => this.player.songs(undefined, offset);
+    } else if (id === "albums") this.loader = offset => this.library.albums(offset);
+    else if (id === "artists") this.loader = offset => this.library.artists(offset);
+    // The queue lives in Cider. Before Cider runs there is nothing queued.
+    else if (id === "queue") this.loader = offset => this.connected ? this.player.queue(offset) : Promise.resolve({ items: [], more: false });
+    else this.loader = offset => this.library.songs(undefined, offset);
     await this.load(false);
   }
 
@@ -128,9 +163,9 @@ export class Model extends EventEmitter {
     }
     // The release scan takes seconds. Playback polling must not wait for it.
     if (!this.homeLoading.releases && (force || !this.home.updated || Date.now() - this.home.updated > releasesFresh)) {
-      this.releases = this.homeShelf("releases", () => this.player.releases());
+      this.releases = this.homeShelf("releases", () => this.library.releases());
     }
-    if (!this.homeLoading.recent) await this.homeShelf("recent", () => this.player.recent());
+    if (!this.homeLoading.recent) await this.homeShelf("recent", () => this.library.recent());
   }
 
   private async homeShelf(shelf: "recent" | "releases", load: () => Promise<Media[]>) {
@@ -148,9 +183,9 @@ export class Model extends EventEmitter {
     this.remember();
     this.view = `collection:${item.type}:${item.id}`; this.title = item.name; this.detail = item; this.layout = false; this.shelves = [];
     this.collection = { id: item.id, type: item.type };
-    this.loader = item.type === "library-playlists" ? offset => this.player.songs(item.id, offset)
-      : item.type === "playlists" ? offset => this.player.playlist(item.id, offset)
-      : offset => this.player.album(item.id, offset);
+    this.loader = item.type === "library-playlists" ? offset => this.library.songs(item.id, offset)
+      : item.type === "playlists" ? offset => this.library.playlist(item.id, offset)
+      : offset => this.library.album(item.id, offset);
     await this.load(false);
   }
 
@@ -171,12 +206,12 @@ export class Model extends EventEmitter {
     this.collection = undefined; this.loader = undefined;
     this.items = []; this.shelves = []; this.more = false; this.loading = true; this.changed();
     try {
-      const id = await this.player.artistId(item);
+      const id = await this.library.artistId(item);
       if (generation !== this.generation) return;
       if (!id) { this.status = `Apple Music has no artist page for ${name}.`; return; }
       // A collaboration can lead back to the artist page it was opened from.
       if (this.history.at(-1)?.view === `artist:${id}`) { this.back(); return; }
-      const page = await this.player.artist(id);
+      const page = await this.library.artist(id);
       if (generation !== this.generation) return;
       this.view = `artist:${id}`; this.title = page.artist.name; this.detail = page.artist;
       this.items = page.top; this.shelves = page.shelves;
@@ -212,7 +247,7 @@ export class Model extends EventEmitter {
     this.layout = false; this.view = "search"; this.title = `Search: ${term}`;
     this.loading = true; this.items = []; this.more = false; this.changed();
     try {
-      const items = await this.player.search(term);
+      const items = await this.library.search(term);
       if (generation !== this.generation) return;
       this.items = items; this.status = `${items.length} search results`;
     } catch (error) { if (generation === this.generation) this.fail(error); }
@@ -263,9 +298,10 @@ export class Model extends EventEmitter {
 
   private async execute(command: () => Promise<void>) {
     let success = false;
-    // Keep rapid clicks ordered, and always read Cider's state after a command.
+    // Keep rapid clicks ordered, start Cider for the first one, and always read Cider's state after a command.
     this.commands = this.commands.then(async () => {
       try {
+        await this.ensurePlayback();
         await command();
         success = true;
         await this.refresh();

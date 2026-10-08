@@ -40,12 +40,11 @@ export interface Home {
 export interface ArtistShelf { id: string; title: string; items: Media[] }
 export interface ArtistPage { artist: Media; top: Media[]; shelves: ArtistShelf[] }
 
-export interface Player {
-  snapshot(): Promise<Playback>;
+// Apple Music's catalog and the listener's library, read directly from Apple.
+export interface Library {
   recent(): Promise<Media[]>;
   releases(): Promise<Media[]>;
   playlist(id: string, offset?: number): Promise<Page>;
-  rating(): Promise<number>;
   playlists(): Promise<Media[]>;
   search(term: string): Promise<Media[]>;
   songs(id?: string, offset?: number): Promise<Page>;
@@ -54,10 +53,29 @@ export interface Player {
   artists(offset?: number): Promise<Page>;
   artistId(item: Media): Promise<string | undefined>;
   artist(id: string): Promise<ArtistPage>;
+}
+
+// Cider's playback engine: the player state, the queue, and the playing song's rating.
+export interface Player {
+  snapshot(): Promise<Playback>;
+  rating(): Promise<number>;
   queue(offset?: number): Promise<Page>;
   queuePosition(): Promise<{ position: number; total: number }>;
   playCollectionTrack(collection: { id: string; type: string }, track: Media, index: number): Promise<void>;
   command(path: string, body?: unknown, method?: string): Promise<void>;
+}
+
+export function media(item: Record<string, any>, type = "songs"): Media {
+  const resource = item.track ?? item;
+  const attrs = resource.attributes ?? resource;
+  return {
+    id: String(resource.id), type: resource.type ?? type,
+    name: attrs.name ?? "Untitled", artist: attrs.artistName ?? "", album: attrs.albumName ?? "",
+    duration: (attrs.durationInMillis ?? attrs.durationMs ?? 0) / 1000,
+    favourite: attrs.tags?.includes("favorited") ?? false,
+    artwork: attrs.artwork?.url, releaseDate: attrs.releaseDate, trackCount: attrs.trackCount,
+    prerelease: attrs.isPrerelease, genre: attrs.genreNames?.[0],
+  };
 }
 
 export const stopped: Playback = {

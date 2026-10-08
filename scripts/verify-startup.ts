@@ -1,7 +1,8 @@
 import { mkdir, readFile, readdir, readlink } from "node:fs/promises";
 import { join } from "node:path";
+import { AppleMusic } from "../src/apple";
 import { Cider } from "../src/cider";
-import { readToken } from "../src/config";
+import { readAppleSignIn, readToken } from "../src/config";
 
 // Run on main with Cider stopped. Restarts only the installed Peel window.
 const report: { checkedAt: string; checks: { name: string; value: unknown }[]; error?: string } = {
@@ -44,6 +45,8 @@ async function wait<T>(read: () => Promise<T | undefined>, label: string) {
   throw new Error(`Timed out waiting for ${label}`);
 }
 const player = new Cider(undefined, await readToken());
+const signIn = await readAppleSignIn();
+const library = new AppleMusic(signIn.userToken, { storefront: signIn.storefront });
 let monitor: ReturnType<typeof Bun.spawn> | undefined;
 let monitoring: Promise<void> | undefined;
 let monitorFailure: string | undefined;
@@ -121,10 +124,10 @@ try {
   if (pids.length !== 1) throw new Error("More than one Cider parent process started");
   record("Peel starts Cider automatically on main", { peel: first, ciderPid: pids[0] });
   const state = await wait(async () => { const value = await player.snapshot(); return value ? value : undefined; }, "authorised API");
-  const playlists = await wait(async () => { const value = await player.playlists(); return value.length ? value : undefined; }, "Apple Music library");
+  const playlists = await wait(async () => { const value = await library.playlists(); return value.length ? value : undefined; }, "Apple Music library");
   const favourite = playlists.find(item => item.favourite);
   if (!favourite) throw new Error("Apple Music did not return Favourite Songs");
-  const songs = await player.songs(favourite.id);
+  const songs = await library.songs(favourite.id);
   record("existing approval and Apple Music session connect", { state: state.state, volume: state.volume, favouriteSongs: songs.items.length });
   await wait(async () => (await windows()).some(window => window.app_id.toLowerCase() === "cider") ? undefined : true, "Cider's window to hide");
   // Allow the delayed Cider show handler and Peel's first library render to finish.

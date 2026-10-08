@@ -9,7 +9,7 @@ const api = fixture();
 try {
   for (const width of [48, 80, 120]) {
     const setup = await createTestRenderer({ width, height: 32 });
-    const model = new Model(api.player);
+    const model = new Model(api.library, api.player);
     const ui = new PeelUI(setup.renderer, model);
     try {
       await model.start(); await setup.flush();

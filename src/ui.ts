@@ -531,7 +531,8 @@ export class PeelUI {
     this.tracks.height = artist ? Math.min(songRows, model.items.length) : "auto";
     this.tracks.rowHeight = model.detail && !model.layout ? 1 : 2;
     this.empty.visible = display === "list" && !model.layout && !model.items.length;
-    this.empty.content = model.loading ? "Loading..." : model.connected ? "Nothing here yet. Search above or choose something on the left." : model.status;
+    this.empty.content = model.loading ? "Loading..." : model.view === "queue" && !model.connected ? "Cider is not running yet. The queue starts with your first song."
+      : "Nothing here yet. Search above or choose something on the left.";
     if (model.detail) {
       const detail = model.detail;
       this.headerCover.setArt(detail.artwork);
@@ -607,14 +608,14 @@ export class PeelUI {
     const connected = this.model.connected;
     const song = state.nowPlaying;
     this.title.content = song ? song.name ?? "Untitled" : "Nothing playing";
-    this.subtitle.content = song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : connected ? "Choose a song to start" : "";
+    this.subtitle.content = song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : this.model.starting ? "Starting Cider..." : "Choose a song to start";
     this.playerCover.setArt(song?.artwork?.url);
     const favourite = this.model.favourite;
     this.favouriteButton.visible = !!song;
     this.favouriteButton.set(favourite ? icon.heart : icon.heartOutline, "f", favourite ? colour.heart : colour.faint);
     const frames = ["▁▅▃▇▂▆", "▃▇▁▅▆▂", "▆▃▅▂▇▁", "▂▆▇▁▃▅"];
     const playing = connected && state.state === "playing";
-    const label = !connected ? "Disconnected" : playing ? "Playing" : state.state === "paused" ? "Paused" : "Stopped";
+    const label = !connected ? (this.model.starting ? "Starting" : "Stopped") : playing ? "Playing" : state.state === "paused" ? "Paused" : "Stopped";
     this.indicator.content = t`${fg(colour.faint)(label)}${this.model.preferences.playbackBars ? fg(playing ? colour.accent : colour.faint)(" " + (playing ? frames[this.tick % frames.length] : "▁▁▁▁▁▁")) : ""}`;
     this.playButton.set(playing ? icon.pause : icon.play);
     this.shuffleButton.set(state.shuffleMode ? icon.shuffle : icon.shuffleOff, "s", state.shuffleMode ? colour.accent : colour.faint);

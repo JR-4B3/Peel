@@ -49,3 +49,17 @@ export async function readToken(): Promise<string> {
   }
   return "";
 }
+
+export interface AppleSignIn { userToken: string; storefront?: string }
+
+// The Music User Token copied from Cider by bun run connect.
+export async function readAppleSignIn(): Promise<AppleSignIn> {
+  if (process.env.APPLE_MUSIC_USER_TOKEN) return { userToken: process.env.APPLE_MUSIC_USER_TOKEN };
+  try {
+    const data = JSON.parse(await readFile(join(configDir, "apple.json"), "utf8"));
+    if (typeof data.userToken === "string") return { userToken: data.userToken, storefront: typeof data.storefront === "string" ? data.storefront : undefined };
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Could not read Peel's apple.json. Run bun run connect again.");
+  }
+  return { userToken: "" };
+}
