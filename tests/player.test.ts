@@ -273,7 +273,20 @@ test("Apple Music renews a rejected developer token once and a rejected user tok
   expect((await library.playlists()).length).toBe(2);
   expect(refreshes).toEqual([false, true, false]);
   const rejected = new AppleMusic("expired", { base: api.library.base, developerToken: async () => "dev-token" });
-  await expect(rejected.playlists()).rejects.toThrow("bun run connect");
+  await expect(rejected.playlists()).rejects.toThrow("peel --connect");
+});
+
+test("without a working Apple sign-in, the library is read through Cider's proxy", async () => {
+  const api = fixture(); cleanup.push(() => api.server.stop(true));
+  const paths: string[] = [];
+  const proxy = async (path: string) => { paths.push(path); return { data: [{ id: "p.proxied", type: "library-playlists", attributes: { name: "Through Cider" } }] }; };
+  const missing = new AppleMusic("", { base: api.library.base, developerToken: async () => "dev-token", proxy });
+  expect((await missing.playlists()).map(item => item.name)).toEqual(["Through Cider"]);
+  const rejected = new AppleMusic("expired", { base: api.library.base, developerToken: async () => "dev-token", proxy });
+  expect((await rejected.playlists()).map(item => item.name)).toEqual(["Through Cider"]);
+  // Cider substitutes the storefront itself.
+  await rejected.search("soma");
+  expect(paths.at(-1)).toStartWith("v1/catalog/$STOREFRONT/search?");
 });
 
 test("layout preferences survive a restart and use private file permissions", async () => {

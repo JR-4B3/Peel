@@ -23,13 +23,20 @@ try {
     const token = await readToken();
     const signIn = await readAppleSignIn();
     const player = new Cider(undefined, token);
-    // A rejected Apple sign-in is renewed from Cider when it is running.
+    // A rejected Apple sign-in is renewed from Cider when it is running. Without a working
+    // sign-in, the library is read through Cider, which means waiting for Cider to start.
+    let proxied = false;
     const library = new AppleMusic(signIn.userToken, {
       storefront: signIn.storefront,
       renewUser: async () => {
         const fresh = await player.appleTokens();
         await saveJson("apple.json", fresh);
         return fresh.userToken;
+      },
+      proxy: async path => {
+        await model.ensurePlayback();
+        if (!proxied) { proxied = true; model.status = "Reading your library through Cider. Run peel --connect once so it loads without waiting."; model.changed(); }
+        return player.amapi(path);
       },
     });
     const renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true, targetFps: 10 });

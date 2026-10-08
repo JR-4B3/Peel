@@ -27,7 +27,9 @@ async function probe(base: string, token: string) {
   } catch { return { ready: false, authorised: false }; }
 }
 
-export async function hideCiderWindow(signal?: AbortSignal) {
+// Clicks Hide or Show in Cider's tray menu. The menu offers only the one that applies.
+async function trayWindow(action: "Hide" | "Show", signal?: AbortSignal) {
+  const other = action === "Hide" ? "Show" : "Hide";
   const until = Date.now() + 15000;
   do {
     signal?.throwIfAborted();
@@ -37,16 +39,18 @@ export async function hideCiderWindow(signal?: AbortSignal) {
       const args = ["gdbus", "call", "--session", "--dest", name,
         "--object-path", "/org/chromium/DbusMenu/1", "--method"];
       const layout = await run([...args, "com.canonical.dbusmenu.GetLayout", "--", "0", "-1", '["label"]']);
-      const hide = layout.output.match(/<\((\d+), \{[^}]*label[^}]*Hide/);
-      if (hide) {
-        const result = await run([...args, "com.canonical.dbusmenu.Event", hide[1]!, "clicked", "<0>", "0"]);
+      const item = layout.output.match(new RegExp(`<\\((\\d+), \\{[^}]*label[^}]*${action}`));
+      if (item) {
+        const result = await run([...args, "com.canonical.dbusmenu.Event", item[1]!, "clicked", "<0>", "0"]);
         if (!result.code) return;
-      } else if (/label[^}]*Show/.test(layout.output)) return;
+      } else if (new RegExp(`label[^}]*${other}`).test(layout.output)) return;
     }
     await sleep(250, undefined, { signal });
   } while (Date.now() < until);
-  throw new Error("Cider is running, but its tray could not hide the window. Use Hide in Cider's tray menu.");
+  throw new Error(`Cider is running, but its tray could not ${action.toLowerCase()} the window. Use ${action} in Cider's tray menu.`);
 }
+
+export const hideCiderWindow = (signal?: AbortSignal) => trayWindow("Hide", signal);
 
 export async function ensureCider(base: string, token: string, hide: boolean, status: (text: string) => void = () => {}, signal?: AbortSignal) {
   // A custom server belongs to its caller, including test fixtures and remote APIs.
@@ -84,6 +88,8 @@ export async function ensureCider(base: string, token: string, hide: boolean, st
     await hideCiderWindow(signal);
     await finishNiriBackground();
   } else {
+    // A Cider hidden in the tray has no window, so its approval dialog would stay invisible.
+    await trayWindow("Show", signal).catch(() => {});
     await showCiderForApproval();
   }
 }

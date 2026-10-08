@@ -41,6 +41,14 @@ export class Cider implements Player {
     return { userToken: data.userToken, storefront: data.storefront };
   }
 
+  // Apple Music API reads through Cider's proxy, which signs them with Cider's own session.
+  // The proxy rejects some query characters, so catalog searches use its search route.
+  async amapi(path: string): Promise<Record<string, any>> {
+    const search = path.match(/^v1\/catalog\/[^/]+\/search\?(.*)$/);
+    if (search) return { results: (await this.request(`/amapi/search?${search[1]}`)).data.results };
+    return (await this.request(`/amapi/raw/${path}`)).data;
+  }
+
   async snapshot(): Promise<Playback> { return (await this.request("/playback")).data; }
 
   async rating(): Promise<number> { return (await this.request("/library/now-playing/status")).data?.rating ?? 0; }
