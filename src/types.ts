@@ -12,6 +12,10 @@ export interface Media {
   trackCount?: number;
   prerelease?: boolean;
   genre?: string;
+  // The catalog song a library song belongs to. Apple keeps favourites on catalog songs.
+  catalogId?: string;
+  // Rated as a favourite, once known.
+  loved?: boolean;
 }
 
 export interface Playback {
@@ -53,10 +57,14 @@ export interface Library {
   artists(offset?: number): Promise<Page>;
   artistId(item: Media): Promise<string | undefined>;
   artist(id: string): Promise<ArtistPage>;
+  // The ids of the given songs that are rated as favourites.
+  ratings(items: Media[]): Promise<Set<string>>;
 }
 
-// Cider's playback engine: the player state, the queue, and the playing song's rating.
+// The playback engine: the player state, the queue, and the playing song's rating.
 export interface Player {
+  // Plays any list of songs in order. Cider can queue only whole collections.
+  readonly queuesItems?: boolean;
   snapshot(): Promise<Playback>;
   rating(): Promise<number>;
   queue(offset?: number): Promise<Page>;
@@ -77,6 +85,7 @@ export function media(item: Record<string, any>, type = "songs"): Media {
     favourite: attrs.tags?.includes("favorited") ?? false,
     artwork: attrs.artwork?.url, releaseDate: attrs.releaseDate, trackCount: attrs.trackCount,
     prerelease: attrs.isPrerelease, genre: attrs.genreNames?.[0],
+    catalogId: attrs.playParams?.catalogId ?? (/^\d+$/.test(String(resource.id)) ? String(resource.id) : undefined),
   };
 }
 

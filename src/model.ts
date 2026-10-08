@@ -7,7 +7,15 @@ export interface Navigation { id: string; name: string; media?: Media; hidden?: 
 export interface HomeStore { read(): Promise<Home | undefined>; write(home: Home): Promise<void> }
 // Sections: songs above shelves of covers, on artist pages and in search results.
 type Display = "home" | "grid" | "list" | "sections";
-interface Snapshot { view: string; title: string; items: Media[]; more: boolean; detail?: Media; shelves: ArtistShelf[]; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string } }
+export type Sort = "playlist" | "title" | "artist" | "album" | "length" | "shuffled";
+export const sorts: Record<Sort, string> = { playlist: "Playlist order", title: "Title", artist: "Artist", album: "Album", length: "Length", shuffled: "Shuffled" };
+// What a song list shows: matching words, an order, and optionally favourites only.
+export interface Filter { text: string; sort: Sort; loved: boolean }
+const unfiltered: Filter = { text: "", sort: "playlist", loved: false };
+interface Snapshot { view: string; title: string; items: Media[]; more: boolean; detail?: Media; shelves: ArtistShelf[]; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string }; filter: Filter }
+
+// Case and accents do not matter: "beyonce" finds "Beyoncé".
+const fold = (text: string) => text.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
 
 // New releases need one request per hundred library artists, so reuse them for a while.
 const releasesFresh = 6 * 60 * 60 * 1000;
@@ -19,6 +27,8 @@ export class Model extends EventEmitter {
   // Cider answers with an authorised playback state. Browsing does not need it.
   connected = false;
   starting = false;
+  // Counts changes to songs' favourite marks, which change the songs in place.
+  lovedRevision = 0;
   status = "Loading your library...";
   playlists: Media[] = [];
   items: Media[] = [];
@@ -32,7 +42,6 @@ export class Model extends EventEmitter {
   history: Snapshot[] = [];
   loading = false;
   more = false;
-  layout = false;
   private generation = 0;
   private refreshing?: Promise<void>;
   private playbackError?: unknown;
@@ -58,7 +67,7 @@ export class Model extends EventEmitter {
     return this.view === "home" ? "home" : this.view === "albums" || this.view === "artists" ? "grid" : this.view.startsWith("artist:") || this.view === "search" ? "sections" : "list";
   }
 
-  // Home stays first. The layout editor arranges the entries after it.
+  // Home stays first. The sidebar's editing keys arrange the entries after it.
   navigation(includeHidden = false): Navigation[] {
     return [{ id: "home", name: "Home" }, ...this.entries(includeHidden)];
   }
@@ -129,12 +138,12 @@ export class Model extends EventEmitter {
   }
 
   async open(id: string) {
+    this.filter = unfiltered;
     this.collection = undefined;
     this.detail = undefined;
     this.shelves = [];
     this.history = [];
     this.view = id;
-    this.layout = false;
     const navigation = this.navigation(true).find(item => item.id === id);
     this.title = navigation?.name ?? id;
     if (id === "home") {
@@ -182,7 +191,7 @@ export class Model extends EventEmitter {
   // Albums and playlists open as their own view. Back returns to the previous one.
   async openCollection(item: Media) {
     this.remember();
-    this.view = `collection:${item.type}:${item.id}`; this.title = item.name; this.detail = item; this.layout = false; this.shelves = [];
+    this.view = `collection:${item.type}:${item.id}`; this.title = item.name; this.detail = item; this.shelves = [];
     this.collection = { id: item.id, type: item.type };
     this.loader = item.type === "library-playlists" ? offset => this.library.songs(item.id, offset)
       : item.type === "playlists" ? offset => this.library.playlist(item.id, offset)
@@ -191,7 +200,8 @@ export class Model extends EventEmitter {
   }
 
   private remember() {
-    this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection });
+    this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter });
+    this.filter = unfiltered;
   }
 
   // The artist of a song, album, or artist. Back returns to the page it was opened from.
@@ -202,7 +212,7 @@ export class Model extends EventEmitter {
     if (this.view.startsWith("artist:") && (this.detail?.id === item.id || this.detail?.name === name)) return;
     this.remember();
     const generation = ++this.generation;
-    this.view = `artist:${artist ? item.id : name}`; this.title = name; this.layout = false;
+    this.view = `artist:${artist ? item.id : name}`; this.title = name;
     this.detail = artist ? item : { id: "", type: "artists", name, artist: "", album: "", duration: 0 };
     this.collection = undefined; this.loader = undefined;
     this.items = []; this.shelves = []; this.more = false; this.loading = true; this.changed();
@@ -216,6 +226,7 @@ export class Model extends EventEmitter {
       if (generation !== this.generation) return;
       this.view = `artist:${id}`; this.title = page.artist.name; this.detail = page.artist;
       this.items = page.top; this.shelves = page.shelves;
+      void this.markLoved(page.top);
       this.status = page.artist.name;
     } catch (error) { if (generation === this.generation) this.fail(error); }
     finally { if (generation === this.generation) { this.loading = false; this.changed(); } }
@@ -233,19 +244,20 @@ export class Model extends EventEmitter {
     if (!previous) return undefined;
     const closed = this.detail;
     this.generation++; this.loading = false;
-    ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection } = previous);
+    ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter } = previous);
     this.changed();
     return closed;
   }
 
   async search(term: string) {
     if (!term.trim()) return;
+    this.filter = unfiltered;
     this.collection = undefined;
     this.detail = undefined;
     this.shelves = [];
     this.history = [];
     const generation = ++this.generation;
-    this.layout = false; this.view = "search"; this.title = `Search: ${term}`;
+    this.view = "search"; this.title = `Search: ${term}`;
     this.loading = true; this.items = []; this.more = false; this.changed();
     try {
       const items = await this.library.search(term);
@@ -253,6 +265,7 @@ export class Model extends EventEmitter {
       // Songs form the list. Albums and artists get shelves of covers.
       const of = (kind: string) => items.filter(item => item.type.includes(kind));
       this.items = items.filter(item => !/albums|artists|playlists/.test(item.type));
+      void this.markLoved(this.items);
       this.shelves = [{ id: "albums", title: "Albums", items: of("albums") }, { id: "artists", title: "Artists", items: of("artists") }].filter(shelf => shelf.items.length);
       this.status = `${items.length} search results`;
     } catch (error) { if (generation === this.generation) this.fail(error); }
@@ -269,9 +282,68 @@ export class Model extends EventEmitter {
       const result = await this.loader(offset);
       if (generation !== this.generation) return;
       this.items = append ? [...this.items, ...result.items] : result.items;
+      void this.markLoved(result.items);
       this.more = result.more; this.status = `${this.items.length} items${result.more ? " loaded, more available" : ""}`;
     } catch (error) { if (generation === this.generation) this.fail(error); }
     finally { if (generation === this.generation) { this.loading = false; this.changed(); } }
+  }
+
+  filter: Filter = unfiltered;
+  private filtered?: { items: Media[]; filter: Filter; loved: number; shown: Media[] };
+  private order?: { items: Media[]; index: Map<string, number> };
+
+  // The songs as shown: the loaded songs, filtered and sorted.
+  get shown(): Media[] {
+    const { text, sort, loved } = this.filter;
+    if (!text.trim() && sort === "playlist" && !loved) return this.items;
+    const cached = this.filtered;
+    if (cached && cached.items === this.items && cached.filter === this.filter && cached.loved === this.lovedRevision) return cached.shown;
+    const words = fold(text).split(/\s+/).filter(Boolean);
+    let shown = this.items.filter(item => (!loved || item.loved) && words.every(word => fold(`${item.name} ${item.artist} ${item.album}`).includes(word)));
+    const by = (key: (item: Media) => string | number) => (a: Media, b: Media) => {
+      const x = key(a), y = key(b);
+      return typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y), undefined, { sensitivity: "base", numeric: true });
+    };
+    if (sort === "title") shown = shown.toSorted(by(item => item.name));
+    else if (sort === "artist") shown = shown.toSorted((a, b) => by(item => item.artist)(a, b) || by(item => item.album)(a, b));
+    else if (sort === "album") shown = shown.toSorted((a, b) => by(item => item.album)(a, b) || by(item => item.artist)(a, b));
+    else if (sort === "length") shown = shown.toSorted(by(item => item.duration));
+    else if (sort === "shuffled") {
+      shown = [...shown];
+      for (let index = shown.length - 1; index > 0; index--) { const other = Math.floor(Math.random() * (index + 1)); [shown[index], shown[other]] = [shown[other]!, shown[index]!]; }
+    }
+    this.filtered = { items: this.items, filter: this.filter, loved: this.lovedRevision, shown };
+    return shown;
+  }
+
+  // A song's place in the playlist, which its row shows when the list is filtered.
+  position(item: Media) {
+    if (this.order?.items !== this.items) this.order = { items: this.items, index: new Map(this.items.map((song, index) => [song.id, index])) };
+    return this.order.index.get(item.id) ?? -1;
+  }
+
+  // Filtering and sorting cover the whole list, so the rest of it loads first.
+  async setFilter(change: Partial<Filter>) {
+    this.filter = { ...this.filter, ...change };
+    this.changed();
+    const view = this.view;
+    while (this.more && !this.loading && view === this.view && (this.filter.text.trim() || this.filter.sort !== "playlist" || this.filter.loved)) {
+      await this.load(true);
+      this.status = `Loaded ${this.items.length} songs${this.more ? ", loading more to filter..." : ""}`; this.changed();
+    }
+    if (view === this.view && this.filter.text.trim()) { this.status = `${this.shown.length} of ${this.items.length} songs match`; this.changed(); }
+  }
+
+  // Marks which songs are favourites, so their rows show a heart. Every song in Favourite Songs is one.
+  private async markLoved(items: Media[]) {
+    const songs = items.filter(item => /songs/.test(item.type) && item.loved === undefined);
+    if (!songs.length) return;
+    if (this.view === "favourites") { for (const item of songs) item.loved = true; this.lovedRevision++; this.changed(); return; }
+    try {
+      const loved = await this.library.ratings(songs);
+      for (const item of songs) item.loved = loved.has(item.id);
+      this.lovedRevision++; this.changed();
+    } catch {}
   }
 
   async activate(item: Media) {
@@ -284,13 +356,15 @@ export class Model extends EventEmitter {
       return;
     }
     const collection = this.collection;
-    const index = this.items.indexOf(item);
+    // A filtered list plays in its displayed order. Cider can only queue whole collections, so it plays the song alone.
+    const list = this.shown;
+    const index = list === this.items || this.player.queuesItems ? list.indexOf(item) : -1;
     const activation = { key, started: Date.now(), pending: true, promise: Promise.resolve() };
     this.activation = activation;
     activation.promise = (async () => {
       try {
         if (item.queueIndex !== undefined) await this.act("/queue/jump", { index: item.queueIndex });
-        else if (collection && index >= 0) await this.execute(() => this.player.playCollectionTrack(collection, this.items, index));
+        else if (collection && index >= 0) await this.execute(() => this.player.playCollectionTrack(collection, list, index));
         else await this.execute(() => this.player.playItem(item));
       } finally { activation.pending = false; }
     })();
@@ -336,9 +410,10 @@ export class Model extends EventEmitter {
     } catch (error) { this.fail(error); return false; }
   }
 
-  get favourite() {
+  // Undefined until Apple has said whether the playing song is a favourite.
+  get favourite(): boolean | undefined {
     const key = this.songKey();
-    return this.loved?.key === key ? this.loved.value : !!this.playback.nowPlaying?.inFavorites;
+    return this.loved?.key === key ? this.loved.value : this.playback.nowPlaying?.inFavorites;
   }
 
   private songKey() {
@@ -349,6 +424,8 @@ export class Model extends EventEmitter {
   async toggleFavourite() {
     const key = this.songKey();
     if (!key || !this.connected) return;
+    // Toggling an unknown state could remove a favourite, which would move it in Favourite Songs.
+    if (this.favourite === undefined) { this.status = "Still checking whether this song is a favourite."; this.changed(); return; }
     const value = !this.favourite;
     this.loved = { key, value }; this.changed();
     const done = await this.execute(() => value
@@ -364,6 +441,9 @@ export class Model extends EventEmitter {
     } catch {}
     if (this.songKey() !== key) return;
     this.loved = { key, value: saved };
+    // The song's row shows its heart too.
+    for (const item of this.items) if (item.id === key || item.catalogId === key) item.loved = saved;
+    this.lovedRevision++;
     if (saved !== value) this.status = "Apple Music did not save the favourite. Try again.";
     else this.status = value ? "Added to Favourite Songs" : "Removed from Favourite Songs";
     this.changed();

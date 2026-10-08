@@ -6,16 +6,30 @@
   const repeats = ["none", "one", "all"];
   let music;
   let signIn = false;
-  let rated = { id: "", value: 0 };
+  // The playing song's rating. A song shows as a favourite or not only once Apple has answered.
+  let rated = { id: "", value: undefined, checked: 0 };
 
-  // Ratings belong to the catalog song. Library songs name it in their play parameters.
+  // Ratings belong to the catalog song. Library songs name it in their play parameters, and
+  // songs only in the library are rated as library songs.
   const catalogId = item => item?.playParams?.catalogId ?? (/^\d+$/.test(item?.id ?? "") ? item.id : "");
-  const ratingPath = id => `/v1/me/ratings/songs/${id}`;
-  async function readRating(item) {
+  const ratingPath = item => {
     const id = catalogId(item);
-    if (!id) return 0;
-    try { return (await music.api.music(ratingPath(id))).data.data?.[0]?.attributes?.value ?? 0; }
-    catch { return 0; }
+    if (id) return `/v1/me/ratings/songs/${id}`;
+    return item?.id?.startsWith("i.") ? `/v1/me/ratings/library-songs/${item.id}` : "";
+  };
+  // Apple answers 404 for a song without a rating. Other failures leave the rating unknown.
+  async function readRating(item) {
+    const path = ratingPath(item);
+    if (!path) return 0;
+    try { return (await music.api.music(path)).data.data?.[0]?.attributes?.value ?? 0; }
+    catch (error) { return /404|not found/i.test(String(error?.errorCode ?? error?.status ?? error?.message ?? error)) || error?.status === 404 ? 0 : undefined; }
+  }
+  async function checkRating() {
+    const item = music.nowPlayingItem;
+    if (!item) return;
+    rated = { id: item.id, value: rated.id === item.id ? rated.value : undefined, checked: Date.now() };
+    const value = await readRating(item);
+    if (music.nowPlayingItem?.id === item.id && value !== undefined) rated = { id: item.id, value, checked: Date.now() };
   }
   // MusicKit queues songs in the shape Apple's API returns them, built here from Peel's songs.
   const resource = item => ({
@@ -23,7 +37,7 @@
     attributes: {
       name: item.name, artistName: item.artist, albumName: item.album, durationInMillis: Math.round(item.duration * 1000),
       ...(item.artwork ? { artwork: { url: item.artwork } } : {}),
-      playParams: { id: item.id, kind: "song", ...(item.type.startsWith("library-") ? { isLibrary: true } : {}) },
+      playParams: { id: item.id, kind: "song", ...(item.catalogId ? { catalogId: item.catalogId } : {}), ...(item.type.startsWith("library-") ? { isLibrary: true } : {}) },
     },
   });
   const describe = item => ({
@@ -35,13 +49,15 @@
     state() {
       if (!music) return { ready: false, signIn };
       const item = music.nowPlayingItem;
+      // An unknown rating is asked again every few seconds.
+      if (item && (rated.id !== item.id || rated.value === undefined) && Date.now() - rated.checked > 3000) void checkRating();
       return {
         ready: music.isAuthorized, signIn,
         playback: {
           state: states[music.playbackState] ?? (item ? "paused" : "stopped"),
           nowPlaying: item ? {
             name: item.title, artistName: item.artistName, albumName: item.albumName, artwork: { url: item.artwork?.url },
-            inFavorites: rated.id === item.id && rated.value === 1,
+            inFavorites: rated.id === item.id && rated.value !== undefined ? rated.value === 1 : undefined,
             playParams: { id: item.id, catalogId: catalogId(item) },
           } : null,
           time: { currentTime: music.currentPlaybackTime ?? 0, duration: music.currentPlaybackDuration ?? 0 },
@@ -62,23 +78,20 @@
     play: async (items, index = 0) => { await music.setQueue({ items: items.map(resource), startWith: index, startPlaying: true }); },
     jump: index => music.changeToMediaAtIndex(index),
     queue: () => ({ position: music.queue.position, items: music.queue.items.map(describe) }),
-    rating: async () => readRating(music.nowPlayingItem),
+    rating: async () => await readRating(music.nowPlayingItem) ?? -1,
     rate: async value => {
-      const item = music.nowPlayingItem, id = catalogId(item);
-      if (!id) throw new Error("This song has no Apple Music catalog entry to favourite.");
+      const item = music.nowPlayingItem, path = ratingPath(item);
+      if (!path) throw new Error("This song cannot be rated.");
       const fetchOptions = value ? { method: "PUT", body: JSON.stringify({ type: "rating", attributes: { value } }) } : { method: "DELETE" };
-      await music.api.music(ratingPath(id), {}, { fetchOptions });
-      rated = { id: item.id, value: value ? 1 : 0 };
+      await music.api.music(path, {}, { fetchOptions });
+      rated = { id: item.id, value: value ? 1 : 0, checked: Date.now() };
     },
   };
 
   document.addEventListener("musickitloaded", async () => {
     music = await MusicKit.configure({ developerToken: window.peel.token, app: { name: "Peel", build: "0.1.0" } });
     music.volume = window.peel.volume;
-    music.addEventListener("nowPlayingItemDidChange", async () => {
-      const item = music.nowPlayingItem;
-      if (item) rated = { id: item.id, value: await readRating(item) };
-    });
+    music.addEventListener("nowPlayingItemDidChange", () => void checkRating());
     music.addEventListener("playbackVolumeDidChange", () => log(`volume ${music.volume}`));
     log(`configured, authorized=${music.isAuthorized}`);
     if (!music.isAuthorized) {

@@ -9,7 +9,8 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 - Favourite Songs follows Home, above your playlists. All songs, Albums, Artists, and Queue follow them.
 - Albums shows your library as a grid of covers. Selecting an album or playlist opens a page with its cover and songs.
 - Artists shows your library's artists as a grid of photos. An artist page lists their top songs, then rows of their albums, singles and EPs, live albums, compilations, and albums they appear on.
-- The layout editor saves sidebar order and hidden entries. Search and the player stay visible.
+- The sidebar can be rearranged in place: with the sidebar focused, hidden entries show dimmed and the editing keys appear below it. Search and the player stay visible.
+- Song lists can be filtered by title, artist, or album, sorted, and narrowed to favourites. Favourite songs show a heart before their title.
 - Playback controls use icons with their keyboard shortcut beside them when the terminal is at least 100 columns wide. There is one player strip at the bottom with the current cover and a favourite heart.
 - Mouse clicks and keyboard shortcuts control the same actions.
 - Optional animated bars indicate confirmed playback. They are a playback indicator, not a measured audio spectrum. They stop when paused or disconnected.
@@ -50,11 +51,13 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Back from an album, playlist, or artist | Escape or Backspace | Back |
 | Favourite the current song | `f` | Heart |
 | Load another page | `m`, or move to the last row of covers | Scroll down |
-| Edit sidebar layout | `l` | Layout |
-| Move a layout entry | `K` / `J` | Up / Down in the editor |
-| Hide/show a layout entry | `h` | Hide/show in the editor |
+| Move a sidebar entry | Shift+Up / Shift+Down, or `K` / `J`, with the sidebar focused | |
+| Hide or show a sidebar entry | `h` with the sidebar focused | |
+| Filter a song list | Shift+F, then type. Escape clears the filter | Filter field above the list |
+| Sort a song list | `o` cycles playlist order, title, artist, album, length, and shuffled | Sort |
+| Favourites only | `*` | Favourites |
 | Toggle playback bars | `v` | Bars |
-| Leave search or layout editing | Escape | Select a sidebar entry |
+| Leave search | Escape | Select a sidebar entry |
 | Help / quit | `?` / `q`, or Ctrl+C | Keyboard |
 
 Plain playback shortcut letters remain text while the search input has focus. Quitting Peel leaves Cider playing.
@@ -65,11 +68,13 @@ Left and Right move between covers on Home, Albums, Artists, and artist pages, a
 
 Apple Music does not report how often you played a song, so an artist page shows Apple's top songs for that artist, its most played songs across Apple Music. Selecting one plays that song. Search shows up to three matching artists above the songs and albums.
 
-The heart sets Apple Music's favourite rating through Cider, then reads the stored rating back before it changes. Apple Music may also add the song to your library.
+The heart sets Apple Music's favourite rating, then reads the stored rating back before it changes. It shows filled or empty only once Apple has answered. Until then `f` does nothing, so an unknown state cannot remove a favourite and move it in Favourite Songs. Ratings belong to catalog songs, so library songs are rated through their catalog entry.
+
+Filtering, sorting, or narrowing to favourites first loads the rest of the list, so it covers the whole playlist. Rows keep their playlist number. Selecting a song plays the list as shown.
 
 ## Settings
 
-Layout changes save to `~/.config/peel/layout.json`. Home is always first and is not part of the layout editor. `XDG_CONFIG_HOME` selects another configuration root, and `PEEL_CONFIG_DIR` overrides Peel's directory directly. `CIDER_API_BASE` defaults to `http://127.0.0.1:10767`.
+Sidebar changes save to `~/.config/peel/layout.json`. Home is always first and cannot be moved or hidden. `XDG_CONFIG_HOME` selects another configuration root, and `PEEL_CONFIG_DIR` overrides Peel's directory directly. `CIDER_API_BASE` defaults to `http://127.0.0.1:10767`.
 
 Peel keeps Home's shelves and downloaded covers in `~/.cache/peel`. `XDG_CACHE_HOME` and `PEEL_CACHE_DIR` change that location. New releases come from the latest release of each library artist with Apple's favourite flag, from the last 120 days or not yet released, newest first. Peel checks again after six hours, because the check reads every library artist. Recently played reloads each time Home opens.
 

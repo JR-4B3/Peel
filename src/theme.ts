@@ -35,7 +35,9 @@ export const icon = {
   volumeDown: "\u{F075E}",
   volumeUp: "\u{F075D}",
   back: "\u{F004D}",
-  layout: "\u{F062E}",
+  hidden: "\u{F0209}",
+  filter: "\u{F0232}",
+  sort: "\u{F04BA}",
   left: "\u{F0141}",
   right: "\u{F0142}",
 };

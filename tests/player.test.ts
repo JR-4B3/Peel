@@ -167,15 +167,23 @@ describe("the rendered player", () => {
     expect(app.calls.filter(call => call.path === "/audio/volume").at(-1)).toEqual({ path: "/audio/volume", method: "PATCH", body: { volume: 1 } });
   });
 
-  test("layout editor changes the actual sidebar and saves preferences", async () => {
+  test("the focused sidebar moves and hides entries, shows hidden ones dimmed, and saves preferences", async () => {
     const app = await setup();
-    await click(app, "layout"); await app.flush();
-    await click(app, "move-down"); await waitFor(() => app.model.entries()[0].id === "playlist:p.chill");
+    expect(app.renderer.root.findDescendantById("layout")).toBeFalsy();
+    app.ui.sidebar.focus(); await app.flush();
+    expect(app.captureCharFrame()).toContain("hide or show");
+    app.ui.sidebar.selectKey("favourites");
+    app.mockInput.pressArrow("down", { shift: true }); await waitFor(() => app.model.entries()[0].id === "playlist:p.chill");
     await app.flush();
     expect(app.captureCharFrame().indexOf("Background Chill")).toBeLessThan(app.captureCharFrame().indexOf("Favourite Songs"));
-    await click(app, "hide"); await waitFor(() => !app.model.navigation().some(row => row.id === "favourites"));
+    expect(app.ui.sidebar.selectedId()).toBe("favourites");
+    app.mockInput.pressKey("h"); await waitFor(() => !app.model.navigation().some(row => row.id === "favourites"));
     expect(app.saved.length).toBe(2);
-    app.mockInput.pressEscape(); await waitFor(() => !app.model.layout); await app.flush(); expect(app.model.layout).toBe(false);
+    // Still listed while the sidebar has focus, so it can be shown again. Gone once focus moves on.
+    await app.flush(); expect(app.captureCharFrame()).toContain("Favourite Songs");
+    app.ui.tracks.focus(); await app.flush();
+    expect(app.captureCharFrame()).not.toContain("Favourite Songs");
+    expect(app.captureCharFrame()).not.toContain("hide or show");
   });
 
   test("playback bars change only during confirmed playback", async () => {
@@ -357,6 +365,54 @@ describe("home, albums, and favourites", () => {
     expect(app.model.home.releases.map(item => item.id)).toEqual(["a.cached"]);
     expect(app.calls.some(call => call.path === "/v1/me/library/artists")).toBe(false);
     expect(app.model.home.recent.map(item => item.id)).toEqual(["a.soma", "pl.mix"]);
+  });
+
+  test("favourite songs show a heart before their title, and every song in Favourite Songs does", async () => {
+    const app = await setup(120, 36, "songs");
+    await waitFor(() => app.model.items.every(item => item.loved !== undefined)); await app.flush();
+    expect(app.model.items.map(item => [item.id, item.loved])).toEqual([["i.soma", false], ["i.selected", true], ["i.last", false]]);
+    const lines = app.captureCharFrame().split("\n");
+    expect(lines.find(line => line.includes("Selected song"))).toContain(icon.heart);
+    expect(lines.find(line => line.includes("Last song"))).not.toContain(icon.heart);
+    await app.model.open("favourites"); await app.flush();
+    expect(app.model.items.every(item => item.loved)).toBe(true);
+    expect(app.calls.filter(call => call.path.startsWith("/v1/me/ratings/")).length).toBe(1);
+  });
+
+  test("song lists filter by words, sort, show favourites only, and play a filtered song", async () => {
+    const app = await setup(120, 36, "songs");
+    await waitFor(() => app.model.items.every(item => item.loved !== undefined));
+    app.ui.tracks.focus();
+    app.mockInput.pressKey("F", { shift: true }); await app.flush();
+    expect(app.ui.filterInput.focused).toBe(true);
+    await app.mockInput.typeText("LAST");
+    await waitFor(() => app.model.shown.length === 1);
+    expect(app.model.shown[0]!.name).toBe("Last song");
+    await app.flush(); expect(app.captureCharFrame()).toContain("1 of 3");
+    // The row keeps its playlist number, and selecting it plays that song.
+    app.mockInput.pressEnter(); await app.flush();
+    await click(app, "tracks:row:0");
+    await waitFor(() => app.calls.some(call => call.path === "/playback/play-item"));
+    expect(app.calls.find(call => call.path === "/playback/play-item")?.body).toEqual({ id: "i.last", type: "library-songs" });
+    app.mockInput.pressEscape(); await waitFor(() => app.model.shown.length === 3);
+    app.mockInput.pressKey("o"); await app.flush();
+    expect(app.model.filter.sort).toBe("title");
+    expect(app.model.shown.map(item => item.name)).toEqual(["Last song", "Selected song", "Soma"]);
+    app.mockInput.pressKey("*"); await app.flush();
+    expect(app.model.shown.map(item => item.name)).toEqual(["Selected song"]);
+  });
+
+  test("filtering loads the rest of the list first", async () => {
+    const api = fixture(); cleanup.push(() => api.server.stop(true));
+    const pages = [0, 100].map(offset => Array.from({ length: 100 }, (_, n): Media => ({ id: `i.${offset + n}`, type: "library-songs", name: `Song ${offset + n}`, artist: "", album: "", duration: 1 })));
+    const model = new Model(api.library, api.player);
+    model.view = "songs";
+    (model as any).loader = async (offset: number) => ({ items: pages[offset / 100] ?? [], more: offset === 0 });
+    await model.load(false);
+    expect(model.more).toBe(true);
+    await model.setFilter({ text: "song 150" });
+    expect(model.items.length).toBe(200);
+    expect(model.shown.map(item => item.id)).toEqual(["i.150"]);
   });
 
   test("clicking an album cover opens the album, and Escape returns to the same cover", async () => {

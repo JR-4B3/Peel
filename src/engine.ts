@@ -13,6 +13,7 @@ interface State { ready: boolean; signIn: boolean; playback?: Playback }
 interface Queue { position: number; items: { id: string; type: string; attributes: { name?: string; artistName?: string; albumName?: string; durationInMillis?: number } }[] }
 
 export class Engine implements Player {
+  readonly queuesItems = true;
   private access?: { port: number; key: string };
 
   constructor(private home = engineHome) {}

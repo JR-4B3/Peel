@@ -64,6 +64,11 @@ export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number
       { id: "l.soma", type: "library-albums", attributes: { name: "SOMA", artistName: "Skrillex", trackCount: 3, releaseDate: "2026-01-01" } },
       { id: "l.other", type: "library-albums", attributes: { name: "Other Album", artistName: "Other", trackCount: 3 } },
     ] };
+    else if (path.startsWith("/v1/me/ratings/")) {
+      // Only "Selected song" is a favourite.
+      const ids = (url.searchParams.get("ids") ?? "").split(",");
+      data = { data: ids.filter(id => id === "i.selected").map(id => ({ id, type: "ratings", attributes: { value: 1 } })) };
+    }
     else if (path.startsWith("/v1/me/library/")) data = { data: songs };
     return Response.json(data);
   };

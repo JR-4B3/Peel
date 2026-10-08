@@ -182,6 +182,24 @@ export class AppleMusic implements Library {
     return [...results("songs"), ...results("albums"), ...results("artists")];
   }
 
+  // Catalog songs are rated through their catalog id, songs only in the library as library songs.
+  async ratings(items: Media[]): Promise<Set<string>> {
+    const songs = items.filter(item => /songs/.test(item.type));
+    const ask = async (kind: string, ids: string[]) => {
+      const loved = new Set<string>();
+      for (let start = 0; start < ids.length; start += 100) {
+        const response = await this.request(`v1/me/ratings/${kind}?ids=${ids.slice(start, start + 100).map(encodeURIComponent).join(",")}`);
+        for (const rating of response.data ?? []) if (rating.attributes?.value === 1) loved.add(String(rating.id));
+      }
+      return loved;
+    };
+    const [catalog, library] = await Promise.all([
+      ask("songs", [...new Set(songs.flatMap(item => item.catalogId ? [item.catalogId] : []))]),
+      ask("library-songs", songs.filter(item => !item.catalogId && item.id.startsWith("i.")).map(item => item.id)),
+    ]);
+    return new Set(songs.filter(item => item.catalogId ? catalog.has(item.catalogId) : library.has(item.id)).map(item => item.id));
+  }
+
   // Library artists carry their catalog artist, which has the photo and the artist page.
   async artists(offset = 0): Promise<Page> {
     // Pagination links drop the include parameter, so request each offset explicitly.
