@@ -4,7 +4,8 @@ import { duration, type Media } from "./types";
 import { cover } from "./artwork";
 import { colour, icon } from "./theme";
 
-interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; description?: string; right?: string; active?: boolean; activate: () => void }
+interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
+type Column = "artist" | "album";
 interface Tile { media: Media; caption: string; detail: string; note?: string; noteColour?: string }
 interface Shelf { id: string; title: string; tiles: Tile[]; empty: string }
 
@@ -80,6 +81,8 @@ class ClickList extends BoxRenderable {
   rows: Row[] = [];
   index = 0;
   offset = 0;
+  // Wide song lists are tables: one line per song, with these columns between title and time.
+  columns?: Column[];
   onSelection?: (row: Row) => void;
 
   constructor(renderer: CliRenderer, id: string, public rowHeight = 2) {
@@ -105,11 +108,12 @@ class ClickList extends BoxRenderable {
   protected onResize() { if (this.rows) this.drawRows(); }
   drawRows() {
     if (!this.rows || !this.rowHeight) return;
+    for (const child of this.getChildren()) { this.remove(child); child.destroyRecursively(); }
+    if (this.columns) return this.drawTable(this.columns);
     const visible = Math.max(1, Math.floor(this.height / this.rowHeight));
     if (this.index < this.offset) this.offset = this.index;
     if (this.index >= this.offset + visible) this.offset = this.index - visible + 1;
     this.offset = Math.min(this.offset, Math.max(0, this.rows.length - visible));
-    for (const child of this.getChildren()) { this.remove(child); child.destroyRecursively(); }
     this.rows.slice(this.offset, this.offset + visible).forEach((row, position) => {
       const index = this.offset + position;
       const box = new BoxRenderable(this.ctx, {
@@ -127,6 +131,41 @@ class ClickList extends BoxRenderable {
       box.add(line);
       if (this.rowHeight > 1) box.add(new TextRenderable(this.ctx, { content: row.description ?? "", fg: colour.muted, width: "100%", height: 1, truncate: true, selectable: false, marginLeft: row.lead === undefined ? 0 : row.lead.length + 1 }));
       this.add(box);
+    });
+  }
+
+  // A header line names the columns. Title, artist, and album share the width 4:3:3.
+  private drawTable(columns: Column[]) {
+    const lead = Math.max(0, ...this.rows.map(row => Bun.stringWidth(row.lead ?? "")));
+    const gap = 2, free = Math.max(columns.length + 1, this.width - 2 - lead - 5 - gap * (columns.length + 2));
+    const share = Math.floor(free * 3 / (4 + 3 * columns.length));
+    const widths = { name: free - share * columns.length, artist: share, album: share };
+    const line = (top: number, cells: { lead: string; leadColour?: string; name: string; nameColour: string; artist?: string; album?: string; right: string; tint: string }, options: Record<string, unknown> = {}) => {
+      const box = new BoxRenderable(this.ctx, { position: "absolute", top, width: "100%", height: 1, paddingX: 1, flexDirection: "row", gap, ...options });
+      box.add(new TextRenderable(this.ctx, { content: cells.lead.padStart(lead), fg: cells.leadColour ?? colour.faint, width: lead, height: 1, flexShrink: 0, selectable: false }));
+      box.add(new TextRenderable(this.ctx, { content: fit(cells.name, widths.name), fg: cells.nameColour, width: widths.name, height: 1, flexShrink: 0, selectable: false }));
+      for (const column of columns) box.add(new TextRenderable(this.ctx, { content: fit(cells[column] ?? "", widths[column]), fg: cells.tint, width: widths[column], height: 1, flexShrink: 0, selectable: false }));
+      box.add(new TextRenderable(this.ctx, { content: cells.right.padStart(5), fg: cells.tint, width: 5, height: 1, flexShrink: 0, selectable: false }));
+      this.add(box);
+      return box;
+    };
+    line(0, { lead: "", name: "Title", nameColour: colour.faint, artist: "Artist", album: "Album", right: "Time", tint: colour.faint });
+    const visible = Math.max(1, this.height - 1);
+    if (this.index < this.offset) this.offset = this.index;
+    if (this.index >= this.offset + visible) this.offset = this.index - visible + 1;
+    this.offset = Math.min(this.offset, Math.max(0, this.rows.length - visible));
+    this.rows.slice(this.offset, this.offset + visible).forEach((row, position) => {
+      const index = this.offset + position;
+      line(position + 1, {
+        lead: row.lead ?? "", leadColour: row.leadColour, name: row.name, nameColour: row.active ? colour.accent : colour.text,
+        artist: row.artist, album: row.album, right: row.right ?? "", tint: colour.muted,
+      }, {
+        id: `${this.id}:row:${row.id}`, backgroundColor: index === this.index ? colour.selected : "transparent",
+        onMouseDown: (event: MouseEvent) => {
+          if (event.button !== 0) return;
+          event.stopPropagation(); this.focus(); this.index = index; this.drawRows(); row.activate();
+        },
+      });
     });
   }
 }
@@ -159,33 +198,27 @@ class CoverGrid extends BoxRenderable {
     });
   }
 
-  // Covers shrink until a whole tile row and its heading fit. Cells are about twice as tall as wide.
   private get headings() { return this.shelves.some(shelf => shelf.title) && this.height >= 9; }
+  // Only whole rows are shown. Pick the cover size whose rows and columns fill most of
+  // the panel, preferring larger covers when the fit is close. Cells are about twice as
+  // tall as wide. Keep three columns where they fit, so narrow windows still show a choice.
+  // Shelves (Home, artist pages) show at least two shelves at once and scroll to the rest.
   private get coverWidth() {
-    if (this.wrap) return this.gridCover();
-    let width = this.width >= 120 ? 16 : this.width >= 80 ? 14 : this.width >= 56 ? 12 : 10;
-    const tile = (cover: number) => cover / 2 + 4 + (this.notes ? 1 : 0) + (this.headings ? 1 : 0);
-    // Home keeps every shelf on screen while covers stay readable.
-    const shelves = this.wrap ? 1 : this.shelves.length;
-    while (width > 10 && shelves * (tile(width) + 1) > this.height) width -= 2;
-    while (width > 4 && tile(width) > this.height) width -= 2;
-    return width;
-  }
-  // A wrapping grid shows only whole rows. Pick the cover size whose rows and
-  // columns fill most of the panel, preferring larger covers when the fit is close.
-  // Keep three columns where they fit, so narrow windows still show a choice.
-  private gridCover() {
-    const extra = 4 + (this.notes ? 1 : 0);
-    const minimum = Math.min(3, Math.floor((this.width - 1) / 13));
+    const tile = (width: number) => width / 2 + 4 + (this.notes ? 1 : 0);
+    // A wrapped row follows the previous one directly. A shelf adds its heading and a blank line.
+    const block = (width: number) => this.wrap ? tile(width) : tile(width) + (this.headings ? 1 : 0) + 1;
+    const count = this.wrap ? Infinity : this.shelves.length;
+    const minimum = Math.max(1, Math.min(3, Math.floor((this.width - 1) / 13)));
     let best = 0, score = 0;
     for (let width = 10; width <= 24; width += 2) {
-      const columns = Math.floor((this.width - 1) / (width + 3)), rows = Math.floor(this.height / (width / 2 + extra));
-      const used = columns * (width + 2) * rows * (width / 2 + extra) / (this.width * this.height);
-      if (columns >= Math.max(1, minimum) && rows && used > score - 0.03) { best = width; score = Math.max(score, used); }
+      const columns = Math.floor((this.width - 1) / (width + 3));
+      const rows = Math.min(count, Math.floor((this.height + (this.wrap ? 0 : 1)) / block(width)));
+      const used = columns * (width + 2) * rows * tile(width) / (this.width * this.height);
+      if (columns >= minimum && rows >= Math.min(count, 2) && used > score - 0.03) { best = width; score = Math.max(score, used); }
     }
     if (best) return best;
     let width = 10;
-    while (width > 4 && width / 2 + extra > this.height) width -= 2;
+    while (width > 4 && block(width) > this.height + 1) width -= 2;
     return width;
   }
   private get tileWidth() { return this.coverWidth + 2; }
@@ -275,28 +308,30 @@ class CoverGrid extends BoxRenderable {
         start = Math.min(start, Math.max(0, shelf.tiles.length - columns));
         this.starts.set(shelf.id, start);
       }
-      if (shelf.title && this.headings) {
-        blocks.push({ y, height: 1, shelf: shelfIndex, draw: top => this.drawHeading(shelf, top) });
-        y += 1;
-      }
+      // A heading is drawn with the shelf's first row, so it never appears without covers.
+      const heading = shelf.title && this.headings ? 1 : 0;
+      const title = (top: number) => { if (heading) this.drawHeading(shelf, top); };
       if (!shelf.tiles.length) {
-        blocks.push({ y, height: 1, shelf: shelfIndex, draw: top => this.add(new TextRenderable(this.ctx, { content: shelf.empty, fg: colour.muted, position: "absolute", top, left: 2, height: 1, width: this.width - 2, truncate: true })) });
-        y += 3;
+        blocks.push({ y, height: heading + 1, shelf: shelfIndex, draw: top => { title(top); this.add(new TextRenderable(this.ctx, { content: shelf.empty, fg: colour.muted, position: "absolute", top: top + heading, left: 2, height: 1, width: this.width - 2, truncate: true })); } });
+        y += heading + 3;
         return;
       }
       const rows = this.wrap
         ? Array.from({ length: Math.ceil(shelf.tiles.length / columns) }, (_, row) => shelf.tiles.slice(row * columns, row * columns + columns).map((_, column) => row * columns + column))
         : [Array.from({ length: Math.min(columns, shelf.tiles.length) }, (_, column) => (this.starts.get(shelf.id) ?? 0) + column)];
-      for (const indexes of rows) {
-        blocks.push({ y, height: tileHeight, shelf: shelfIndex, tiles: indexes, draw: top => indexes.forEach((index, column) => this.drawTile(shelf, shelfIndex, index, 1 + column * (tileWidth + gap), top)) });
-        y += tileHeight;
-      }
+      rows.forEach((indexes, row) => {
+        const lead = row ? 0 : heading;
+        blocks.push({ y, height: lead + tileHeight, shelf: shelfIndex, tiles: indexes, draw: top => {
+          if (lead) title(top);
+          indexes.forEach((index, column) => this.drawTile(shelf, shelfIndex, index, 1 + column * (tileWidth + gap), top + lead));
+        } });
+        y += lead + tileHeight;
+      });
       y += 1;
     });
     const current = blocks.find(block => block.shelf === this.shelf && block.tiles?.includes(this.tile));
     if (current) {
-      const heading = blocks.find(block => block.shelf === this.shelf && !block.tiles);
-      const top = heading && this.shelves[this.shelf].tiles.indexOf(this.selected()!) < columns ? heading.y : current.y;
+      const top = current.y;
       if (top < this.scrollTop) this.scrollTop = top;
       if (current.y + current.height > this.scrollTop + this.height) this.scrollTop = current.y + current.height - this.height;
     }
@@ -355,11 +390,17 @@ export class PeelUI {
   private sidebarPanel: BoxRenderable;
   private trackPanel: BoxRenderable;
   private header: BoxRenderable;
+  private top: BoxRenderable;
+  private songs: BoxRenderable;
+  // Layout getters report the last computed size, so the sizes just set are kept here.
+  private headerHeight = 10;
+  private coverWidth = 16;
   private headerCover: Cover;
   private headerName: TextRenderable;
   private headerArtist: TextRenderable;
   private headerMeta: TextRenderable;
   private section: TextRenderable;
+  private brand: TextRenderable;
   private controls: BoxRenderable;
   private playerPanel: BoxRenderable;
   private playerCover: Cover;
@@ -398,14 +439,18 @@ export class PeelUI {
     const panel = { border: true, borderStyle: "rounded" as const, borderColor: colour.faint };
     this.root = new BoxRenderable(ctx, { id: "peel", width: "100%", height: "100%", flexDirection: "column", paddingX: 1 });
     renderer.root.add(this.root);
-    const heading = new BoxRenderable(ctx, { height: 1, flexDirection: "row", justifyContent: "space-between", paddingX: 1 });
-    heading.add(new TextRenderable(ctx, { content: t`${bold(fg(colour.accent)("peel"))}  ${fg(colour.faint)("Apple Music")}`, height: 1, selectable: false }));
-    heading.add(this.button("layout", icon.layout, "Layout  l", () => this.toggleLayout()));
-    this.root.add(heading);
-    const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1 } as any);
+    // The name, the search field, and the layout editor share one bar.
+    const bar = new BoxRenderable(ctx, { height: 3, flexDirection: "row", gap: 2, flexShrink: 0 });
+    this.brand = new TextRenderable(ctx, { content: t`${bold(fg(colour.accent)("peel"))}`, height: 1, marginTop: 1, marginLeft: 1, flexShrink: 0, selectable: false });
+    bar.add(this.brand);
+    const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1, flexGrow: 1, minWidth: 0 } as any);
     this.search = new InputRenderable(ctx, { id: "search", width: "100%", placeholder: "Type a song, album, or artist and press Enter", textColor: colour.text, placeholderColor: colour.faint, backgroundColor: "transparent", focusedBackgroundColor: "transparent" } as any);
     this.search.on("enter", () => { void this.model.search(this.search.value); this.tracks.focus(); });
-    searchBox.add(this.search); this.root.add(searchBox);
+    searchBox.add(this.search); bar.add(searchBox);
+    const layout = this.button("layout", icon.layout, "Layout  l", () => this.toggleLayout());
+    layout.marginTop = 1; layout.marginRight = 1; layout.flexShrink = 0;
+    bar.add(layout);
+    this.root.add(bar);
 
     this.body = new BoxRenderable(ctx, { flexDirection: "row", flexGrow: 1, minHeight: 0, gap: 1 });
     this.sidebarPanel = new BoxRenderable(ctx, { id: "sidebar-panel", ...panel, width: 28, flexShrink: 0, paddingY: 0 });
@@ -425,14 +470,18 @@ export class PeelUI {
     actions.add(this.button("back", icon.back, "Back  esc", () => this.back()));
     for (const item of [this.headerName, this.headerArtist, this.headerMeta, actions]) info.add(item);
     this.header.add(this.headerCover); this.header.add(info);
-    this.trackPanel.add(this.header);
-
+    // The header and the song list. Album pages stack them; wide artist pages put the top songs beside the artist.
+    this.top = new BoxRenderable(ctx, { id: "top", flexDirection: "column", flexGrow: 1, minHeight: 0, minWidth: 0, flexShrink: 0 });
+    this.top.add(this.header);
+    this.songs = new BoxRenderable(ctx, { id: "songs", flexDirection: "column", flexGrow: 1, minHeight: 0, minWidth: 0 });
     this.empty = new TextRenderable(ctx, { id: "empty", content: "Connecting...", fg: colour.muted, height: 2, paddingX: 1 });
-    this.trackPanel.add(this.empty);
-    this.section = new TextRenderable(ctx, { id: "top-songs", content: t`${bold(fg(colour.text)("Top songs"))}`, height: 1, marginLeft: 1, flexShrink: 0, selectable: false });
-    this.trackPanel.add(this.section);
+    this.songs.add(this.empty);
+    this.section = new TextRenderable(ctx, { id: "top-songs", content: "", height: 1, marginLeft: 1, flexShrink: 0, selectable: false });
+    this.songs.add(this.section);
     this.tracks = new ClickList(renderer, "tracks");
-    this.trackPanel.add(this.tracks);
+    this.songs.add(this.tracks);
+    this.top.add(this.songs);
+    this.trackPanel.add(this.top);
     this.grid = new CoverGrid(renderer, "grid");
     this.grid.onActivate = media => void this.model.activate(media);
     this.grid.onNearEnd = () => { if (this.model.more && !this.model.loading) void this.model.load(true); };
@@ -496,7 +545,7 @@ export class PeelUI {
   private content() {
     const display = this.model.layout ? "list" : this.model.display;
     // An artist page has top songs above its album shelves. Keep focus in the part that has it.
-    if (display === "artist") return this.grid.focused || !this.model.items.length && this.model.shelves.length ? this.grid : this.tracks;
+    if (display === "sections") return this.grid.focused || !this.model.items.length && this.model.shelves.length ? this.grid : this.tracks;
     return display === "list" ? this.tracks : this.grid;
   }
   private focusContent() { this.content().focus(); }
@@ -509,18 +558,67 @@ export class PeelUI {
     this.sidebarPanel.width = narrow ? "100%" : 28;
     this.sidebarPanel.height = narrow ? height < 28 ? 3 : 5 : "100%";
     this.playerCover.visible = width >= 60;
-    for (const button of this.buttons) { button.showHint = width >= 100 || ["layout", "play-collection", "back", "move-up", "move-down", "hide"].includes(button.id); button.paint(); }
+    this.brand.visible = width >= 60;
+    for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "back", "move-up", "move-down", "hide"].includes(button.id) || button.id === "layout" && width >= 76; button.paint(); }
     this.sizeHeader();
     this.drawPlayback();
+  }
+
+  // Places the header, the song list, and the shelves for the current view.
+  private arrange(display: string) {
+    const model = this.model, width = this.renderer.terminalWidth;
+    const sections = display === "sections", songs = model.items.length > 0;
+    const header = !model.layout && !!model.detail;
+    // The panel's inner width, beside the sidebar on wide terminals.
+    const inner = width - (width < 76 ? 4 : 33);
+    // Wide artist pages list the top songs beside the artist, which leaves the height to the shelves.
+    const beside = sections && header && songs && inner >= 110;
+    this.header.visible = header;
+    this.grid.visible = display !== "list";
+    this.top.visible = display === "list" || sections && (header || songs);
+    this.top.flexDirection = beside ? "row" : "column";
+    const headerWidth = this.coverWidth + 36;
+    this.header.width = beside ? headerWidth : "auto";
+    this.header.flexShrink = 0;
+    this.tracks.visible = display === "list" || sections && songs;
+    this.section.visible = sections && songs;
+    this.section.content = t`${bold(fg(colour.text)(model.view === "search" ? "Songs" : "Top songs"))}`;
+    this.songs.paddingTop = beside ? 1 : 0;
+    this.songs.paddingBottom = sections && !beside ? 1 : 0;
+
+    // Song tables need room for their columns. Narrow lists keep two lines per song.
+    const detail = model.detail;
+    const columns: Column[] | undefined = model.layout || !songs ? undefined
+      : model.view.startsWith("artist:") ? ["album"]
+      : detail?.type.includes("albums") ? (model.items.some(item => item.artist && item.artist !== detail.artist) ? ["artist"] : [])
+      : ["artist", "album"];
+    const table = !!columns && (beside ? inner - headerWidth : inner) >= 90;
+    this.tracks.columns = table ? columns : undefined;
+    this.tracks.rowHeight = table || detail && !model.layout ? 1 : 2;
+
+    if (!sections) {
+      this.top.flexGrow = 1; this.top.height = "auto"; this.tracks.flexGrow = 1; this.tracks.height = "auto";
+      return;
+    }
+    // Top songs and search songs take a few rows and scroll. The shelves below take the rest.
+    const panel = this.renderer.terminalHeight - 12;
+    const shown = Math.min(model.items.length, beside ? this.headerHeight - 2 - (table ? 1 : 0)
+      : model.view === "search" ? Math.max(3, Math.floor(panel * 0.35)) : panel >= 22 ? 5 : panel >= 16 ? 3 : 2);
+    const listHeight = songs ? shown * this.tracks.rowHeight + (table ? 1 : 0) : 0;
+    this.tracks.flexGrow = 0; this.tracks.height = listHeight;
+    this.top.flexGrow = 0;
+    this.top.height = beside ? this.headerHeight : (header ? this.headerHeight : 0) + (songs ? 1 + listHeight + 1 : 0);
   }
 
   // An artist page also needs room for top songs and a shelf of covers.
   private sizeHeader() {
     const width = this.renderer.terminalWidth, height = this.renderer.terminalHeight;
-    const compact = height < (this.model.display === "artist" ? 44 : 30) || width < 76;
-    this.header.height = compact ? 5 : 10;
-    this.headerCover.setSize(compact ? 6 : 16, compact ? 3 : 8);
-    this.headerMeta.visible = !compact || this.model.display === "artist" && height >= 30;
+    const compact = height < (this.model.display === "sections" ? 44 : 30) || width < 76;
+    this.headerHeight = compact ? 5 : 10;
+    this.coverWidth = compact ? 6 : 16;
+    this.header.height = this.headerHeight;
+    this.headerCover.setSize(this.coverWidth, compact ? 3 : 8);
+    this.headerMeta.visible = !compact || this.model.display === "sections" && height >= 30;
     this.header.paddingY = compact && this.headerMeta.visible ? 0 : 1;
   }
 
@@ -531,9 +629,10 @@ export class PeelUI {
       return [{ id: kind, title: "", empty: model.loading ? `Loading your ${kind}...` : `No ${kind} in your library yet.`,
         tiles: model.items.map(item => ({ media: item, caption: item.name, detail: kind === "artists" ? item.genre ?? "" : item.artist })) }];
     }
-    if (model.display === "artist") {
+    if (model.display === "sections") {
       const shelves = model.shelves.filter(shelf => shelf.items.length).map(shelf => ({ id: shelf.id, title: shelf.title, empty: "",
-        tiles: shelf.items.map(item => ({ media: item, caption: release(item.name), detail: shelf.id === "appears-on-albums" ? item.artist : item.releaseDate?.slice(0, 4) ?? "" })) }));
+        tiles: shelf.items.map(item => ({ media: item, caption: release(item.name),
+          detail: shelf.id === "artists" ? item.genre ?? "" : shelf.id === "albums" || shelf.id === "appears-on-albums" ? item.artist : item.releaseDate?.slice(0, 4) ?? "" })) }));
       return shelves.length ? shelves : [{ id: "none", title: "", tiles: [], empty: model.loading ? "Loading albums..." : "No albums on Apple Music." }];
     }
     const now = today();
@@ -553,19 +652,11 @@ export class PeelUI {
     const model = this.model;
     const display = model.layout ? "list" : model.display;
     this.status.content = model.status;
-    const artist = display === "artist";
+    const artist = display === "sections";
     this.sizeHeader();
-    this.trackPanel.title = model.layout ? "Layout  choose a row, then move or hide it" : artist ? "Artist" : model.detail ? (model.detail.type.includes("playlist") ? "Playlist" : "Album") : model.title;
+    this.trackPanel.title = model.layout ? "Layout  choose a row, then move or hide it" : model.view.startsWith("artist:") ? "Artist" : model.detail ? (model.detail.type.includes("playlist") ? "Playlist" : "Album") : model.title;
     this.layoutControls.visible = model.layout;
-    this.header.visible = !model.layout && !!model.detail;
-    this.grid.visible = display !== "list";
-    this.tracks.visible = display === "list" || artist && model.items.length > 0;
-    this.section.visible = artist && model.items.length > 0;
-    // Top songs take a few rows and scroll. The album shelves below take the rest.
-    const songRows = this.renderer.terminalHeight >= 34 ? 5 : this.renderer.terminalHeight >= 28 ? 3 : 2;
-    this.tracks.flexGrow = artist ? 0 : 1;
-    this.tracks.height = artist ? Math.min(songRows, model.items.length) : "auto";
-    this.tracks.rowHeight = model.detail && !model.layout ? 1 : 2;
+    this.arrange(display);
     this.empty.visible = display === "list" && !model.layout && !model.items.length;
     this.empty.content = model.loading ? "Loading..." : model.view === "queue" && !model.connected ? "Cider is not running yet. The queue starts with your first song."
       : "Nothing here yet. Search above or choose something on the left.";
@@ -608,7 +699,7 @@ export class PeelUI {
       if (artist && !this.grid.focused && !this.tracks.focused && !this.search.focused && !this.sidebar.focused) this.content().focus();
     }
     const playing = model.playback.nowPlaying;
-    const rowsKey = JSON.stringify([model.layout, model.layout ? model.entries(true).map(item => [item.id, item.name, item.hidden]) : [model.view, model.items], playing?.name, playing?.artistName]);
+    const rowsKey = JSON.stringify([model.layout, model.layout ? model.entries(true).map(item => [item.id, item.name, item.hidden]) : [model.view, model.items], playing?.name, playing?.artistName, this.tracks.columns, this.tracks.rowHeight]);
     if (rowsKey !== this.lastRows) {
       this.lastRows = rowsKey;
       if (model.layout) this.tracks.setRows(model.entries(true).map(item => ({
@@ -622,7 +713,7 @@ export class PeelUI {
           id: String(index), key: item.id, active,
           lead: active ? icon.play : collection ? glyph(item) : String(index + 1).padStart(String(model.items.length).length, " "),
           leadColour: active ? colour.accent : colour.faint,
-          name: item.name, right: item.duration ? duration(item.duration) : undefined,
+          name: item.name, artist: item.artist, album: item.album, right: item.duration ? duration(item.duration) : undefined,
           description: item.type.includes("artists") ? ["Artist", item.genre].filter(Boolean).join("  /  ")
             : [item.artist, collection ? (item.type.includes("playlist") ? "Playlist" : "Album") : item.album].filter(Boolean).join("  /  "),
           activate: () => void model.activate(item),
@@ -682,8 +773,8 @@ export class PeelUI {
     if (!closed) return false;
     this.update();
     // On an artist page the closed album is in a shelf, and anything else was opened from its top songs.
-    const shelf = this.model.display === "artist" && this.model.shelves.some(shelf => shelf.items.some(item => item.id === closed.id));
-    if (this.model.display === "artist") (shelf ? this.grid : this.tracks).focus();
+    const shelf = this.model.display === "sections" && this.model.shelves.some(shelf => shelf.items.some(item => item.id === closed.id));
+    if (this.model.display === "sections") (shelf ? this.grid : this.tracks).focus();
     if (this.content() === this.grid) this.grid.select(closed.id); else this.tracks.selectKey(closed.id);
     this.focusContent();
     return true;
@@ -709,7 +800,7 @@ export class PeelUI {
     else if (key.ctrl && key.name === "f") action = () => this.search.focus();
     else if (key.ctrl && key.name === "p") action = () => void model.act("/playback/toggle");
     else if (key.name === "tab") action = () => {
-      const artist = !model.layout && model.display === "artist";
+      const artist = !model.layout && model.display === "sections";
       const targets = [this.search, this.sidebar, ...artist ? [this.tracks, this.grid].filter(target => target.visible) : [this.content()]];
       const index = targets.findIndex(target => target.focused);
       targets[(index + (key.shift ? targets.length - 1 : 1)) % targets.length].focus();
@@ -728,8 +819,8 @@ export class PeelUI {
     else if (model.layout && (key.name === "j" || key.name === "k") && key.shift) action = () => this.reorder(key.name === "j" ? 1 : -1);
     else if (model.layout && key.name === "h") action = () => this.hideSelected();
     else if (key.name === "a") action = () => this.openArtist();
-    else if (model.display === "artist" && grid && ["up", "k"].includes(key.name) && this.grid.atTop() && this.tracks.visible) action = () => this.tracks.focus();
-    else if (model.display === "artist" && this.tracks.focused && ["down", "j"].includes(key.name) && this.tracks.atEnd()) action = () => this.grid.focus();
+    else if (model.display === "sections" && grid && ["up", "k"].includes(key.name) && this.grid.atTop() && this.tracks.visible) action = () => this.tracks.focus();
+    else if (model.display === "sections" && this.tracks.focused && ["down", "j"].includes(key.name) && this.tracks.atEnd()) action = () => this.grid.focus();
     else if (grid && ["up", "down", "j", "k"].includes(key.name)) action = () => this.grid.move(0, ["up", "k"].includes(key.name) ? -1 : 1);
     else if (grid && ["left", "right"].includes(key.name) && !key.shift) action = () => this.grid.move(key.name === "right" ? 1 : -1, 0);
     else if (["up", "down", "j", "k"].includes(key.name)) action = () => (this.sidebar.focused ? this.sidebar : this.tracks).move(["up", "k"].includes(key.name) ? -1 : 1);

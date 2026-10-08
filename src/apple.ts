@@ -167,9 +167,8 @@ export class AppleMusic implements Library {
   async search(term: string): Promise<Media[]> {
     if (!term.trim()) return [];
     const response = await this.request(`v1/catalog/$STOREFRONT/search?${new URLSearchParams({ term, types: "artists,songs,albums", limit: "25" })}`);
-    // A few artists lead the results. More would push the songs out of view.
     const results = (type: string) => (response.results?.[type]?.data ?? []).map((item: Resource) => media(item, type));
-    return [...results("artists").slice(0, 3), ...results("songs"), ...results("albums")];
+    return [...results("songs"), ...results("albums"), ...results("artists")];
   }
 
   // Library artists carry their catalog artist, which has the photo and the artist page.

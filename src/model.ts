@@ -5,7 +5,8 @@ import { stopped, type ArtistShelf, type Home, type Library, type Media, type Pa
 
 export interface Navigation { id: string; name: string; media?: Media; hidden?: boolean }
 export interface HomeStore { read(): Promise<Home | undefined>; write(home: Home): Promise<void> }
-type Display = "home" | "grid" | "list" | "artist";
+// Sections: songs above shelves of covers, on artist pages and in search results.
+type Display = "home" | "grid" | "list" | "sections";
 interface Snapshot { view: string; title: string; items: Media[]; more: boolean; detail?: Media; shelves: ArtistShelf[]; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string } }
 
 // New releases need one request per hundred library artists, so reuse them for a while.
@@ -54,7 +55,7 @@ export class Model extends EventEmitter {
   changed() { this.emit("change"); }
 
   get display(): Display {
-    return this.view === "home" ? "home" : this.view === "albums" || this.view === "artists" ? "grid" : this.view.startsWith("artist:") ? "artist" : "list";
+    return this.view === "home" ? "home" : this.view === "albums" || this.view === "artists" ? "grid" : this.view.startsWith("artist:") || this.view === "search" ? "sections" : "list";
   }
 
   // Home stays first. The layout editor arranges the entries after it.
@@ -198,7 +199,7 @@ export class Model extends EventEmitter {
     const artist = item.type.includes("artists");
     const name = artist ? item.name : item.artist;
     if (!name || item.type.includes("playlists")) { this.status = "Playlists have no artist page."; this.changed(); return; }
-    if (this.display === "artist" && (this.detail?.id === item.id || this.detail?.name === name)) return;
+    if (this.view.startsWith("artist:") && (this.detail?.id === item.id || this.detail?.name === name)) return;
     this.remember();
     const generation = ++this.generation;
     this.view = `artist:${artist ? item.id : name}`; this.title = name; this.layout = false;
@@ -249,7 +250,11 @@ export class Model extends EventEmitter {
     try {
       const items = await this.library.search(term);
       if (generation !== this.generation) return;
-      this.items = items; this.status = `${items.length} search results`;
+      // Songs form the list. Albums and artists get shelves of covers.
+      const of = (kind: string) => items.filter(item => item.type.includes(kind));
+      this.items = items.filter(item => !/albums|artists|playlists/.test(item.type));
+      this.shelves = [{ id: "albums", title: "Albums", items: of("albums") }, { id: "artists", title: "Artists", items: of("artists") }].filter(shelf => shelf.items.length);
+      this.status = `${items.length} search results`;
     } catch (error) { if (generation === this.generation) this.fail(error); }
     finally { if (generation === this.generation) { this.loading = false; this.changed(); } }
   }
