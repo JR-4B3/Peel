@@ -12,6 +12,8 @@ interface Snapshot { view: string; title: string; items: Media[]; more: boolean;
 // New releases need one request per hundred library artists, so reuse them for a while.
 const releasesFresh = 6 * 60 * 60 * 1000;
 const navigationRetry = 10000;
+// Songs queued after a selection beyond the first hundred of a collection.
+const queueTail = 100;
 const memoryStore: HomeStore = { read: async () => undefined, write: async () => {} };
 
 export class Model extends EventEmitter {
@@ -290,7 +292,7 @@ export class Model extends EventEmitter {
     activation.promise = (async () => {
       try {
         if (item.queueIndex !== undefined) await this.act("/queue/jump", { index: item.queueIndex });
-        else if (collection && index >= 0) await this.execute(() => this.player.playCollectionTrack(collection, item, index));
+        else if (collection && index >= 0) await this.execute(() => this.player.playCollectionTrack(collection, item, index, this.items.slice(index + 1, index + 1 + queueTail)));
         else await this.act("/playback/play-item", { id: item.id, type: item.type });
       } finally { activation.pending = false; }
     })();

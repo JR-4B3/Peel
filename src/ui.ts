@@ -87,9 +87,12 @@ class ClickList extends BoxRenderable {
 
   constructor(renderer: CliRenderer, id: string, public rowHeight = 2) {
     super(renderer, { id, flexGrow: 1, minHeight: 0, width: "100%", overflow: "hidden", focusable: true,
-      onMouseScroll: event => { event.stopPropagation(); this.move(event.scroll?.direction === "up" ? -1 : 1); },
+      onMouseScroll: event => { event.stopPropagation(); this.move(event.scroll?.direction === "up" ? -3 : 3); },
     });
   }
+
+  // The rows that fit on screen, for Page Up and Page Down.
+  get page() { return Math.max(1, this.columns ? this.height - 2 : Math.floor(this.height / this.rowHeight) - 1); }
 
   setRows(rows: Row[]) {
     const id = this.rows[this.index]?.id;
@@ -421,6 +424,7 @@ export class PeelUI {
   private tick = 0;
   private interval?: ReturnType<typeof setInterval>;
   private lastRows = "";
+  private lastItems?: Media[];
   private lastSidebar = "";
   private lastShelves = "";
   private disposed = false;
@@ -699,9 +703,10 @@ export class PeelUI {
       if (artist && !this.grid.focused && !this.tracks.focused && !this.search.focused && !this.sidebar.focused) this.content().focus();
     }
     const playing = model.playback.nowPlaying;
-    const rowsKey = JSON.stringify([model.layout, model.layout ? model.entries(true).map(item => [item.id, item.name, item.hidden]) : [model.view, model.items], playing?.name, playing?.artistName, this.tracks.columns, this.tracks.rowHeight]);
-    if (rowsKey !== this.lastRows) {
-      this.lastRows = rowsKey;
+    // Loading a page replaces the items array, so comparing the array is enough to notice new songs.
+    const rowsKey = JSON.stringify([model.layout, model.layout ? model.entries(true).map(item => [item.id, item.name, item.hidden]) : model.view, playing?.name, playing?.artistName, this.tracks.columns, this.tracks.rowHeight]);
+    if (rowsKey !== this.lastRows || model.items !== this.lastItems) {
+      this.lastRows = rowsKey; this.lastItems = model.items;
       if (model.layout) this.tracks.setRows(model.entries(true).map(item => ({
         id: item.id, lead: item.hidden ? "\u{F0209}" : "\u{F0208}", leadColour: item.hidden ? colour.faint : colour.accent,
         name: item.name, description: item.hidden ? "Hidden" : "Shown", activate: () => {},
@@ -824,6 +829,10 @@ export class PeelUI {
     else if (grid && ["up", "down", "j", "k"].includes(key.name)) action = () => this.grid.move(0, ["up", "k"].includes(key.name) ? -1 : 1);
     else if (grid && ["left", "right"].includes(key.name) && !key.shift) action = () => this.grid.move(key.name === "right" ? 1 : -1, 0);
     else if (["up", "down", "j", "k"].includes(key.name)) action = () => (this.sidebar.focused ? this.sidebar : this.tracks).move(["up", "k"].includes(key.name) ? -1 : 1);
+    else if (!grid && ["pageup", "pagedown", "home", "end"].includes(key.name)) action = () => {
+      const list = this.sidebar.focused ? this.sidebar : this.tracks;
+      list.move(key.name === "home" ? -list.rows.length : key.name === "end" ? list.rows.length : (key.name === "pageup" ? -1 : 1) * list.page);
+    };
     else if (key.name === "return") action = () => this.sidebar.focused ? this.sidebar.activate() : grid ? this.grid.activate() : this.tracks.activate();
     else if (key.name === "space") action = () => void model.act("/playback/toggle");
     else if (key.name === "n") action = () => void model.skip(1);

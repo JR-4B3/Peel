@@ -136,6 +136,15 @@ describe("the rendered player", () => {
     expect(app.calls.find(call => call.path === "/playback/play-item")?.body).toEqual({ id: "123", type: "songs" });
   });
 
+  test("End and Home jump to the ends of a song list", async () => {
+    const app = await setup(120, 36, "favourites");
+    app.ui.tracks.focus();
+    app.mockInput.pressKey("END"); await app.flush();
+    expect(app.ui.tracks.index).toBe(2);
+    app.mockInput.pressKey("HOME"); await app.flush();
+    expect(app.ui.tracks.index).toBe(0);
+  });
+
   test("clicking the search field focuses it, and Tab and Escape navigate", async () => {
     const app = await setup();
     await click(app, "search"); await app.mockInput.typeText("hello world");
@@ -287,6 +296,27 @@ test("without a working Apple sign-in, the library is read through Cider's proxy
   // Cider substitutes the storefront itself.
   await rejected.search("soma");
   expect(paths.at(-1)).toStartWith("v1/catalog/$STOREFRONT/search?");
+});
+
+test("a song beyond a collection's first hundred starts at once and queues the following songs", async () => {
+  const api = fixture(); cleanup.push(() => api.server.stop(true));
+  const song = (id: string): Media => ({ id, type: "library-songs", name: id, artist: "Skrillex", album: "SOMA", duration: 200 });
+  const started = Date.now();
+  await api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, song("i.selected"), 810, [song("i.811"), song("i.812")]);
+  expect(Date.now() - started).toBeLessThan(2000);
+  await waitFor(() => api.calls.filter(call => call.path === "/queue/add-later").length === 2);
+  expect(api.calls.filter(call => call.path === "/queue/add-later").map(call => call.body.id)).toEqual(["i.811", "i.812"]);
+  expect((await api.player.queue()).items.map(item => item.id)).toEqual(["i.selected", "i.811", "i.812"]);
+});
+
+test("starting another song stops queueing the rest of a long collection", async () => {
+  const api = fixture({ queueDelay: 20 }); cleanup.push(() => api.server.stop(true));
+  const following = Array.from({ length: 50 }, (_, n): Media => ({ id: `i.${n}`, type: "library-songs", name: `${n}`, artist: "", album: "", duration: 0 }));
+  await api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, { ...following[0]!, id: "i.selected" }, 500, following);
+  await waitFor(() => api.calls.some(call => call.path === "/queue/add-later"));
+  await api.player.command("/playback/play-item", { id: "123", type: "songs" });
+  await Bun.sleep(100);
+  expect(api.calls.filter(call => call.path === "/queue/add-later").length).toBeLessThan(50);
 });
 
 test("layout preferences survive a restart and use private file permissions", async () => {

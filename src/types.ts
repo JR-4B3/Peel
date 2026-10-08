@@ -61,7 +61,7 @@ export interface Player {
   rating(): Promise<number>;
   queue(offset?: number): Promise<Page>;
   queuePosition(): Promise<{ position: number; total: number }>;
-  playCollectionTrack(collection: { id: string; type: string }, track: Media, index: number): Promise<void>;
+  playCollectionTrack(collection: { id: string; type: string }, track: Media, index: number, following?: Media[]): Promise<void>;
   command(path: string, body?: unknown, method?: string): Promise<void>;
 }
 

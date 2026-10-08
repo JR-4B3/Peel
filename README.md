@@ -46,6 +46,7 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Navigate music | Tab or Shift+Tab, then arrow keys and Enter | Click a playlist, cover, or song |
 | Seek while covers have focus | Shift+Left / Shift+Right | Click the progress bar |
 | Open an artist | `a` on a highlighted song or album, otherwise the playing song's artist | The artist name on an album page or in the player |
+| Jump through a long song list | Page Up / Page Down, Home / End | Scroll, three songs at a time |
 | Back from an album, playlist, or artist | Escape or Backspace | Back |
 | Favourite the current song | `f` | Heart |
 | Load another page | `m`, or move to the last row of covers | Scroll down |
@@ -58,7 +59,7 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 
 Plain playback shortcut letters remain text while the search input has focus. Quitting Peel leaves Cider playing.
 
-Selecting a song in a playlist or album starts that song directly, then adds its collection and restores its position in the displayed order. The collection's first song never starts as an intermediate step. Next and Previous continue through the collection. A double-click on the same song starts it once. Shuffle can change the order afterwards. Manual Next and Previous still change tracks in repeat-one mode and preserve the repeat setting.
+Selecting a song in a playlist or album starts that song directly, then adds its collection and restores its position in the displayed order. Cider adds only the first hundred songs of a collection, so a song further down starts at once and the next hundred loaded songs are queued after it in the background. The songs before it are not queued then, and selecting another song stops the queueing. The collection's first song never starts as an intermediate step. Next and Previous continue through the collection. A double-click on the same song starts it once. Shuffle can change the order afterwards. Manual Next and Previous still change tracks in repeat-one mode and preserve the repeat setting.
 
 Left and Right move between covers on Home, Albums, Artists, and artist pages, and seek in song lists. On Home and artist pages, each row scrolls sideways. Click the arrows beside a row's title to page through it. On an artist page, Down from the last top song moves into the album rows, and Up from the first row returns to the songs.
 

@@ -3,7 +3,7 @@ import { Cider } from "../src/cider";
 import { stopped, type Playback } from "../src/types";
 
 // Serve Cider's v2 envelopes for playback and Apple Music's native JSON for the library.
-export function fixture(options: { waitForDecoder?: boolean } = {}) {
+export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number } = {}) {
   const playback: Playback = { ...structuredClone(stopped), nowPlaying: { name: "Soma", artistName: "Skrillex" }, time: { currentTime: 30, duration: 200 } };
   const calls: { path: string; method: string; body: any }[] = [];
   const song = { id: "i.soma", name: "Soma", artistName: "Skrillex", albumName: "SOMA", durationMs: 200000 };
@@ -90,6 +90,7 @@ export function fixture(options: { waitForDecoder?: boolean } = {}) {
       playback.nowPlaying = { name: song.name, artistName: song.artistName };
       audible.push(song.id);
     }
+    else if (path === "/queue/add-later" && /songs/.test(body.type)) await Bun.sleep(options.queueDelay ?? 0), queue.push({ track: { id: body.id, type: "songs", attributes: { ...song, id: body.id, name: body.id } } });
     else if (path === "/queue/add-later") queue.push(...collection.map(item => ({ track: { id: item.id, type: "songs", attributes: item } })));
     else if (path.startsWith("/queue/items/") && request.method === "DELETE") queue.splice(Number(path.split("/").at(-1)), 1);
     else if (path === "/queue/move") {

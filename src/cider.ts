@@ -1,6 +1,8 @@
 import { media, type Media, type Page, type Playback, type Player } from "./types";
 
 type Resource = Record<string, any>;
+// Cider expands only this many songs when a collection is added to the queue.
+const collectionPage = 100;
 interface Envelope { data: any; meta?: { offset: number; limit: number; total?: number }; error?: string | { code: string; message?: string } }
 
 export class Cider implements Player {
@@ -61,9 +63,15 @@ export class Cider implements Player {
     return { items, more: items.length === limit || offset + items.length < (response.meta?.total ?? 0) };
   }
   async queuePosition(): Promise<{ position: number; total: number }> { return (await this.request("/queue/position")).data; }
-  async command(path: string, body: unknown = {}, method = "POST") { await this.request(path, body, method); }
+  async command(path: string, body: unknown = {}, method = "POST") {
+    if (path === "/playback/play-item" || path === "/playback/play-collection" || path === "/queue/jump") this.starts++;
+    await this.request(path, body, method);
+  }
 
-  async playCollectionTrack(collection: { id: string; type: string }, track: Media, index: number) {
+  // Counts playback starts, so a queue still being built stops when another song starts.
+  private starts = 0;
+
+  async playCollectionTrack(collection: { id: string; type: string }, track: Media, index: number, following: Media[] = []) {
     const matches = (resource: Resource | undefined) => {
       if (!resource) return false;
       const item = resource.track ?? resource, attrs = item.attributes ?? item;
@@ -79,6 +87,24 @@ export class Cider implements Player {
       } while (Date.now() < until);
       throw new Error(`Cider did not confirm ${description}. The selected song was started directly.`);
     };
+
+    // Cider appends only a collection's first hundred songs. Beyond those, start the song
+    // and queue the following songs one by one in the background, so playback controls
+    // do not wait for it. The songs before the selection are not queued.
+    if (index >= collectionPage - 1) {
+      await this.command("/playback/shuffle", { enabled: false }, "PUT");
+      await this.command("/playback/play-item", { id: track.id, type: track.type });
+      const start = this.starts;
+      void (async () => {
+        // Cider acknowledges play-item before its decoder has started. Do not change the queue before it plays.
+        await wait(async () => (await this.snapshot()).state === "playing", "the selected song beginning playback");
+        for (const item of following) {
+          if (this.starts !== start) return;
+          await this.request("/queue/add-later", { id: item.id, type: item.type });
+        }
+      })().catch(() => {});
+      return;
+    }
 
     // Starting the collection plays its first track before a later queue jump,
     // and Cider can switch metadata before switching audio. Start only the
