@@ -54,7 +54,8 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Move a sidebar entry | Shift+Up / Shift+Down, or `K` / `J`, with the sidebar focused | |
 | Hide or show a sidebar entry | `h` with the sidebar focused | |
 | Filter a song list | Shift+F, then type. Escape clears the filter | Filter field above the list |
-| Sort a song list | `o` cycles playlist order, title, artist, album, length, and shuffled | Sort |
+| Sort a song list | `o` cycles playlist order, title, artist, album, year, length, and shuffled | Sort |
+| Reverse the order | Shift+O | The arrow beside Sort |
 | Favourites only | `*` | Favourites |
 | Toggle playback bars | `v` | Bars |
 | Leave search | Escape | Select a sidebar entry |
@@ -70,9 +71,13 @@ Apple Music does not report how often you played a song, so an artist page shows
 
 The heart sets Apple Music's favourite rating, then reads the stored rating back before it changes. It shows filled or empty only once Apple has answered. Until then `f` does nothing, so an unknown state cannot remove a favourite and move it in Favourite Songs. Ratings belong to catalog songs, so library songs are rated through their catalog entry.
 
+The filter field takes words and release years together, for example `kanye 2004-2010`. Every word must appear in the title, artist, or album, ignoring case and accents. Years can be a range (`2015-2020`), a bound (`>2018`, `<2000`, `>=2018`, `2018+`), or a decade (`90s`, `1990s`). A bare year such as `2016` matches that release year or the number in a title.
+
 Filtering, sorting, or narrowing to favourites first loads the rest of the list, so it covers the whole playlist. Rows keep their playlist number. Selecting a song plays the list as shown.
 
 ## Settings
+
+Every song in Favourite Songs is a favourite, so its rows show no heart. Set `"heartsInFavourites": true` in `~/.config/peel/layout.json` to show them, then restart Peel.
 
 Sidebar changes save to `~/.config/peel/layout.json`. Home is always first and cannot be moved or hidden. `XDG_CONFIG_HOME` selects another configuration root, and `PEEL_CONFIG_DIR` overrides Peel's directory directly. `CIDER_API_BASE` defaults to `http://127.0.0.1:10767`.
 

@@ -7,11 +7,31 @@ export interface Navigation { id: string; name: string; media?: Media; hidden?: 
 export interface HomeStore { read(): Promise<Home | undefined>; write(home: Home): Promise<void> }
 // Sections: songs above shelves of covers, on artist pages and in search results.
 type Display = "home" | "grid" | "list" | "sections";
-export type Sort = "playlist" | "title" | "artist" | "album" | "length" | "shuffled";
-export const sorts: Record<Sort, string> = { playlist: "Playlist order", title: "Title", artist: "Artist", album: "Album", length: "Length", shuffled: "Shuffled" };
-// What a song list shows: matching words, an order, and optionally favourites only.
-export interface Filter { text: string; sort: Sort; loved: boolean }
-const unfiltered: Filter = { text: "", sort: "playlist", loved: false };
+export type Sort = "playlist" | "title" | "artist" | "album" | "year" | "length" | "shuffled";
+export const sorts: Record<Sort, string> = { playlist: "Playlist order", title: "Title", artist: "Artist", album: "Album", year: "Year", length: "Length", shuffled: "Shuffled" };
+// What a song list shows: matching words and years, an order and its direction, and optionally favourites only.
+export interface Filter { text: string; sort: Sort; descending: boolean; loved: boolean }
+const unfiltered: Filter = { text: "", sort: "playlist", descending: false, loved: false };
+
+// Filter text holds words and release years: "2015-2020", ">2018", "<2000", "2018+", "90s", or "1990s".
+// A bare year such as "2016" matches that release year or the number in a title.
+export function parseFilter(text: string) {
+  const words: string[] = [], years: [number, number][] = [], either: number[] = [];
+  for (const token of text.replace(/(\d{4})\s*(?:-|–|\.\.)\s*(\d{4})/g, "$1-$2").split(/\s+/).filter(Boolean)) {
+    let match: RegExpMatchArray | null;
+    if ((match = token.match(/^(\d{4})-(\d{4})$/))) years.push([Math.min(+match[1]!, +match[2]!), Math.max(+match[1]!, +match[2]!)]);
+    else if ((match = token.match(/^>(=?)(\d{4})$/))) years.push([+match[2]! + (match[1] ? 0 : 1), 9999]);
+    else if ((match = token.match(/^<(=?)(\d{4})$/))) years.push([0, +match[2]! - (match[1] ? 0 : 1)]);
+    else if ((match = token.match(/^(\d{4})\+$/))) years.push([+match[1]!, 9999]);
+    else if ((match = token.match(/^(\d{2}|\d{4})s$/))) {
+      const start = match[1]!.length === 4 ? +match[1]! : (+match[1]! < 30 ? 2000 : 1900) + +match[1]!;
+      years.push([start, start + 9]);
+    }
+    else if (/^\d{4}$/.test(token)) either.push(+token);
+    else words.push(fold(token));
+  }
+  return { words, years, either };
+}
 interface Snapshot { view: string; title: string; items: Media[]; more: boolean; detail?: Media; shelves: ArtistShelf[]; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string }; filter: Filter }
 
 // Case and accents do not matter: "beyonce" finds "Beyoncé".
@@ -294,12 +314,17 @@ export class Model extends EventEmitter {
 
   // The songs as shown: the loaded songs, filtered and sorted.
   get shown(): Media[] {
-    const { text, sort, loved } = this.filter;
-    if (!text.trim() && sort === "playlist" && !loved) return this.items;
+    const { text, sort, descending, loved } = this.filter;
+    if (!text.trim() && sort === "playlist" && !descending && !loved) return this.items;
     const cached = this.filtered;
     if (cached && cached.items === this.items && cached.filter === this.filter && cached.loved === this.lovedRevision) return cached.shown;
-    const words = fold(text).split(/\s+/).filter(Boolean);
-    let shown = this.items.filter(item => (!loved || item.loved) && words.every(word => fold(`${item.name} ${item.artist} ${item.album}`).includes(word)));
+    const { words, years, either } = parseFilter(text);
+    let shown = this.items.filter(item => {
+      if (loved && !item.loved) return false;
+      const haystack = fold(`${item.name} ${item.artist} ${item.album}`), year = Number(item.releaseDate?.slice(0, 4)) || 0;
+      return words.every(word => haystack.includes(word)) && years.every(([from, to]) => year >= from && year <= to)
+        && either.every(value => year === value || haystack.includes(String(value)));
+    });
     const by = (key: (item: Media) => string | number) => (a: Media, b: Media) => {
       const x = key(a), y = key(b);
       return typeof x === "number" && typeof y === "number" ? x - y : String(x).localeCompare(String(y), undefined, { sensitivity: "base", numeric: true });
@@ -308,10 +333,12 @@ export class Model extends EventEmitter {
     else if (sort === "artist") shown = shown.toSorted((a, b) => by(item => item.artist)(a, b) || by(item => item.album)(a, b));
     else if (sort === "album") shown = shown.toSorted((a, b) => by(item => item.album)(a, b) || by(item => item.artist)(a, b));
     else if (sort === "length") shown = shown.toSorted(by(item => item.duration));
+    else if (sort === "year") shown = shown.toSorted((a, b) => by(item => item.releaseDate ?? "")(a, b) || by(item => item.album)(a, b));
     else if (sort === "shuffled") {
       shown = [...shown];
       for (let index = shown.length - 1; index > 0; index--) { const other = Math.floor(Math.random() * (index + 1)); [shown[index], shown[other]] = [shown[other]!, shown[index]!]; }
     }
+    if (descending && sort !== "shuffled") shown = sort === "playlist" ? shown.toReversed() : shown.reverse();
     this.filtered = { items: this.items, filter: this.filter, loved: this.lovedRevision, shown };
     return shown;
   }
@@ -327,7 +354,7 @@ export class Model extends EventEmitter {
     this.filter = { ...this.filter, ...change };
     this.changed();
     const view = this.view;
-    while (this.more && !this.loading && view === this.view && (this.filter.text.trim() || this.filter.sort !== "playlist" || this.filter.loved)) {
+    while (this.more && !this.loading && view === this.view && (this.filter.text.trim() || this.filter.sort !== "playlist" || this.filter.descending || this.filter.loved)) {
       await this.load(true);
       this.status = `Loaded ${this.items.length} songs${this.more ? ", loading more to filter..." : ""}`; this.changed();
     }

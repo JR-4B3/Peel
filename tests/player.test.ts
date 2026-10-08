@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { AppleMusic } from "../src/apple";
 import { Cider } from "../src/cider";
-import { Model } from "../src/model";
+import { Model, parseFilter } from "../src/model";
 import { PeelUI } from "../src/ui";
 import { type Home, type Media } from "../src/types";
 import { icon } from "../src/theme";
@@ -331,7 +331,7 @@ test("starting another song stops queueing the rest of a long collection", async
 
 test("layout preferences survive a restart and use private file permissions", async () => {
   const dir = await mkdtemp(join(tmpdir(), "peel-test-")); cleanup.push(() => rm(dir, { recursive: true }));
-  const value = { order: ["queue", "favourites"], hidden: ["albums"], playbackBars: false };
+  const value = { order: ["queue", "favourites"], hidden: ["albums"], playbackBars: false, heartsInFavourites: true };
   await saveJson("layout.json", value, dir);
   expect(await readPreferences(dir)).toEqual(value);
   expect((await stat(join(dir, "layout.json"))).mode & 0o777).toBe(0o600);
@@ -376,6 +376,10 @@ describe("home, albums, and favourites", () => {
     expect(lines.find(line => line.includes("Last song"))).not.toContain(icon.heart);
     await app.model.open("favourites"); await app.flush();
     expect(app.model.items.every(item => item.loved)).toBe(true);
+    // Every song there is a favourite, so the rows show no heart unless the preference asks for them.
+    expect(app.captureCharFrame()).not.toContain(icon.heart + " Selected song");
+    app.model.preferences = { ...app.model.preferences, heartsInFavourites: true }; app.model.changed(); await app.flush();
+    expect(app.captureCharFrame()).toContain(icon.heart + " Selected song");
     expect(app.calls.filter(call => call.path.startsWith("/v1/me/ratings/")).length).toBe(1);
   });
 
@@ -402,7 +406,29 @@ describe("home, albums, and favourites", () => {
     expect(app.model.shown.map(item => item.name)).toEqual(["Selected song"]);
   });
 
-  test("filtering loads the rest of the list first", async () => {
+  test("filter text understands year ranges, decades, and bounds", () => {
+  expect(parseFilter("kanye 2004 - 2010")).toEqual({ words: ["kanye"], years: [[2004, 2010]], either: [] });
+  expect(parseFilter(">2018 <=2020 90s 1980s 2015+ 2016").years).toEqual([[2019, 9999], [0, 2020], [1990, 1999], [1980, 1989], [2015, 9999]]);
+  expect(parseFilter("2016").either).toEqual([2016]);
+});
+
+test("year filters, year sorting, and reversed order work on the loaded songs", async () => {
+  const api = fixture(); cleanup.push(() => api.server.stop(true));
+  const song = (id: string, year: string, name = id): Media => ({ id, type: "library-songs", name, artist: "", album: "", duration: 1, releaseDate: `${year}-01-01` });
+  const model = new Model(api.library, api.player);
+  model.items = [song("a", "1995"), song("b", "2016", "Song 1999"), song("c", "2021"), song("d", "1999")];
+  await model.setFilter({ text: "90s" });
+  expect(model.shown.map(item => item.id)).toEqual(["a", "d"]);
+  // A bare year matches the release year or a title.
+  await model.setFilter({ text: "1999" });
+  expect(model.shown.map(item => item.id)).toEqual(["b", "d"]);
+  await model.setFilter({ text: "", sort: "year", descending: true });
+  expect(model.shown.map(item => item.id)).toEqual(["c", "b", "d", "a"]);
+  await model.setFilter({ sort: "playlist" });
+  expect(model.shown.map(item => item.id)).toEqual(["d", "c", "b", "a"]);
+});
+
+test("filtering loads the rest of the list first", async () => {
     const api = fixture(); cleanup.push(() => api.server.stop(true));
     const pages = [0, 100].map(offset => Array.from({ length: 100 }, (_, n): Media => ({ id: `i.${offset + n}`, type: "library-songs", name: `Song ${offset + n}`, artist: "", album: "", duration: 1 })));
     const model = new Model(api.library, api.player);

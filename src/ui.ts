@@ -414,6 +414,7 @@ export class PeelUI {
   private filterBar: BoxRenderable;
   readonly filterInput: InputRenderable;
   private sortButton: Button;
+  private directionButton: Button;
   private lovedButton: Button;
   private filterCount: TextRenderable;
   private controls: BoxRenderable;
@@ -498,14 +499,15 @@ export class PeelUI {
     // Song lists can be filtered and sorted. The filter covers the whole list, not only the loaded part.
     this.filterBar = new BoxRenderable(ctx, { id: "filter-bar", height: 1, flexDirection: "row", gap: 2, paddingX: 1, flexShrink: 0, marginBottom: 1 });
     this.filterBar.add(new TextRenderable(ctx, { content: icon.filter, fg: colour.muted, width: 1, height: 1, flexShrink: 0, selectable: false }));
-    this.filterInput = new InputRenderable(ctx, { id: "filter", flexGrow: 1, minWidth: 8, placeholder: "Filter by title, artist, or album   ⇧F", textColor: colour.text, placeholderColor: colour.faint, backgroundColor: "transparent", focusedBackgroundColor: "transparent" } as any);
+    this.filterInput = new InputRenderable(ctx, { id: "filter", flexGrow: 1, minWidth: 8, placeholder: "Filter by title, artist, or album, and years: 2015-2020, >2018, 90s   ⇧F", textColor: colour.text, placeholderColor: colour.faint, backgroundColor: "transparent", focusedBackgroundColor: "transparent" } as any);
     this.filterInput.on("input", (value: string) => void model.setFilter({ text: value }));
     this.filterInput.on("enter", () => this.tracks.focus());
     this.filterBar.add(this.filterInput);
     this.sortButton = this.button("sort", icon.sort, "", () => this.cycleSort());
+    this.directionButton = this.button("sort-direction", "↑", "⇧O", () => void model.setFilter({ descending: !model.filter.descending }), colour.faint);
     this.lovedButton = this.button("loved-only", icon.heartOutline, "", () => void model.setFilter({ loved: !model.filter.loved }), colour.faint);
     this.filterCount = new TextRenderable(ctx, { id: "filter-count", fg: colour.faint, height: 1, flexShrink: 0, selectable: false });
-    for (const item of [this.sortButton, this.lovedButton, this.filterCount]) { item.flexShrink = 0; this.filterBar.add(item); }
+    for (const item of [this.sortButton, this.directionButton, this.lovedButton, this.filterCount]) { item.flexShrink = 0; this.filterBar.add(item); }
     this.songs.add(this.filterBar);
     this.tracks = new ClickList(renderer, "tracks");
     this.songs.add(this.tracks);
@@ -727,7 +729,7 @@ export class PeelUI {
     }
     const playing = model.playback.nowPlaying;
     // Loading a page replaces the items array, so comparing the array is enough to notice new songs.
-    const rowsKey = JSON.stringify([model.view, playing?.name, playing?.artistName, this.tracks.columns, this.tracks.rowHeight, model.lovedRevision]);
+    const rowsKey = JSON.stringify([model.view, playing?.name, playing?.artistName, this.tracks.columns, this.tracks.rowHeight, model.lovedRevision, model.preferences.heartsInFavourites]);
     const shown = model.shown;
     if (rowsKey !== this.lastRows || shown !== this.lastItems) {
       this.lastRows = rowsKey; this.lastItems = shown;
@@ -739,7 +741,7 @@ export class PeelUI {
           id: String(index), key: item.id, active,
           lead: active ? icon.play : collection ? glyph(item) : String((shown === model.items ? index : model.position(item)) + 1).padStart(digits, " "),
           leadColour: active ? colour.accent : colour.faint,
-          name: item.name, loved: item.loved, artist: item.artist, album: item.album, right: item.duration ? duration(item.duration) : undefined,
+          name: item.name, loved: item.loved && (model.view !== "favourites" || model.preferences.heartsInFavourites), artist: item.artist, album: item.album, right: item.duration ? duration(item.duration) : undefined,
           description: item.type.includes("artists") ? ["Artist", item.genre].filter(Boolean).join("  /  ")
             : [item.artist, collection ? (item.type.includes("playlist") ? "Playlist" : "Album") : item.album].filter(Boolean).join("  /  "),
           activate: () => void model.activate(item),
@@ -747,12 +749,15 @@ export class PeelUI {
       }));
     }
     // The filter bar belongs to song lists. The queue follows playback, so it is not filtered.
-    const filtering = model.filter.text.trim() !== "" || model.filter.sort !== "playlist" || model.filter.loved;
+    const filtering = model.filter.text.trim() !== "" || model.filter.sort !== "playlist" || model.filter.descending || model.filter.loved;
     // A short album or playlist is easier to read without it.
     // Shift+F opens it on short lists too.
     this.filterBar.visible = this.filterable() && (model.items.length > 10 || model.more || filtering || this.filterInput.focused);
     if (this.filterInput.value !== model.filter.text && !this.filterInput.focused) this.filterInput.value = model.filter.text;
     this.sortButton.set(icon.sort, `${sorts[model.filter.sort]}  o`, model.filter.sort === "playlist" ? colour.faint : colour.accent);
+    // A shuffled order has no direction.
+    this.directionButton.visible = model.filter.sort !== "shuffled";
+    this.directionButton.set(model.filter.descending ? "↓" : "↑", "⇧O", model.filter.descending ? colour.accent : colour.faint);
     this.lovedButton.visible = model.view !== "favourites";
     this.lovedButton.set(model.filter.loved ? icon.heart : icon.heartOutline, "Favourites  *", model.filter.loved ? colour.heart : colour.faint);
     this.filterCount.content = filtering ? `${shown.length} of ${model.items.length}${model.more ? "+" : ""}` : "";
@@ -860,12 +865,13 @@ export class PeelUI {
     };
     else if (this.search.focused || this.filterInput.focused) return;
     else if (key.name === "f" && key.shift && this.filterable()) action = () => { this.filterBar.visible = true; this.filterInput.focus(); };
+    else if (key.name === "o" && key.shift && this.filterable()) action = () => void model.setFilter({ descending: !model.filter.descending });
     else if (key.name === "o" && this.filterable()) action = () => this.cycleSort();
     else if (key.sequence === "*" && this.filterable() && model.view !== "favourites") action = () => void model.setFilter({ loved: !model.filter.loved });
     else if (key.name === "backspace") action = () => void this.back();
     else if (key.name === "/") action = () => this.search.focus();
     else if (key.name === "q") action = this.quit;
-    else if (key.name === "?" || key.sequence === "?") action = () => { model.status = "Space play/pause  p/n skip  ←/→ seek (Shift in grids)  +/- volume  f favourite  a artist  s shuffle  r repeat  / search  Esc back  ⇧F filter  o sort  m more  v bars  q quit"; model.changed(); };
+    else if (key.name === "?" || key.sequence === "?") action = () => { model.status = "Space play/pause  p/n skip  ←/→ seek (Shift in grids)  +/- volume  f favourite  a artist  s shuffle  r repeat  / search  Esc back  ⇧F filter  o sort  ⇧O reverse  m more  v bars  q quit"; model.changed(); };
     else if (this.sidebar.focused && key.shift && ["up", "down", "j", "k"].includes(key.name)) action = () => this.reorder(["down", "j"].includes(key.name) ? 1 : -1);
     else if (this.sidebar.focused && key.name === "h") action = () => this.hideSelected();
     else if (key.name === "a") action = () => this.openArtist();
