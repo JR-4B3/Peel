@@ -467,10 +467,10 @@ export class PeelUI {
     renderer.root.add(this.root);
     // The logo and the search field share one bar. The logo takes the sidebar's width, so search lines up with the content.
     const bar = new BoxRenderable(ctx, { height: 3, flexDirection: "row", gap: 1, flexShrink: 0 });
-    this.brand = new BoxRenderable(ctx, { id: "brand", width: 28, height: 1, marginTop: 1, flexShrink: 0, flexDirection: "row", gap: 1, paddingLeft: 1 });
-    this.logo = new ImageRenderable(ctx, { id: "logo", height: 1, width: 2, source: logoImage(), fit: "fit", flexShrink: 0 });
+    this.brand = new BoxRenderable(ctx, { id: "brand", width: 28, height: 3, flexShrink: 0, flexDirection: "row", gap: 1, paddingLeft: 1 });
+    this.logo = new ImageRenderable(ctx, { id: "logo", height: 3, width: 6, source: logoImage(), fit: "fit", flexShrink: 0 });
     this.brand.add(this.logo);
-    this.brand.add(new TextRenderable(ctx, { content: "peel", fg: colour.muted, height: 1, flexShrink: 0, selectable: false }));
+    this.brand.add(new TextRenderable(ctx, { content: "peel", fg: colour.muted, height: 1, marginTop: 1, flexShrink: 0, selectable: false }));
     bar.add(this.brand);
     const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1, flexGrow: 1, flexBasis: 0, minWidth: 0 } as any);
     this.search = new InputRenderable(ctx, { id: "search", width: "100%", placeholder: "Type a song, album, or artist and press Enter", textColor: colour.text, placeholderColor: colour.faint, backgroundColor: "transparent", focusedBackgroundColor: "transparent" } as any);
@@ -599,7 +599,7 @@ export class PeelUI {
     this.sidebarPanel.height = narrow ? height < 28 ? 3 : 5 : "100%";
     this.playerCover.visible = width >= 60;
     this.brand.visible = width >= 60;
-    this.logo.width = this.logo.getFittedSize(4, 1).width || 2;
+    this.logo.width = this.logo.getFittedSize(8, 3).width || 6;
     this.brand.width = narrow ? this.logo.width + 6 : 28;
     this.sidebarFooter.visible = !narrow;
     for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "back", "sidebar-edit"].includes(button.id); button.paint(); }

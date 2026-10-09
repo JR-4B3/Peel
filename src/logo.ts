@@ -1,24 +1,33 @@
 import { NativeImage } from "@opentui/core";
 
-// Peel's logo: a small pixel-art apple with its lower half peeled. The interface and
-// assets/peel.svg both draw from this grid. The colours are muted so it sits quietly beside search.
+// Peel's logo: an apple peel in pixel art, still coiled in the shape of the apple.
+// The interface and assets/peel.svg both draw from this grid.
 const palette: Record<string, string> = {
-  S: "#9399b2", // stem and leaf
-  R: "#c7697b", // skin
-  C: "#d8cfb8", // flesh
+  B: "#7a4a36", // stem
+  G: "#a6e3a1", // leaf
+  H: "#ff9eb0", // skin highlight
+  R: "#e8475f", // skin
+  D: "#a3304a", // skin shade
+  C: "#fbe9c0", // inner side of the peel
+  c: "#e2c48c", // inner side, shaded
 };
 
 export const apple = [
-  ".....S....",
-  ".....S.SS.",
-  "..RRRSRRR.",
-  ".RRRRRRRRR",
-  ".RRRRRRRRR",
-  ".CCCCCCCRR",
-  ".CCCCCCCR.",
-  "..CCCCC.R.",
-  "...CCC...R",
-  "........R.",
+  ".......B.......",
+  ".......BGG.....",
+  "...RRRRBRRRRC..",
+  ".CRHRRRRRRRRDD.",
+  "..cc.......cc..",
+  ".RRRRRRRRRRRRRC",
+  "CRHRRRRRRRRRRDc",
+  ".cc.........cc.",
+  ".RRRRRRRRRRRRDC",
+  ".CRRRRRRRRRRDD.",
+  "...cc......cc..",
+  "...RRRRRRRRDD..",
+  "....CRRRRRDc...",
+  ".......RRc.....",
+  "........RD.....",
 ];
 
 export function rgba(rows: string[]) {
