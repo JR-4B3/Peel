@@ -3,7 +3,7 @@ import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
 import { cover } from "./artwork";
 import { colour, icon } from "./theme";
-import { logoImage, wordmarkFile } from "./logo";
+import { logoImage, wordmark } from "./logo";
 
 interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
 type Column = "artist" | "album";
@@ -412,8 +412,9 @@ export class PeelUI {
   private headerMeta: TextRenderable;
   private section: TextRenderable;
   private brand: BoxRenderable;
+  private bar: BoxRenderable;
   private logo: ImageRenderable;
-  private wordmark: ImageRenderable;
+  private wordmark: TextRenderable;
   private filterBar: BoxRenderable;
   readonly filterInput: InputRenderable;
   private sortButton: Button;
@@ -467,11 +468,12 @@ export class PeelUI {
     this.root = new BoxRenderable(ctx, { id: "peel", width: "100%", height: "100%", flexDirection: "column", paddingX: 1 });
     renderer.root.add(this.root);
     // The logo and the search field share one bar. The logo takes the sidebar's width, so search lines up with the content.
-    const bar = new BoxRenderable(ctx, { height: 3, flexDirection: "row", gap: 1, flexShrink: 0 });
-    this.brand = new BoxRenderable(ctx, { id: "brand", width: 28, height: 3, flexShrink: 0, flexDirection: "row", gap: 1, paddingLeft: 1 });
+    this.bar = new BoxRenderable(ctx, { height: 3, flexDirection: "row", gap: 1, flexShrink: 0, alignItems: "flex-start" });
+    const bar = this.bar;
+    this.brand = new BoxRenderable(ctx, { id: "brand", width: 28, height: 4, flexShrink: 0, flexDirection: "row", gap: 1 });
     this.logo = new ImageRenderable(ctx, { id: "logo", height: 3, width: 6, source: logoImage(), fit: "fit", flexShrink: 0 });
     this.brand.add(this.logo);
-    this.wordmark = new ImageRenderable(ctx, { id: "wordmark", height: 3, width: 13, source: wordmarkFile, fit: "fit", flexShrink: 0, onLoad: () => this.resizeLayout() });
+    this.wordmark = new TextRenderable(ctx, { id: "wordmark", content: wordmark, fg: colour.text, height: 4, flexShrink: 0, selectable: false });
     this.brand.add(this.wordmark);
     bar.add(this.brand);
     const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1, flexGrow: 1, flexBasis: 0, minWidth: 0 } as any);
@@ -601,12 +603,14 @@ export class PeelUI {
     this.sidebarPanel.height = narrow ? height < 28 ? 3 : 5 : "100%";
     this.playerCover.visible = width >= 60;
     this.brand.visible = width >= 60;
-    // The images keep their proportions in the terminal's cells. Narrow terminals show the apple alone.
+    // Wide terminals give the name four rows, which leaves a row under search. The apple stays three
+    // rows tall, level with the letters above the p's descender. Narrow terminals show the apple alone.
     const logoWidth = this.logo.getFittedSize(10, 3).width || 6;
     this.logo.width = logoWidth;
-    this.wordmark.width = this.wordmark.getFittedSize(20, 3).width || 13;
     this.wordmark.visible = !narrow;
-    this.brand.width = narrow ? logoWidth + 1 : 28;
+    this.brand.width = narrow ? logoWidth : 28;
+    this.brand.height = narrow ? 3 : 4;
+    this.bar.height = narrow ? 3 : 4;
     this.sidebarFooter.visible = !narrow;
     for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "back", "sidebar-edit"].includes(button.id); button.paint(); }
     this.sizeHeader();
