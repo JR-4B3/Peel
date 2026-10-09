@@ -33,9 +33,9 @@ export const apple = [
 ];
 
 // The name in outline letters, three rows tall like the logo beside it.
-// The name in figlet's "Small Slant" face. The l rises above the other letters and the p descends below them.
+// The name in figlet's "Small Slant" face, without its top row. The l is open at the top, so it
+// still rises above the other letters, and the p descends below them.
 export const wordmark = [
-  "                 __",
   "   ___  ___ ___ / /",
   "  / _ \\/ -_) -_) / ",
   " / .__/\\__/\\__/_/  ",
