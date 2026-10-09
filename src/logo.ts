@@ -1,34 +1,42 @@
 import { NativeImage } from "@opentui/core";
 
-// Peel's logo: an apple peel in pixel art, still coiled in the shape of the apple.
+// Peel's logo: an apple peel in pixel art, a red spiral still in the shape of the apple.
 // The interface and assets/peel.svg both draw from this grid.
 const palette: Record<string, string> = {
   B: "#7a4a36", // stem
-  G: "#a6e3a1", // leaf
-  H: "#ff9eb0", // skin highlight
-  R: "#e8475f", // skin
-  D: "#a3304a", // skin shade
-  C: "#fbe9c0", // inner side of the peel
-  c: "#e2c48c", // inner side, shaded
+  H: "#ff9eb0", // highlight on the front of a turn
+  R: "#e8475f", // the front of a turn
+  D: "#a3304a", // the back of a turn
 };
 
-export const apple = [
-  ".......B.......",
-  ".......BGG.....",
-  "...RRRRBRRRRC..",
-  ".CRHRRRRRRRRDD.",
-  "..cc.......cc..",
-  ".RRRRRRRRRRRRRC",
-  "CRHRRRRRRRRRRDc",
-  ".cc.........cc.",
-  ".RRRRRRRRRRRRDC",
-  ".CRRRRRRRRRRDD.",
-  "...cc......cc..",
-  "...RRRRRRRRDD..",
-  "....CRRRRRDc...",
-  ".......RRc.....",
-  "........RD.....",
-];
+// The peel winds down around the apple's outline. Seen from slightly above, the front of each
+// turn sits lower than its back, and the front is drawn over the back.
+function coil(size = 32, turns = 4.5, tilt = 2.4) {
+  const grid = Array.from({ length: size }, () => Array<string>(size).fill("."));
+  const depth = Array.from({ length: size }, () => Array<number>(size).fill(-Infinity));
+  const top = tilt + 4, bottom = size - tilt - 1.5;
+  // The outline's half-width at height v, from 0 at the top to 1 at the bottom: broad shoulders, a narrower base.
+  const radius = (v: number) => (size / 2 - 1.5) * Math.pow(Math.sin(Math.PI * (0.14 + v * 0.8)), 0.5) * (1.04 - 0.22 * v);
+  const steps = 6000;
+  for (let i = 0; i <= steps; i++) {
+    const v = i / steps, angle = v * turns * Math.PI * 2;
+    const x = size / 2 + radius(v) * Math.sin(angle), z = Math.cos(angle);
+    const y = top + v * (bottom - top) + z * tilt;
+    // The back of a turn is thinner and darker, which leaves gaps between the turns.
+    const front = z > -0.35;
+    for (let dy = 0; dy < (front ? 2 : 1); dy++) {
+      const px = Math.floor(x), py = Math.floor(y + dy);
+      if (px < 0 || py < 0 || px >= size || py >= size || z <= depth[py]![px]!) continue;
+      depth[py]![px] = z;
+      grid[py]![px] = !front ? "D" : dy === 0 && z > 0.8 ? "H" : "R";
+    }
+  }
+  // A short stem rises from the top turn.
+  for (let y = 1; y < top - tilt + 2; y++) grid[y]![Math.floor(size / 2) + (y < 3 ? 1 : 0)] = "B";
+  return grid.map(row => row.join(""));
+}
+
+export const peel = coil();
 
 export function rgba(rows: string[]) {
   const width = rows[0]!.length, height = rows.length;
@@ -42,8 +50,8 @@ export function rgba(rows: string[]) {
 }
 
 // Enlarged with hard edges before it reaches the terminal, so scaling it to the cells keeps the pixels square.
-export function logoImage(scale = 8) {
-  const { pixels, width, height } = rgba(apple);
+export function logoImage(scale = 4) {
+  const { pixels, width, height } = rgba(peel);
   const image = NativeImage.fromRgba(pixels, width, height);
   const large = image.resize({ width: width * scale, height: height * scale, kernel: "nearest" });
   image.dispose();
