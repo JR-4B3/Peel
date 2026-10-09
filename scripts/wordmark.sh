@@ -5,14 +5,14 @@ set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 work=$(mktemp -d); trap 'rm -rf "$work"' EXIT
 # figlet's Small Slant face without its top row. The l starts level with the other letters and
-# runs down to the p's descender, with its foot straight under the stroke above, as in figlet's
-# Small face. Lines are 1.3 em apart, close to Ghostty's cell height, so the strokes join up as
-# they do in the terminal.
+# touches the e as the p does. It runs down to the p's descender, with its foot straight under the
+# stroke above, as in figlet's Small face. Lines are 1.3 em apart, close to Ghostty's cell height,
+# so the strokes join up as they do in the terminal.
 rows=(
-  '   ___  ___ ___     '
-  '  / _ \/ -_) -_) / /'
-  ' / .__/\__/\__/ / / '
-  '/_/             /_/ '
+  '   ___  ___ ___    '
+  '  / _ \/ -_) -_)/ /'
+  ' / .__/\__/\__// / '
+  '/_/            /_/ '
 )
 size=40 advance=24 line=52
 {

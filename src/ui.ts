@@ -471,7 +471,7 @@ export class PeelUI {
     this.brand = new BoxRenderable(ctx, { id: "brand", width: 28, height: 3, flexShrink: 0, flexDirection: "row", gap: 1, paddingLeft: 1 });
     this.logo = new ImageRenderable(ctx, { id: "logo", height: 3, width: 6, source: logoImage(), fit: "fit", flexShrink: 0 });
     this.brand.add(this.logo);
-    this.wordmark = new ImageRenderable(ctx, { id: "wordmark", height: 3, width: 14, source: wordmarkFile, fit: "fit", flexShrink: 0, onLoad: () => this.resizeLayout() });
+    this.wordmark = new ImageRenderable(ctx, { id: "wordmark", height: 3, width: 13, source: wordmarkFile, fit: "fit", flexShrink: 0, onLoad: () => this.resizeLayout() });
     this.brand.add(this.wordmark);
     bar.add(this.brand);
     const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1, flexGrow: 1, flexBasis: 0, minWidth: 0 } as any);
@@ -604,7 +604,7 @@ export class PeelUI {
     // The images keep their proportions in the terminal's cells. Narrow terminals show the apple alone.
     const logoWidth = this.logo.getFittedSize(10, 3).width || 6;
     this.logo.width = logoWidth;
-    this.wordmark.width = this.wordmark.getFittedSize(20, 3).width || 14;
+    this.wordmark.width = this.wordmark.getFittedSize(20, 3).width || 13;
     this.wordmark.visible = !narrow;
     this.brand.width = narrow ? logoWidth + 1 : 28;
     this.sidebarFooter.visible = !narrow;
