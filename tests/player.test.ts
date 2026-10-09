@@ -167,23 +167,53 @@ describe("the rendered player", () => {
     expect(app.calls.filter(call => call.path === "/audio/volume").at(-1)).toEqual({ path: "/audio/volume", method: "PATCH", body: { volume: 1 } });
   });
 
-  test("the focused sidebar moves and hides entries, shows hidden ones dimmed, and saves preferences", async () => {
+  test("the sidebar shows hidden entries only while editing, and Enter shows or hides them", async () => {
     const app = await setup();
     expect(app.renderer.root.findDescendantById("layout")).toBeFalsy();
+    await app.model.hide("albums"); await app.flush();
+    // Focusing the sidebar alone keeps hidden entries out of the way.
     app.ui.sidebar.focus(); await app.flush();
-    expect(app.captureCharFrame()).toContain("hide or show");
+    expect(app.captureCharFrame()).not.toContain("Albums");
+    expect(app.captureCharFrame()).not.toContain("show or hide");
+    app.mockInput.pressKey("h"); await app.flush();
+    expect(app.captureCharFrame()).toContain("Albums");
+    expect(app.captureCharFrame()).toContain("show or hide");
     app.ui.sidebar.selectKey("favourites");
     app.mockInput.pressArrow("down", { shift: true }); await waitFor(() => app.model.entries()[0].id === "playlist:p.chill");
     await app.flush();
     expect(app.captureCharFrame().indexOf("Background Chill")).toBeLessThan(app.captureCharFrame().indexOf("Favourite Songs"));
     expect(app.ui.sidebar.selectedId()).toBe("favourites");
-    app.mockInput.pressKey("h"); await waitFor(() => !app.model.navigation().some(row => row.id === "favourites"));
-    expect(app.saved.length).toBe(2);
-    // Still listed while the sidebar has focus, so it can be shown again. Gone once focus moves on.
+    // Enter hides the entry instead of opening it. It stays listed so it can be shown again.
+    app.mockInput.pressEnter(); await waitFor(() => !app.model.navigation().some(row => row.id === "favourites"));
+    expect(app.model.view).toBe("home");
     await app.flush(); expect(app.captureCharFrame()).toContain("Favourite Songs");
-    app.ui.tracks.focus(); await app.flush();
+    app.ui.sidebar.selectKey("albums"); app.mockInput.pressEnter();
+    await waitFor(() => app.model.navigation().some(row => row.id === "albums"));
+    expect(app.saved.length).toBe(4);
+    // h again finishes editing.
+    app.mockInput.pressKey("h"); await app.flush();
     expect(app.captureCharFrame()).not.toContain("Favourite Songs");
-    expect(app.captureCharFrame()).not.toContain("hide or show");
+    expect(app.captureCharFrame()).toContain("Albums");
+    expect(app.captureCharFrame()).not.toContain("show or hide");
+  });
+
+  test("the mouse edits the sidebar through Edit and Done, and editing ends when focus moves on", async () => {
+    const app = await setup();
+    await click(app, "sidebar-edit"); await app.flush();
+    expect(app.ui.sidebar.focused).toBe(true);
+    expect(app.captureCharFrame()).toContain("Done");
+    await click(app, "sidebar:row:favourites"); await waitFor(() => !app.model.navigation().some(row => row.id === "favourites"));
+    expect(app.model.view).toBe("home");
+    await click(app, "sidebar:row:favourites"); await waitFor(() => app.model.navigation().some(row => row.id === "favourites"));
+    await click(app, "sidebar-edit"); await app.flush();
+    expect(app.captureCharFrame()).toContain("Edit");
+    await click(app, "sidebar:row:favourites"); await waitFor(() => app.model.view === "favourites");
+    // Leaving the sidebar ends editing.
+    await click(app, "sidebar-edit"); await app.model.hide("albums"); await app.flush();
+    expect(app.captureCharFrame()).toContain("Albums");
+    app.ui.tracks.focus(); await app.flush();
+    expect(app.captureCharFrame()).not.toContain("Albums");
+    expect(app.captureCharFrame()).not.toContain("show or hide");
   });
 
   test("playback bars change only during confirmed playback", async () => {

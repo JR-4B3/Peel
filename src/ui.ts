@@ -3,6 +3,7 @@ import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
 import { cover } from "./artwork";
 import { colour, icon } from "./theme";
+import { brandImage } from "./logo";
 
 interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
 type Column = "artist" | "album";
@@ -410,7 +411,8 @@ export class PeelUI {
   private headerArtist: TextRenderable;
   private headerMeta: TextRenderable;
   private section: TextRenderable;
-  private brand: TextRenderable;
+  private brand: BoxRenderable;
+  private logo: ImageRenderable;
   private filterBar: BoxRenderable;
   readonly filterInput: InputRenderable;
   private sortButton: Button;
@@ -421,6 +423,9 @@ export class PeelUI {
   private playerPanel: BoxRenderable;
   private playerCover: Cover;
   private sidebarHints: TextRenderable;
+  private sidebarFooter: BoxRenderable;
+  private editButton: Button;
+  private editingSidebar = false;
   private title: TextRenderable;
   private subtitle: TextRenderable;
   private indicator: TextRenderable;
@@ -443,6 +448,8 @@ export class PeelUI {
   private lastShelves = "";
   private disposed = false;
   private focusChange = () => {
+    // Editing ends when focus leaves the sidebar.
+    if (this.editingSidebar && !this.sidebar.focused) this.editSidebar(false);
     this.update();
     this.sidebarPanel.borderColor = this.sidebar.focused ? colour.accent : colour.faint;
     this.trackPanel.borderColor = this.tracks.focused || this.grid.focused ? colour.accent : colour.faint;
@@ -458,11 +465,13 @@ export class PeelUI {
     const panel = { border: true, borderStyle: "rounded" as const, borderColor: colour.faint };
     this.root = new BoxRenderable(ctx, { id: "peel", width: "100%", height: "100%", flexDirection: "column", paddingX: 1 });
     renderer.root.add(this.root);
-    // The name and the search field share one bar.
-    const bar = new BoxRenderable(ctx, { height: 3, flexDirection: "row", gap: 2, flexShrink: 0 });
-    this.brand = new TextRenderable(ctx, { content: t`${bold(fg(colour.accent)("peel"))}`, height: 1, marginTop: 1, marginLeft: 1, flexShrink: 0, selectable: false });
+    // The logo and the search field share one bar. The logo is as wide as the sidebar, so search lines up with the content.
+    const bar = new BoxRenderable(ctx, { height: 3, flexDirection: "row", gap: 1, flexShrink: 0 });
+    this.brand = new BoxRenderable(ctx, { id: "brand", width: 28, height: 3, flexShrink: 0, paddingLeft: 1 });
+    this.logo = new ImageRenderable(ctx, { id: "logo", height: 3, width: 16, source: brandImage(), fit: "fit" });
+    this.brand.add(this.logo);
     bar.add(this.brand);
-    const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1, flexGrow: 1, minWidth: 0 } as any);
+    const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1, flexGrow: 1, flexBasis: 0, minWidth: 0 } as any);
     this.search = new InputRenderable(ctx, { id: "search", width: "100%", placeholder: "Type a song, album, or artist and press Enter", textColor: colour.text, placeholderColor: colour.faint, backgroundColor: "transparent", focusedBackgroundColor: "transparent" } as any);
     this.search.on("enter", () => { void this.model.search(this.search.value); this.tracks.focus(); });
     searchBox.add(this.search); bar.add(searchBox);
@@ -472,8 +481,12 @@ export class PeelUI {
     this.sidebarPanel = new BoxRenderable(ctx, { id: "sidebar-panel", ...panel, width: 28, flexShrink: 0, paddingY: 0 });
     this.sidebar = new ClickList(renderer, "sidebar", 1);
     this.sidebarPanel.add(this.sidebar);
-    this.sidebarHints = new TextRenderable(ctx, { id: "sidebar-hints", content: t`${fg(colour.muted)("⇧↑ ⇧↓")} ${fg(colour.faint)("move")}  ${fg(colour.muted)("h")} ${fg(colour.faint)("hide or show")}`, height: 1, paddingX: 1, flexShrink: 0, visible: false, selectable: false });
-    this.sidebarPanel.add(this.sidebarHints); this.body.add(this.sidebarPanel);
+    // Editing shows the hidden entries, so they can be shown again. Click Edit, or press h with the sidebar focused.
+    this.sidebarFooter = new BoxRenderable(ctx, { id: "sidebar-footer", flexDirection: "column", paddingX: 1, flexShrink: 0 });
+    this.sidebarHints = new TextRenderable(ctx, { id: "sidebar-hints", content: t`${fg(colour.muted)("⏎")} ${fg(colour.faint)("show or hide")}  ${fg(colour.muted)("⇧↑↓")} ${fg(colour.faint)("move")}`, height: 1, visible: false, selectable: false });
+    this.editButton = this.button("sidebar-edit", icon.edit, "Edit  h", () => this.editSidebar(!this.editingSidebar), colour.faint);
+    this.sidebarFooter.add(this.sidebarHints); this.sidebarFooter.add(this.editButton);
+    this.sidebarPanel.add(this.sidebarFooter); this.body.add(this.sidebarPanel);
     this.trackPanel = new BoxRenderable(ctx, { id: "tracks-panel", ...panel, title: "Home", flexGrow: 1, minWidth: 0, minHeight: 0 });
 
     this.header = new BoxRenderable(ctx, { id: "collection-header", flexDirection: "row", gap: 2, paddingX: 1, paddingY: 1, height: 10, flexShrink: 0 });
@@ -585,7 +598,10 @@ export class PeelUI {
     this.sidebarPanel.height = narrow ? height < 28 ? 3 : 5 : "100%";
     this.playerCover.visible = width >= 60;
     this.brand.visible = width >= 60;
-    for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "back"].includes(button.id); button.paint(); }
+    this.logo.width = this.logo.getFittedSize(26, 3).width || 16;
+    this.brand.width = narrow ? this.logo.width + 1 : 28;
+    this.sidebarFooter.visible = !narrow;
+    for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "back", "sidebar-edit"].includes(button.id); button.paint(); }
     this.sizeHeader();
     this.drawPlayback();
   }
@@ -704,18 +720,25 @@ export class PeelUI {
     if (this.content() === this.grid && this.tracks.focused) this.grid.focus();
     if (this.content() === this.tracks && this.grid.focused) this.tracks.focus();
 
-    // While the sidebar has focus, hidden entries show dimmed so they can be shown again.
-    const editing = this.sidebar.focused;
+    // While editing, hidden entries show dimmed, and selecting an entry shows or hides it.
+    const editing = this.editingSidebar;
     const nav = model.navigation(editing);
     this.sidebarHints.visible = editing;
-    const sidebarKey = JSON.stringify([nav.map(item => [item.id, item.name, item.hidden]), model.view]);
+    this.editButton.set(editing ? icon.done : icon.edit, editing ? "Done  h" : "Edit  h", editing ? colour.accent : colour.faint);
+    const sidebarKey = JSON.stringify([nav.map(item => [item.id, item.name, item.hidden]), model.view, editing]);
     if (sidebarKey !== this.lastSidebar) {
       this.lastSidebar = sidebarKey;
       const glyph = (id: string) => id === "home" ? icon.home : id === "favourites" ? icon.heart : id === "songs" ? icon.songs : id === "albums" ? icon.album : id === "artists" ? icon.artist : id === "queue" ? icon.queue : icon.playlist;
+      // Home cannot be hidden, so it keeps its own glyph while editing.
+      const editable = (id: string) => editing && id !== "home";
       this.sidebar.setRows(nav.map(item => ({
-        id: item.id, key: item.id, name: item.name, lead: item.hidden ? icon.hidden : glyph(item.id), active: item.id === model.view, faint: item.hidden,
-        leadColour: item.hidden ? colour.faint : item.id === "favourites" ? colour.heart : item.id === model.view ? colour.accent : colour.faint,
-        activate: () => { void model.open(item.id); this.focusContent(); },
+        id: item.id, key: item.id, name: item.name, faint: item.hidden,
+        lead: editable(item.id) ? item.hidden ? icon.hidden : icon.shown : glyph(item.id), active: !editing && item.id === model.view,
+        leadColour: item.hidden ? colour.faint : editable(item.id) ? colour.muted : item.id === "favourites" ? colour.heart : item.id === model.view ? colour.accent : colour.faint,
+        activate: () => {
+          if (editable(item.id)) void model.hide(item.id);
+          else if (!editing) { void model.open(item.id); this.focusContent(); }
+        },
       })));
       // Moving an entry keeps it selected. Opening a view selects that view.
       if (model.view !== this.lastView) { this.lastView = model.view; this.sidebar.selectKey(model.view); }
@@ -838,7 +861,14 @@ export class PeelUI {
 
   // Home stays first and visible. The other sidebar entries can be moved and hidden.
   private reorder(direction: number) { const id = this.sidebar.selectedId(); if (id && id !== "home") void this.model.reorder(id, direction); }
-  private hideSelected() { const id = this.sidebar.selectedId(); if (id && id !== "home") void this.model.hide(id); }
+  private editSidebar(editing: boolean) {
+    if (editing === this.editingSidebar) return;
+    this.editingSidebar = editing;
+    if (editing) this.sidebar.focus();
+    this.update();
+    // A hidden entry leaves the list, so the selection returns to the open view.
+    if (!editing) this.sidebar.selectKey(this.model.view);
+  }
 
   private handleKey(key: KeyEvent) {
     if (key.eventType === "release") return;
@@ -859,6 +889,7 @@ export class PeelUI {
       else this.tracks.focus();
     };
     else if (key.name === "escape" && this.tracks.focused && model.filter.text) action = () => { void model.setFilter({ text: "" }); };
+    else if (key.name === "escape" && this.editingSidebar) action = () => this.editSidebar(false);
     else if (key.name === "escape") action = () => {
       if (!this.search.focused && this.back()) return;
       this.focusContent();
@@ -872,8 +903,8 @@ export class PeelUI {
     else if (key.name === "/") action = () => this.search.focus();
     else if (key.name === "q") action = this.quit;
     else if (key.name === "?" || key.sequence === "?") action = () => { model.status = "Space play/pause  p/n skip  ←/→ seek (Shift in grids)  +/- volume  f favourite  a artist  s shuffle  r repeat  / search  Esc back  ⇧F filter  o sort  ⇧O reverse  m more  v bars  q quit"; model.changed(); };
-    else if (this.sidebar.focused && key.shift && ["up", "down", "j", "k"].includes(key.name)) action = () => this.reorder(["down", "j"].includes(key.name) ? 1 : -1);
-    else if (this.sidebar.focused && key.name === "h") action = () => this.hideSelected();
+    else if (this.editingSidebar && key.shift && ["up", "down", "j", "k"].includes(key.name)) action = () => this.reorder(["down", "j"].includes(key.name) ? 1 : -1);
+    else if (this.sidebar.focused && key.name === "h") action = () => this.editSidebar(!this.editingSidebar);
     else if (key.name === "a") action = () => this.openArtist();
     else if (model.display === "sections" && grid && ["up", "k"].includes(key.name) && this.grid.atTop() && this.tracks.visible) action = () => this.tracks.focus();
     else if (model.display === "sections" && this.tracks.focused && ["down", "j"].includes(key.name) && this.tracks.atEnd()) action = () => this.grid.focus();

@@ -41,7 +41,7 @@ peel_desktop_launcher=${peel_desktop_launcher//%/%%}
 {
   printf '[Desktop Entry]\nType=Application\nName=Peel\n'
   printf 'Comment=Search your Apple Music library and control playback\n'
-  printf 'Icon=multimedia-player\nCategories=AudioVideo;Audio;Music;\nX-Peel-Launcher=true\n'
+  printf 'Icon=%s\nCategories=AudioVideo;Audio;Music;\nX-Peel-Launcher=true\n' "$peel_project_dir/assets/peel.svg"
   # Ghostty shows album covers through the kitty graphics protocol and includes
   # the Nerd Font symbols Peel uses for its controls.
   if command -v ghostty >/dev/null 2>&1; then
