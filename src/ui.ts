@@ -3,7 +3,7 @@ import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
 import { cover } from "./artwork";
 import { colour, icon } from "./theme";
-import { brandImage } from "./logo";
+import { logoImage } from "./logo";
 
 interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
 type Column = "artist" | "album";
@@ -465,11 +465,12 @@ export class PeelUI {
     const panel = { border: true, borderStyle: "rounded" as const, borderColor: colour.faint };
     this.root = new BoxRenderable(ctx, { id: "peel", width: "100%", height: "100%", flexDirection: "column", paddingX: 1 });
     renderer.root.add(this.root);
-    // The logo and the search field share one bar. The logo is as wide as the sidebar, so search lines up with the content.
+    // The logo and the search field share one bar. The logo takes the sidebar's width, so search lines up with the content.
     const bar = new BoxRenderable(ctx, { height: 3, flexDirection: "row", gap: 1, flexShrink: 0 });
-    this.brand = new BoxRenderable(ctx, { id: "brand", width: 28, height: 3, flexShrink: 0, paddingLeft: 1 });
-    this.logo = new ImageRenderable(ctx, { id: "logo", height: 3, width: 16, source: brandImage(), fit: "fit" });
+    this.brand = new BoxRenderable(ctx, { id: "brand", width: 28, height: 1, marginTop: 1, flexShrink: 0, flexDirection: "row", gap: 1, paddingLeft: 1 });
+    this.logo = new ImageRenderable(ctx, { id: "logo", height: 1, width: 2, source: logoImage(), fit: "fit", flexShrink: 0 });
     this.brand.add(this.logo);
+    this.brand.add(new TextRenderable(ctx, { content: "peel", fg: colour.muted, height: 1, flexShrink: 0, selectable: false }));
     bar.add(this.brand);
     const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1, flexGrow: 1, flexBasis: 0, minWidth: 0 } as any);
     this.search = new InputRenderable(ctx, { id: "search", width: "100%", placeholder: "Type a song, album, or artist and press Enter", textColor: colour.text, placeholderColor: colour.faint, backgroundColor: "transparent", focusedBackgroundColor: "transparent" } as any);
@@ -481,10 +482,10 @@ export class PeelUI {
     this.sidebarPanel = new BoxRenderable(ctx, { id: "sidebar-panel", ...panel, width: 28, flexShrink: 0, paddingY: 0 });
     this.sidebar = new ClickList(renderer, "sidebar", 1);
     this.sidebarPanel.add(this.sidebar);
-    // Editing shows the hidden entries, so they can be shown again. Click Edit, or press h with the sidebar focused.
+    // Editing shows the hidden entries, so they can be shown again. Click Edit, or press e with the sidebar focused.
     this.sidebarFooter = new BoxRenderable(ctx, { id: "sidebar-footer", flexDirection: "column", paddingX: 1, flexShrink: 0 });
     this.sidebarHints = new TextRenderable(ctx, { id: "sidebar-hints", content: t`${fg(colour.muted)("⏎")} ${fg(colour.faint)("show or hide")}  ${fg(colour.muted)("⇧↑↓")} ${fg(colour.faint)("move")}`, height: 1, visible: false, selectable: false });
-    this.editButton = this.button("sidebar-edit", icon.edit, "Edit  h", () => this.editSidebar(!this.editingSidebar), colour.faint);
+    this.editButton = this.button("sidebar-edit", icon.edit, "Edit  e", () => this.editSidebar(!this.editingSidebar), colour.faint);
     this.sidebarFooter.add(this.sidebarHints); this.sidebarFooter.add(this.editButton);
     this.sidebarPanel.add(this.sidebarFooter); this.body.add(this.sidebarPanel);
     this.trackPanel = new BoxRenderable(ctx, { id: "tracks-panel", ...panel, title: "Home", flexGrow: 1, minWidth: 0, minHeight: 0 });
@@ -598,8 +599,8 @@ export class PeelUI {
     this.sidebarPanel.height = narrow ? height < 28 ? 3 : 5 : "100%";
     this.playerCover.visible = width >= 60;
     this.brand.visible = width >= 60;
-    this.logo.width = this.logo.getFittedSize(26, 3).width || 16;
-    this.brand.width = narrow ? this.logo.width + 1 : 28;
+    this.logo.width = this.logo.getFittedSize(4, 1).width || 2;
+    this.brand.width = narrow ? this.logo.width + 6 : 28;
     this.sidebarFooter.visible = !narrow;
     for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "back", "sidebar-edit"].includes(button.id); button.paint(); }
     this.sizeHeader();
@@ -724,7 +725,7 @@ export class PeelUI {
     const editing = this.editingSidebar;
     const nav = model.navigation(editing);
     this.sidebarHints.visible = editing;
-    this.editButton.set(editing ? icon.done : icon.edit, editing ? "Done  h" : "Edit  h", editing ? colour.accent : colour.faint);
+    this.editButton.set(editing ? icon.done : icon.edit, editing ? "Done  e" : "Edit  e", editing ? colour.accent : colour.faint);
     const sidebarKey = JSON.stringify([nav.map(item => [item.id, item.name, item.hidden]), model.view, editing]);
     if (sidebarKey !== this.lastSidebar) {
       this.lastSidebar = sidebarKey;
@@ -904,7 +905,7 @@ export class PeelUI {
     else if (key.name === "q") action = this.quit;
     else if (key.name === "?" || key.sequence === "?") action = () => { model.status = "Space play/pause  p/n skip  ←/→ seek (Shift in grids)  +/- volume  f favourite  a artist  s shuffle  r repeat  / search  Esc back  ⇧F filter  o sort  ⇧O reverse  m more  v bars  q quit"; model.changed(); };
     else if (this.editingSidebar && key.shift && ["up", "down", "j", "k"].includes(key.name)) action = () => this.reorder(["down", "j"].includes(key.name) ? 1 : -1);
-    else if (this.sidebar.focused && key.name === "h") action = () => this.editSidebar(!this.editingSidebar);
+    else if (this.sidebar.focused && key.name === "e") action = () => this.editSidebar(!this.editingSidebar);
     else if (key.name === "a") action = () => this.openArtist();
     else if (model.display === "sections" && grid && ["up", "k"].includes(key.name) && this.grid.atTop() && this.tracks.visible) action = () => this.tracks.focus();
     else if (model.display === "sections" && this.tracks.focused && ["down", "j"].includes(key.name) && this.tracks.atEnd()) action = () => this.grid.focus();

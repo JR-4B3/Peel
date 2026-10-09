@@ -9,8 +9,8 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 - Favourite Songs follows Home, above your playlists. All songs, Albums, Artists, and Queue follow them.
 - Albums shows your library as a grid of covers. Selecting an album or playlist opens a page with its cover and songs.
 - Artists shows your library's artists as a grid of photos. An artist page lists their top songs, then rows of their albums, singles and EPs, live albums, compilations, and albums they appear on.
-- The sidebar can be rearranged in place. Edit, below the sidebar, or `h` with the sidebar focused, lists hidden entries dimmed beside an eye icon. Selecting an entry then shows or hides it instead of opening it. Search and the player stay visible.
-- The logo above the sidebar is pixel art of a peeled apple. `assets/peel.svg` is the same drawing, and the application entry uses it as its icon. `bun scripts/logo.ts` rewrites the SVG files from the pixel grid in `src/logo.ts`.
+- The sidebar can be rearranged in place. Edit, below the sidebar, or `e` with the sidebar focused, lists hidden entries dimmed beside an eye icon. Selecting an entry then shows or hides it instead of opening it. Search and the player stay visible.
+- The logo above the sidebar is a small pixel-art apple, half peeled, beside the name. `assets/peel.svg` is the same drawing, and the application entry uses it as its icon. `bun scripts/logo.ts` rewrites it from the pixel grid in `src/logo.ts`.
 - Song lists can be filtered by title, artist, or album, sorted, and narrowed to favourites. Favourite songs show a heart before their title.
 - Playback controls use icons with their keyboard shortcut beside them when the terminal is at least 100 columns wide. There is one player strip at the bottom with the current cover and a favourite heart.
 - Mouse clicks and keyboard shortcuts control the same actions.
@@ -52,7 +52,7 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Back from an album, playlist, or artist | Escape or Backspace | Back |
 | Favourite the current song | `f` | Heart |
 | Load another page | `m`, or move to the last row of covers | Scroll down |
-| Edit the sidebar | `h` with the sidebar focused. `h` or Escape finishes | Click Edit below the sidebar, then Done |
+| Edit the sidebar | `e` with the sidebar focused. `e` or Escape finishes | Click Edit below the sidebar, then Done |
 | Move a sidebar entry | Shift+Up / Shift+Down, or `K` / `J`, while editing | |
 | Hide or show a sidebar entry | Enter while editing | Click the entry while editing |
 | Filter a song list | Shift+F, then type. Escape clears the filter | Filter field above the list |

@@ -175,7 +175,7 @@ describe("the rendered player", () => {
     app.ui.sidebar.focus(); await app.flush();
     expect(app.captureCharFrame()).not.toContain("Albums");
     expect(app.captureCharFrame()).not.toContain("show or hide");
-    app.mockInput.pressKey("h"); await app.flush();
+    app.mockInput.pressKey("e"); await app.flush();
     expect(app.captureCharFrame()).toContain("Albums");
     expect(app.captureCharFrame()).toContain("show or hide");
     app.ui.sidebar.selectKey("favourites");
@@ -190,8 +190,8 @@ describe("the rendered player", () => {
     app.ui.sidebar.selectKey("albums"); app.mockInput.pressEnter();
     await waitFor(() => app.model.navigation().some(row => row.id === "albums"));
     expect(app.saved.length).toBe(4);
-    // h again finishes editing.
-    app.mockInput.pressKey("h"); await app.flush();
+    // e again finishes editing.
+    app.mockInput.pressKey("e"); await app.flush();
     expect(app.captureCharFrame()).not.toContain("Favourite Songs");
     expect(app.captureCharFrame()).toContain("Albums");
     expect(app.captureCharFrame()).not.toContain("show or hide");
