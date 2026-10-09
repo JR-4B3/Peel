@@ -1,4 +1,5 @@
 import { NativeImage } from "@opentui/core";
+import { fileURLToPath } from "node:url";
 
 // Peel's logo, drawn as pixel art: an apple with its lower half peeled, the peel curling away
 // below it. The interface and assets/peel.svg both draw from this grid.
@@ -33,14 +34,8 @@ export const apple = [
 ];
 
 // The name in outline letters, three rows tall like the logo beside it.
-// The name in figlet's "Small Slant" face, without its top row. The l is open at the top, so it
-// still rises above the other letters, and the p descends below them.
-export const wordmark = [
-  "   ___  ___ ___ / /",
-  "  / _ \\/ -_) -_) / ",
-  " / .__/\\__/\\__/_/  ",
-  "/_/                ",
-].join("\n");
+// The name, drawn by scripts/wordmark.sh in Ghostty's font so it looks like the terminal's own text.
+export const wordmarkFile = fileURLToPath(new URL("../assets/peel-wordmark.png", import.meta.url));
 
 export function rgba(rows: string[]) {
   const width = rows[0]!.length, height = rows.length;
