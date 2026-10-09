@@ -33,11 +33,13 @@ export const apple = [
 ];
 
 // The name in outline letters, three rows tall like the logo beside it.
-// The l is open at the top, so it rises above the other letters instead of reading as an s.
+// The name in figlet's "Small Slant" face. The l rises above the other letters and the p descends below them.
 export const wordmark = [
-  "  ___  ___  ___   / /",
-  " / _ \\/ -_)/ -_) / /",
-  "/ .__/\\___/\\___/ /_/",
+  "                 __",
+  "   ___  ___ ___ / /",
+  "  / _ \\/ -_) -_) / ",
+  " / .__/\\__/\\__/_/  ",
+  "/_/                ",
 ].join("\n");
 
 export function rgba(rows: string[]) {
