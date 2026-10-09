@@ -33,33 +33,51 @@ export const apple = [
   "............DD..",
 ];
 
-// The name in serif lowercase, drawn as outlines: the letters are filled from shapes, then
-// only the pixels on their edges are kept.
-function letters() {
-  const height = 30, width = 69;
-  const fill = Array.from({ length: height }, () => Array<boolean>(width).fill(false));
-  const rect = (x: number, y: number, w: number, h: number) => { for (let j = y; j < y + h; j++) for (let i = x; i < x + w; i++) fill[j]![i] = true; };
-  const each = (paint: (dx: number, dy: number) => boolean | undefined, cx: number, cy: number) => {
-    for (let j = 0; j < height; j++) for (let i = 0; i < width; i++) { const value = paint(i + 0.5 - cx, j + 0.5 - cy); if (value !== undefined) fill[j]![i] = value; }
-  };
-  const ring = (cx: number, cy: number, rx: number, ry: number, thickness: number) =>
-    each((dx, dy) => (dx / rx) ** 2 + (dy / ry) ** 2 <= 1 && (dx / (rx - thickness)) ** 2 + (dy / (ry - thickness)) ** 2 > 1 || undefined, cx, cy);
-  // x-height from row 9 to the baseline at 23, the ascender from row 1, the descender to 29.
-  const top = 9, base = 23, middle = (top + base) / 2, radius = (base - top) / 2, stroke = 4;
-  // p: a stem with a bowl, a serif at its top, and a foot below the descender.
-  rect(3, top, stroke, 29 - top); ring(14, middle, 7, radius, stroke); rect(1, 27, 8, 2); rect(1, top, 3, 2);
-  // e: a ring with a crossbar, open on the right between the crossbar and a stroke that ends at 50 degrees.
-  for (const x of [23, 41]) {
-    ring(x + 7.5, middle, 7.5, radius, stroke); rect(x + 1, Math.round(middle) - 1, 14, 2);
-    each((dx, dy) => dx > 0 && dy > 1 && Math.atan2(dy, dx) < Math.PI * 50 / 180 ? false : undefined, x + 7.5, middle);
-  }
-  // l: a stem with a serif at its top and a foot on the baseline.
-  rect(62, 1, stroke, base - 1); rect(59, 1, 3, 2); rect(59, base - 2, stroke + 6, 2);
-  const edge = (i: number, j: number) => [[1, 0], [-1, 0], [0, 1], [0, -1]].some(([a, b]) => !fill[j + b!]?.[i + a!]);
-  return fill.map((row, j) => row.map((on, i) => on && edge(i, j) ? "W" : ".").join(""));
+// The name in slanted ASCII letters (figlet's "slant" face), set with a space between letters.
+const glyphs: Record<string, string[]> = {
+  p: ["          ", "    ____  ", "   / __ \\ ", "  / /_/ / ", " / .___/  ", "/_/       "],
+  e: ["       ", "  ___  ", " / _ \\ ", "/  __/ ", "\\___/  ", "       "],
+  l: ["    __", "   / /", "  / / ", " / /  ", "/_/   ", "      "],
+};
+export const wordmark = glyphs.p!.map((_, row) => [..."peel"].map(char => glyphs[char]![row]).join(" "));
+
+// Each character becomes a line across its cell, as the terminal would draw it but joined up.
+// Cells are twice as tall as they are wide.
+type Line = [number, number, number, number];
+function lines(rows: string[]) {
+  const result: Line[] = [];
+  rows.forEach((row, y) => [...row].forEach((char, x) => {
+    if (char === "/") result.push([x, (y + 1) * 2, x + 1, y * 2]);
+    else if (char === "\\") result.push([x, y * 2, x + 1, (y + 1) * 2]);
+    else if (char === "_") result.push([x, (y + 1) * 2, x + 1, (y + 1) * 2]);
+  }));
+  return result;
 }
 
-export const wordmark = letters();
+// Draws the lines smoothly in the lettering colour, with four by four samples a pixel.
+export function lineImage(rows: string[], cell = 6, stroke = 2.2) {
+  const scale = cell, margin = stroke;
+  const segments = lines(rows).map(([x1, y1, x2, y2]) => [x1 * scale + margin, y1 * scale + margin, x2 * scale + margin, y2 * scale + margin] as Line);
+  const width = Math.ceil(rows[0]!.length * scale + margin * 2), height = Math.ceil(rows.length * 2 * scale + margin * 2);
+  const pixels = new Uint8Array(width * height * 4), samples = 4;
+  const [r, g, b] = [1, 3, 5].map(offset => parseInt(palette.W!.slice(offset, offset + 2), 16));
+  const near = (px: number, py: number) => segments.some(([x1, y1, x2, y2]) => {
+    const dx = x2 - x1, dy = y2 - y1, t = Math.max(0, Math.min(1, ((px - x1) * dx + (py - y1) * dy) / (dx * dx + dy * dy)));
+    return Math.hypot(px - x1 - t * dx, py - y1 - t * dy) <= stroke / 2;
+  });
+  for (let y = 0; y < height; y++) for (let x = 0; x < width; x++) {
+    let covered = 0;
+    for (let sy = 0; sy < samples; sy++) for (let sx = 0; sx < samples; sx++) if (near(x + (sx + 0.5) / samples, y + (sy + 0.5) / samples)) covered++;
+    if (covered) pixels.set([r!, g!, b!, Math.round(255 * covered / samples ** 2)], (y * width + x) * 4);
+  }
+  return NativeImage.fromRgba(pixels, width, height);
+}
+
+export function lineSvg(rows: string[], scale = 8) {
+  const width = rows[0]!.length, height = rows.length * 2;
+  const paths = lines(rows).map(([x1, y1, x2, y2]) => `<line x1="${x1}" y1="${y1}" x2="${x2}" y2="${y2}"/>`);
+  return `<svg xmlns="http://www.w3.org/2000/svg" viewBox="-0.5 -0.5 ${width + 1} ${height + 1}" width="${(width + 1) * scale}" height="${(height + 1) * scale}">\n<g stroke="${palette.W}" stroke-width="0.3" stroke-linecap="round">\n${paths.join("\n")}\n</g>\n</svg>\n`;
+}
 
 export function rgba(rows: string[]) {
   const width = rows[0]!.length, height = rows.length;

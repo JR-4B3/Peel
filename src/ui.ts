@@ -3,7 +3,7 @@ import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
 import { cover } from "./artwork";
 import { colour, icon } from "./theme";
-import { apple, pixelImage, wordmark } from "./logo";
+import { apple, lineImage, pixelImage, wordmark } from "./logo";
 
 interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
 type Column = "artist" | "album";
@@ -470,7 +470,7 @@ export class PeelUI {
     const bar = new BoxRenderable(ctx, { height: 3, flexDirection: "row", gap: 1, flexShrink: 0 });
     this.brand = new BoxRenderable(ctx, { id: "brand", width: 28, height: 3, flexShrink: 0, flexDirection: "row", gap: 1, justifyContent: "center" });
     this.logo = new ImageRenderable(ctx, { id: "logo", height: 3, width: 6, source: pixelImage(apple), fit: "fit", flexShrink: 0 });
-    this.wordmark = new ImageRenderable(ctx, { id: "wordmark", height: 3, width: 14, source: pixelImage(wordmark), fit: "fit", flexShrink: 0 });
+    this.wordmark = new ImageRenderable(ctx, { id: "wordmark", height: 3, width: 16, source: lineImage(wordmark), fit: "fit", flexShrink: 0 });
     this.brand.add(this.logo); this.brand.add(this.wordmark);
     bar.add(this.brand);
     const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1, flexGrow: 1, flexBasis: 0, minWidth: 0 } as any);
@@ -601,7 +601,7 @@ export class PeelUI {
     this.playerCover.visible = width >= 60;
     this.brand.visible = width >= 60;
     this.logo.width = this.logo.getFittedSize(8, 3).width || 6;
-    this.wordmark.width = this.wordmark.getFittedSize(20, 3).width || 14;
+    this.wordmark.width = this.wordmark.getFittedSize(20, 3).width || 16;
     // Narrow terminals keep the room for search and show the apple alone.
     this.wordmark.visible = !narrow;
     this.brand.width = narrow ? this.logo.width + 1 : 28;

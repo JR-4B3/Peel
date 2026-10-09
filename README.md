@@ -10,7 +10,7 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 - Albums shows your library as a grid of covers. Selecting an album or playlist opens a page with its cover and songs.
 - Artists shows your library's artists as a grid of photos. An artist page lists their top songs, then rows of their albums, singles and EPs, live albums, compilations, and albums they appear on.
 - The sidebar can be rearranged in place. Edit, below the sidebar, or `e` with the sidebar focused, lists hidden entries dimmed beside an eye icon. Selecting an entry then shows or hides it instead of opening it. Search and the player stay visible.
-- The logo above the sidebar is pixel art of an apple with its lower half peeled, beside the name in outlined serif letters. `assets/peel.svg` is the apple, which the application entry uses as its icon, and `assets/peel-wordmark.svg` is the name. `bun scripts/logo.ts` rewrites both from the pixel grids in `src/logo.ts`.
+- The logo above the sidebar is pixel art of an apple with its lower half peeled, beside the name in slanted ASCII letters, drawn as lines. `assets/peel.svg` is the apple, which the application entry uses as its icon, and `assets/peel-wordmark.svg` is the name. `bun scripts/logo.ts` rewrites both from the grids in `src/logo.ts`.
 - Song lists can be filtered by title, artist, or album, sorted, and narrowed to favourites. Favourite songs show a heart before their title.
 - Playback controls use icons with their keyboard shortcut beside them when the terminal is at least 100 columns wide. There is one player strip at the bottom with the current cover and a favourite heart.
 - Mouse clicks and keyboard shortcuts control the same actions.
