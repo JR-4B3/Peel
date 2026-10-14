@@ -2,7 +2,7 @@ import { createCliRenderer } from "@opentui/core";
 import { AppleMusic, type AppleOptions } from "./apple";
 import { Cider } from "./cider";
 import { cacheDir, readAppleSignIn, readCache, readPreferences, readToken, saveJson } from "./config";
-import { Engine, ensureEngine } from "./engine";
+import { Engine, ensureEngine, stopEngine } from "./engine";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { ensureCider } from "./startup";
@@ -69,8 +69,8 @@ try {
     model.wake = wake;
     let interval: ReturnType<typeof setInterval> | undefined;
     const ui = new PeelUI(renderer, model, () => { clearInterval(interval); ui.dispose(); renderer.destroy(); });
-    ui.startAnimation();
-    renderer.on("destroy", () => { startup.abort(); clearInterval(interval); ui.dispose(); });
+    // q, Ctrl+C, and closing the terminal window all destroy the renderer. The engine stops with it.
+    renderer.on("destroy", () => { startup.abort(); clearInterval(interval); ui.dispose(); if (!useCider) stopEngine(); });
     interval = setInterval(() => void model.refresh(), 1000);
     void model.start();
     // Start the player alongside browsing, so it is usually ready by the first song.

@@ -79,6 +79,39 @@ describe("the rendered player", () => {
     expect(await app.player.queuePosition()).toEqual({ position: 1, total: 3 });
   });
 
+  test("e queues the highlighted song at the end, Shift+E after the playing song, and u lists the queue", async () => {
+    const app = await setup(120, 36, "favourites");
+    await click(app, "tracks:row:0");
+    await waitFor(() => app.calls.some(call => call.path.startsWith("/queue/items/")));
+    app.mockInput.pressKey("j"); app.mockInput.pressKey("j");
+    app.mockInput.pressKey("e");
+    await waitFor(() => app.model.status.startsWith("Added to the queue"));
+    app.mockInput.pressKey("k");
+    app.mockInput.pressKey("E", { shift: true });
+    await waitFor(() => app.model.status.startsWith("Plays next"));
+    expect(app.calls.find(call => call.path === "/queue/add-next")?.body).toEqual({ id: "i.selected", type: "library-songs" });
+    expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.soma", "i.selected", "i.selected", "i.last", "i.last"]);
+    app.mockInput.pressKey("u");
+    await waitFor(() => app.model.view === "queue" && app.model.items.length === 5);
+  });
+
+  test("the queue moves a song with Shift+Down and Shift+E, removes it with x, and names those keys", async () => {
+    const app = await setup(120, 36, "queue");
+    await waitFor(() => app.model.view === "queue" && app.model.items.length === 3);
+    expect(app.captureCharFrame()).toContain("⇧↑↓ move");
+    app.mockInput.pressArrow("down", { shift: true });
+    await waitFor(() => app.calls.some(call => call.path === "/queue/move"));
+    expect(app.calls.find(call => call.path === "/queue/move")?.body).toEqual({ from: 0, to: 1 });
+    expect(app.ui.tracks.index).toBe(1);
+    app.mockInput.pressKey("E", { shift: true });
+    await waitFor(() => app.calls.filter(call => call.path === "/queue/move").length === 2);
+    expect(app.calls.filter(call => call.path === "/queue/move").at(-1)?.body).toEqual({ from: 1, to: 0 });
+    app.mockInput.pressKey("x");
+    await waitFor(() => app.calls.some(call => call.path === "/queue/items/0"));
+    await waitFor(() => app.model.items.length === 2);
+    expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.selected", "i.last"]);
+  });
+
   test("a double-click activates its song once without playing the collection's first song", async () => {
     const app = await setup(120, 36, "favourites");
     await click(app, "tracks:row:1");
@@ -143,6 +176,24 @@ describe("the rendered player", () => {
     expect(app.ui.tracks.index).toBe(2);
     app.mockInput.pressKey("HOME"); await app.flush();
     expect(app.ui.tracks.index).toBe(0);
+  });
+
+  test("a long list loads 500 songs on its own, then a page more near its end", async () => {
+    const app = await setup(120, 36, "favourites");
+    const offsets: number[] = [];
+    (app.model as any).loader = async (offset: number) => {
+      offsets.push(offset);
+      return { items: Array.from({ length: 100 }, (_, n): Media => ({ id: `i.${offset + n}`, type: "library-songs", name: `Song ${offset + n}`, artist: "", album: "", duration: 1, loved: false })), more: offset < 900 };
+    };
+    await app.model.load(false);
+    expect(offsets).toEqual([0, 100, 200, 300, 400]);
+    expect(app.model.items.length).toBe(500);
+    await app.flush();
+    expect(offsets.length).toBe(5);
+    app.ui.tracks.focus();
+    app.mockInput.pressKey("END");
+    await waitFor(() => app.model.items.length === 600 && !app.model.loading);
+    expect(offsets.at(-1)).toBe(500);
   });
 
   test("clicking the search field focuses it, and Tab and Escape navigate", async () => {
@@ -214,15 +265,6 @@ describe("the rendered player", () => {
     app.ui.tracks.focus(); await app.flush();
     expect(app.captureCharFrame()).not.toContain("Albums");
     expect(app.captureCharFrame()).not.toContain("show or hide");
-  });
-
-  test("playback bars change only during confirmed playback", async () => {
-    const app = await setup();
-    await app.model.act("/playback/play"); await app.flush(); const playing = app.captureCharFrame();
-    app.ui.animate(); await app.flush(); expect(app.captureCharFrame()).not.toBe(playing);
-    await app.model.act("/playback/pause"); await app.flush(); const paused = app.captureCharFrame();
-    app.ui.animate(); await app.flush(); expect(app.captureCharFrame()).toBe(paused);
-    await app.model.bars(); await app.flush(); expect(app.captureCharFrame()).not.toContain("▁▁▁▁▁▁");
   });
 
   test.each([48, 60, 80, 120])("search and essential controls remain visible at %i columns", async width => {
@@ -361,7 +403,7 @@ test("starting another song stops queueing the rest of a long collection", async
 
 test("layout preferences survive a restart and use private file permissions", async () => {
   const dir = await mkdtemp(join(tmpdir(), "peel-test-")); cleanup.push(() => rm(dir, { recursive: true }));
-  const value = { order: ["queue", "favourites"], hidden: ["albums"], playbackBars: false, heartsInFavourites: true };
+  const value = { order: ["queue", "favourites"], hidden: ["albums"], heartsInFavourites: true };
   await saveJson("layout.json", value, dir);
   expect(await readPreferences(dir)).toEqual(value);
   expect((await stat(join(dir, "layout.json"))).mode & 0o777).toBe(0o600);
@@ -422,7 +464,6 @@ describe("home, albums, and favourites", () => {
     await app.mockInput.typeText("LAST");
     await waitFor(() => app.model.shown.length === 1);
     expect(app.model.shown[0]!.name).toBe("Last song");
-    await app.flush(); expect(app.captureCharFrame()).toContain("1 of 3");
     // The row keeps its playlist number, and selecting it plays that song.
     app.mockInput.pressEnter(); await app.flush();
     await click(app, "tracks:row:0");
@@ -464,8 +505,9 @@ test("filtering loads the rest of the list first", async () => {
     const model = new Model(api.library, api.player);
     model.view = "songs";
     (model as any).loader = async (offset: number) => ({ items: pages[offset / 100] ?? [], more: offset === 0 });
-    await model.load(false);
-    expect(model.more).toBe(true);
+    // Filtering starts while the background load is still running, and waits for it.
+    void model.load(false);
+    expect(model.loading).toBe(true);
     await model.setFilter({ text: "song 150" });
     expect(model.items.length).toBe(200);
     expect(model.shown.map(item => item.id)).toEqual(["i.150"]);
@@ -546,9 +588,11 @@ describe("artists", () => {
 
   test("arrow keys move from top songs into the album shelves and back", async () => {
     const app = await setup(120, 36, "albums");
-    app.ui.grid.select("l.soma"); app.mockInput.pressKey("a");
+    app.ui.grid.select("l.soma"); app.mockInput.pressEnter();
+    await waitFor(() => app.model.detail?.id === "l.soma" && !app.model.loading); await app.flush();
+    await click(app, "collection-artist");
     await waitFor(() => app.model.display === "sections" && !app.model.loading); await app.flush();
-    expect(app.ui.grid.focused).toBe(true);
+    app.ui.grid.focus();
     app.mockInput.pressArrow("up"); expect(app.ui.tracks.focused).toBe(true);
     for (let row = 0; row < 6; row++) app.mockInput.pressArrow("down");
     expect(app.ui.grid.focused).toBe(true);

@@ -5,14 +5,13 @@ import { join } from "node:path";
 export interface Preferences {
   order: string[];
   hidden: string[];
-  playbackBars: boolean;
   // Every song in Favourite Songs is a favourite, so its rows show no heart unless this is true.
   heartsInFavourites: boolean;
 }
 
 export const configDir = process.env.PEEL_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "peel");
 export const cacheDir = process.env.PEEL_CACHE_DIR ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "peel");
-export const defaults: Preferences = { order: [], hidden: [], playbackBars: true, heartsInFavourites: false };
+export const defaults: Preferences = { order: [], hidden: [], heartsInFavourites: false };
 
 export async function readPreferences(dir = configDir): Promise<Preferences> {
   try {
@@ -20,7 +19,6 @@ export async function readPreferences(dir = configDir): Promise<Preferences> {
     return {
       order: Array.isArray(value.order) ? value.order.filter((v: unknown) => typeof v === "string") : [],
       hidden: Array.isArray(value.hidden) ? value.hidden.filter((v: unknown) => typeof v === "string") : [],
-      playbackBars: typeof value.playbackBars === "boolean" ? value.playbackBars : true,
       heartsInFavourites: value.heartsInFavourites === true,
     };
   } catch (error) {

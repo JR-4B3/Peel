@@ -56,9 +56,6 @@ try {
   record("real playback time advances", { before: start.time.currentTime, after: advanced.time.currentTime });
   setup.mockInput.pressKey(" "); const paused = await observe(state => state.state === "paused", "keyboard pause");
   record("keyboard pause", paused.state);
-  await setup.flush(); const frozen = setup.captureCharFrame(); ui.animate(); await setup.flush();
-  if (setup.captureCharFrame() !== frozen) throw new Error("Paused playback bars changed");
-  record("paused bars stay still", true);
 
   const beforeVolume = paused.volume;
   const volumeTarget = beforeVolume >= 0.05 ? beforeVolume - 0.05 : beforeVolume + 0.05;

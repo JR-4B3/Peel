@@ -40,6 +40,9 @@ const fold = (text: string) => text.normalize("NFD").replace(/\p{Diacritic}/gu, 
 // New releases need one request per hundred library artists, so reuse them for a while.
 const releasesFresh = 6 * 60 * 60 * 1000;
 const navigationRetry = 10000;
+// Apple returns a hundred items per request. Lists load backgroundLimit items without scrolling.
+const pageSize = 100;
+export const backgroundLimit = 500;
 const memoryStore: HomeStore = { read: async () => undefined, write: async () => {} };
 
 export class Model extends EventEmitter {
@@ -70,8 +73,10 @@ export class Model extends EventEmitter {
   private navigating?: Promise<void>;
   private navigationTried = 0;
   private loader?: (offset: number) => Promise<Page>;
+  private loads?: Promise<void>;
   private collection?: { id: string; type: string };
   private commands: Promise<unknown> = Promise.resolve();
+  private queueEdits = 0;
   private activation?: { key: string; started: number; pending: boolean; promise: Promise<void> };
   private loved?: { key: string; value: boolean };
   private homeRead = false;
@@ -127,8 +132,11 @@ export class Model extends EventEmitter {
     if (!this.browsingReady && Date.now() - this.navigationTried > navigationRetry) void this.loadNavigation();
     return this.refreshing ??= (async () => {
       try {
+        const playing = this.playback.nowPlaying?.playParams?.id;
         this.playback = await this.player.snapshot();
         this.playbackError = undefined;
+        // A queued song leaves the queue when it starts playing.
+        if (this.view === "queue" && !this.loading && playing !== this.playback.nowPlaying?.playParams?.id) void this.requeue();
         const recovering = !this.connected;
         this.connected = true;
         if (recovering && !this.starting) this.status = "Ready to play";
@@ -213,10 +221,14 @@ export class Model extends EventEmitter {
     this.remember();
     this.view = `collection:${item.type}:${item.id}`; this.title = item.name; this.detail = item; this.shelves = [];
     this.collection = { id: item.id, type: item.type };
-    this.loader = item.type === "library-playlists" ? offset => this.library.songs(item.id, offset)
+    this.loader = this.songsOf(item);
+    await this.load(false);
+  }
+
+  private songsOf(item: Media): (offset: number) => Promise<Page> {
+    return item.type === "library-playlists" ? offset => this.library.songs(item.id, offset)
       : item.type === "playlists" ? offset => this.library.playlist(item.id, offset)
       : offset => this.library.album(item.id, offset);
-    await this.load(false);
   }
 
   private remember() {
@@ -266,6 +278,8 @@ export class Model extends EventEmitter {
     this.generation++; this.loading = false;
     ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter } = previous);
     this.changed();
+    // Opening the page stopped this list's background loading. It continues where it was.
+    if (this.more && this.items.length < backgroundLimit) void this.load(true, backgroundLimit);
     return closed;
   }
 
@@ -287,25 +301,37 @@ export class Model extends EventEmitter {
       this.items = items.filter(item => !/albums|artists|playlists/.test(item.type));
       void this.markLoved(this.items);
       this.shelves = [{ id: "albums", title: "Albums", items: of("albums") }, { id: "artists", title: "Artists", items: of("artists") }].filter(shelf => shelf.items.length);
-      this.status = `${items.length} search results`;
     } catch (error) { if (generation === this.generation) this.fail(error); }
     finally { if (generation === this.generation) { this.loading = false; this.changed(); } }
   }
 
-  async load(append: boolean) {
-    if (!this.loader || append && this.loading) return;
-    const generation = ++this.generation;
-    const offset = append ? this.items.length : 0;
-    if (!append) this.items = [];
-    this.loading = true; this.more = false; this.changed();
-    try {
-      const result = await this.loader(offset);
-      if (generation !== this.generation) return;
-      this.items = append ? [...this.items, ...result.items] : result.items;
-      void this.markLoved(result.items);
-      this.more = result.more; this.status = `${this.items.length} items${result.more ? " loaded, more available" : ""}`;
-    } catch (error) { if (generation === this.generation) this.fail(error); }
-    finally { if (generation === this.generation) { this.loading = false; this.changed(); } }
+  // A list opens with its first page, then keeps loading pages in the background up to
+  // backgroundLimit items. Past that, scrolling near the end loads one more page each time.
+  load(append: boolean, until = append ? 0 : backgroundLimit) {
+    if (!this.loader || append && this.loading) return this.loads ?? Promise.resolve();
+    const generation = ++this.generation, loader = this.loader;
+    if (!append) { this.items = []; this.more = false; }
+    this.loading = true; this.changed();
+    const loads = this.loads = (async () => {
+      try {
+        do {
+          // The first page comes alone so the list shows at once. Later pages arrive four at a time.
+          const count = this.items.length ? Math.max(1, Math.min(4, Math.ceil((until - this.items.length) / pageSize))) : 1;
+          const results = await Promise.all(Array.from({ length: count }, (_, index) => loader(this.items.length + index * pageSize)));
+          if (generation !== this.generation) return;
+          for (const result of results) {
+            this.items = [...this.items, ...result.items];
+            void this.markLoved(result.items);
+            this.more = result.more;
+            // A short page means the offsets after it are off. The next round starts from here.
+            if (!result.more || result.items.length < pageSize) break;
+          }
+          this.changed();
+        } while (this.more && this.items.length < until);
+      } catch (error) { if (generation === this.generation) { this.more = false; this.fail(error); } }
+      finally { if (generation === this.generation) { this.loading = false; this.changed(); } }
+    })();
+    return loads;
   }
 
   filter: Filter = unfiltered;
@@ -354,11 +380,10 @@ export class Model extends EventEmitter {
     this.filter = { ...this.filter, ...change };
     this.changed();
     const view = this.view;
-    while (this.more && !this.loading && view === this.view && (this.filter.text.trim() || this.filter.sort !== "playlist" || this.filter.descending || this.filter.loved)) {
-      await this.load(true);
-      this.status = `Loaded ${this.items.length} songs${this.more ? ", loading more to filter..." : ""}`; this.changed();
+    // A load that is already running finishes first, then the rest of the list loads.
+    while (view === this.view && (this.loading || this.more) && (this.filter.text.trim() || this.filter.sort !== "playlist" || this.filter.descending || this.filter.loved)) {
+      await (this.loading ? this.loads : this.load(true, Infinity));
     }
-    if (view === this.view && this.filter.text.trim()) { this.status = `${this.shown.length} of ${this.items.length} songs match`; this.changed(); }
   }
 
   // Marks which songs are favourites, so their rows show a heart. Every song in Favourite Songs is one.
@@ -396,6 +421,69 @@ export class Model extends EventEmitter {
       } finally { activation.pending = false; }
     })();
     await activation.promise;
+  }
+
+  // Reads the open queue again without clearing it first. Edits still on their way to the
+  // player would be undone on screen, so the last edit reads it.
+  private async requeue() {
+    if (this.queueEdits) return;
+    const generation = this.generation;
+    try {
+      const page = await this.player.queue(0);
+      if (generation !== this.generation || this.view !== "queue") return;
+      this.items = page.items; this.more = page.more; this.changed();
+    } catch {}
+  }
+
+  // Adds a song, album, or playlist directly after the playing song (next), or after the songs
+  // already added, before the rest of the playing collection.
+  async enqueue(item: Media, next: boolean) {
+    if (item.type.includes("artists")) { this.status = "Artists cannot be queued. Open the artist and queue a song or album."; this.changed(); return; }
+    let songs = [item];
+    // Cider adds a collection itself. Peel's engine needs its songs, up to the usual list limit.
+    if (/albums|playlists/.test(item.type) && this.player.queuesItems) {
+      try {
+        const load = this.songsOf(item);
+        songs = [];
+        for (let page: Page | undefined; !page || page.more && songs.length < backgroundLimit;) {
+          page = await load(songs.length);
+          if (!page.items.length) break;
+          songs.push(...page.items);
+        }
+      } catch (error) { this.fail(error); return; }
+      if (!songs.length) { this.status = `${item.name} has no songs to queue.`; this.changed(); return; }
+    }
+    if (!await this.execute(() => this.player.enqueue(songs, next))) return;
+    // An open queue reads its songs again.
+    if (this.view === "queue") await this.requeue();
+    this.status = `${next ? "Plays next" : "Added to the queue"}: ${item.name}`;
+    this.changed();
+  }
+
+  // Moves the song at from in the open queue to to, both places in the list. The list changes at
+  // once. The songs keep the player's queue places they had, which are consecutive after the playing song.
+  async moveQueued(from: number, to: number) {
+    const item = this.items[from], target = this.items[to];
+    if (this.view !== "queue" || from === to || item?.queueIndex === undefined || target?.queueIndex === undefined) return;
+    const places = this.items.map(entry => entry.queueIndex);
+    this.items = this.items.toSpliced(from, 1).toSpliced(to, 0, item).map((entry, index) => ({ ...entry, queueIndex: places[index] }));
+    this.changed();
+    await this.editQueue(() => this.act("/queue/move", { from: item.queueIndex, to: target.queueIndex }));
+  }
+
+  async removeQueued(index: number) {
+    const item = this.items[index], place = item?.queueIndex;
+    if (this.view !== "queue" || place === undefined) return;
+    this.items = this.items.toSpliced(index, 1).map(entry => entry.queueIndex! > place ? { ...entry, queueIndex: entry.queueIndex! - 1 } : entry);
+    this.status = `Removed from the queue: ${item!.name}`;
+    this.changed();
+    await this.editQueue(() => this.act(`/queue/items/${place}`, undefined, "DELETE"));
+  }
+
+  private async editQueue(edit: () => Promise<unknown>) {
+    this.queueEdits++;
+    try { await edit(); } finally { this.queueEdits--; }
+    await this.requeue();
   }
 
   act(path: string, body: unknown = {}, method = "POST") {
@@ -487,7 +575,6 @@ export class Model extends EventEmitter {
     const hidden = this.preferences.hidden.includes(id) ? this.preferences.hidden.filter(value => value !== id) : [...this.preferences.hidden, id];
     await this.persist({ ...this.preferences, hidden });
   }
-  async bars() { await this.persist({ ...this.preferences, playbackBars: !this.preferences.playbackBars }); }
   private async persist(value: Preferences) {
     try { await this.save(value); this.preferences = value; this.status = "Layout saved"; this.changed(); }
     catch (error) { this.fail(error); }

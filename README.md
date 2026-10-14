@@ -10,11 +10,11 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 - Albums shows your library as a grid of covers. Selecting an album or playlist opens a page with its cover and songs.
 - Artists shows your library's artists as a grid of photos. An artist page lists their top songs, then rows of their albums, singles and EPs, live albums, compilations, and albums they appear on.
 - The sidebar can be rearranged in place. Edit, below the sidebar, or `e` with the sidebar focused, lists hidden entries dimmed beside an eye icon. Selecting an entry then shows or hides it instead of opening it. Search and the player stay visible.
-- The logo above the sidebar is pixel art of an apple with its lower half peeled, beside the name in figlet's Small Slant letters, four rows tall in wide terminals. `assets/peel.svg` is the same drawing, and the application entry uses it as its icon. `bun scripts/logo.ts` rewrites it from the pixel grid in `src/logo.ts`.
+- The search field spans the top of the window. Peel's logo, pixel art of an apple with its lower half peeled, is the application entry's icon, `assets/peel.svg`. `bun scripts/logo.ts` rewrites it from the pixel grid in `src/logo.ts`.
+- The Queue lists only the songs you added with `e` or Shift+E that have not played yet. The rest of the playing album or playlist is not listed. Added songs play after the current song and before the rest of the collection, and they stay queued when you start another album or playlist. A song leaves the Queue when it starts playing. With `PEEL_PLAYER=cider`, the Queue still lists Cider's whole queue.
 - Song lists can be filtered by title, artist, or album, sorted, and narrowed to favourites. Favourite songs show a heart before their title.
 - Playback controls use icons with their keyboard shortcut beside them when the terminal is at least 100 columns wide. There is one player strip at the bottom with the current cover and a favourite heart.
 - Mouse clicks and keyboard shortcuts control the same actions.
-- Optional animated bars indicate confirmed playback. They are a playback indicator, not a measured audio spectrum. They stop when paused or disconnected.
 - Lyrics are deferred.
 
 ## Run
@@ -47,11 +47,17 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Shuffle / repeat | `s` / `r` | Shuffle / Repeat |
 | Navigate music | Tab or Shift+Tab, then arrow keys and Enter | Click a playlist, cover, or song |
 | Seek while covers have focus | Shift+Left / Shift+Right | Click the progress bar |
-| Open an artist | `a` on a highlighted song or album, otherwise the playing song's artist | The artist name on an album page or in the player |
+| Open an artist | | The artist name on an album page or in the player |
 | Jump through a long song list | Page Up / Page Down, Home / End | Scroll, three songs at a time |
 | Back from an album, playlist, or artist | Escape or Backspace | Back |
 | Favourite the current song | `f` | Heart |
-| Load another page | `m`, or move to the last row of covers | Scroll down |
+| Add the highlighted song, album, or playlist to the queue, after the songs already added | `e` | |
+| Play the highlighted song, album, or playlist next | Shift+E | |
+| Show the queue | `u` | Queue in the sidebar |
+| Move a song in the queue | Shift+Up / Shift+Down, or `K` / `J` | |
+| Play a queued song next | Shift+E in the queue | |
+| Remove a song from the queue | `x` or Delete | |
+| Load past the first 500 | Move near the end of the list, or `m` | Scroll down |
 | Edit the sidebar | `e` with the sidebar focused. `e` or Escape finishes | Click Edit below the sidebar, then Done |
 | Move a sidebar entry | Shift+Up / Shift+Down, or `K` / `J`, while editing | |
 | Hide or show a sidebar entry | Enter while editing | Click the entry while editing |
@@ -59,11 +65,10 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Sort a song list | `o` cycles playlist order, title, artist, album, year, length, and shuffled | Sort |
 | Reverse the order | Shift+O | The arrow beside Sort |
 | Favourites only | `*` | Favourites |
-| Toggle playback bars | `v` | Bars |
 | Leave search | Escape | Select a sidebar entry |
 | Help / quit | `?` / `q`, or Ctrl+C | Keyboard |
 
-Plain playback shortcut letters remain text while the search input has focus. Quitting Peel leaves Cider playing.
+The bottom right of the window lists the keys for what has focus, such as play next, move, and remove on a queued song. `?` lists the other keys that apply on the current screen. It leaves out keys already shown beside a button, such as the player's, and filter and sort keys outside song lists. Plain playback shortcut letters remain text while the search input has focus. Quitting Peel with `q` or Ctrl+C, or closing its window, stops Peel's playback engine and the music. With `PEEL_PLAYER=cider`, quitting leaves Cider playing.
 
 Selecting a song in a playlist or album starts that song directly, then adds its collection and restores its position in the displayed order. Cider adds only the first hundred songs of a collection, so a song further down starts at once and the next hundred loaded songs are queued after it in the background. The songs before it are not queued then, and selecting another song stops the queueing. The collection's first song never starts as an intermediate step. Next and Previous continue through the collection. A double-click on the same song starts it once. Shuffle can change the order afterwards. Manual Next and Previous still change tracks in repeat-one mode and preserve the repeat setting.
 
@@ -85,7 +90,7 @@ Sidebar changes save to `~/.config/peel/layout.json`. Home is always first and c
 
 Peel keeps Home's shelves and downloaded covers in `~/.cache/peel`. `XDG_CACHE_HOME` and `PEEL_CACHE_DIR` change that location. New releases come from the latest release of each library artist with Apple's favourite flag, from the last 120 days or not yet released, newest first. Peel checks again after six hours, because the check reads every library artist. Recently played reloads each time Home opens.
 
-Peel targets the v2 API in the installed Cider 4.0.17 build for playback, the queue, and the favourite heart. Everything else comes from `api.music.apple.com`. Peel reads the developer token from the script of Apple's web player at music.apple.com and caches it in `~/.cache/peel/apple-developer-token.json` until a day before it expires. When Apple rejects it, Peel fetches it again once. When Apple rejects the user token, Peel copies a fresh one from Cider if Cider is running. Apple does not document this use of its web player's token, and Apple can change or revoke it. Artist pages use the catalog artist linked to a song or album. Library items without a catalog link, such as uploads, fall back to a search for the artist's name, so a collaboration credit may open the first matching artist. Favourite Songs uses Apple's `favorited` playlist tag, so it also works when that playlist has a translated name. Library views load another page on demand.
+Peel targets the v2 API in the installed Cider 4.0.17 build for playback, the queue, and the favourite heart. Everything else comes from `api.music.apple.com`. Peel reads the developer token from the script of Apple's web player at music.apple.com and caches it in `~/.cache/peel/apple-developer-token.json` until a day before it expires. When Apple rejects it, Peel fetches it again once. When Apple rejects the user token, Peel copies a fresh one from Cider if Cider is running. Apple does not document this use of its web player's token, and Apple can change or revoke it. Artist pages use the catalog artist linked to a song or album. Library items without a catalog link, such as uploads, fall back to a search for the artist's name, so a collaboration credit may open the first matching artist. Favourite Songs uses Apple's `favorited` playlist tag, so it also works when that playlist has a translated name. Apple returns a hundred items per request. Lists show the first hundred at once and load the next hundreds in the background, up to 500. Past that, each move near the end of the list loads another hundred.
 
 Cider must keep running. Replacing its interface does not remove the playback engine's resource use. Playback format and subscription restrictions remain those of the running Cider engine.
 

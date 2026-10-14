@@ -9,8 +9,15 @@ import type { Media, Page, Playback, Player } from "./types";
 export const engineHome = process.env.PEEL_ENGINE_HOME ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "peel-engine");
 const launcher = new URL("../engine/run.sh", import.meta.url).pathname;
 
-interface State { ready: boolean; signIn: boolean; playback?: Playback }
-interface Queue { position: number; items: { id: string; type: string; attributes: { name?: string; artistName?: string; albumName?: string; durationInMillis?: number } }[] }
+// The same hash engine/main.js reports, from the engine's files on disk.
+export async function engineVersion() {
+  const hasher = new Bun.CryptoHasher("sha256");
+  for (const name of ["engine.js", "main.js"]) hasher.update(await Bun.file(new URL(`../engine/${name}`, import.meta.url)).arrayBuffer());
+  return hasher.digest("hex");
+}
+
+interface State { ready: boolean; signIn: boolean; playback?: Playback; version?: string }
+interface Queue { position: number; items: { id: string; type: string; added: boolean; attributes: { name?: string; artistName?: string; albumName?: string; durationInMillis?: number } }[] }
 
 export class Engine implements Player {
   readonly queuesItems = true;
@@ -52,13 +59,15 @@ export class Engine implements Player {
   appleTokens(): Promise<{ userToken: string; storefront?: string }> { return this.call("tokens"); }
   async rating(): Promise<number> { return await this.call("rating") ?? 0; }
 
+  // The songs the listener added that have not played yet. The rest of the playing collection is not listed.
   async queue(offset = 0): Promise<Page> {
     const queue: Queue = await this.call("queue");
-    const items = queue.items.slice(offset, offset + 100).map((item, index) => ({
+    const added = queue.items.map((item, index) => ({ item, index })).filter(({ item }) => item.added);
+    const items = added.slice(offset, offset + 100).map(({ item, index }) => ({
       id: item.id, type: item.type, name: item.attributes.name ?? "Untitled", artist: item.attributes.artistName ?? "",
-      album: item.attributes.albumName ?? "", duration: (item.attributes.durationInMillis ?? 0) / 1000, queueIndex: offset + index,
+      album: item.attributes.albumName ?? "", duration: (item.attributes.durationInMillis ?? 0) / 1000, queueIndex: index,
     }));
-    return { items, more: offset + 100 < queue.items.length };
+    return { items, more: offset + 100 < added.length };
   }
   async queuePosition() {
     const queue: Queue = await this.call("queue");
@@ -69,6 +78,10 @@ export class Engine implements Player {
   // The engine queues the whole collection as loaded, so Next and Previous follow the displayed order.
   async playCollectionTrack(_collection: { id: string; type: string }, items: Media[], index: number) {
     await this.call("play", items.filter(item => !/albums|artists|playlists/.test(item.type)), index);
+  }
+
+  async enqueue(items: Media[], next: boolean) {
+    await this.call("enqueue", items.filter(item => !/albums|artists|playlists/.test(item.type)), next);
   }
 
   // Peel's controls use Cider's command paths. The engine has a method for each.
@@ -83,9 +96,11 @@ export class Engine implements Player {
       "/playback/shuffle/toggle": () => this.call("toggleShuffle"),
       "/playback/repeat/toggle": () => this.call("toggleRepeat"),
       "/queue/jump": () => this.call("jump", body.index),
+      "/queue/move": () => this.call("move", body.from, body.to),
       "/library/now-playing/rating": () => this.call("rate", method === "DELETE" ? 0 : body.rating),
     };
-    const run = commands[path];
+    const removed = method === "DELETE" && path.match(/^\/queue\/items\/(\d+)$/);
+    const run = removed ? () => this.call("remove", Number(removed[1])) : commands[path];
     if (!run) throw new Error(`The playback engine has no command for ${path}.`);
     await run();
   }
@@ -96,12 +111,20 @@ export class Engine implements Player {
 export async function ensureEngine(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal) {
   const state = () => engine.state().catch(() => undefined);
   let current = await state();
+  // An engine started before Peel's files were updated keeps running the old code until it restarts.
+  if (current && current.version !== await engineVersion()) {
+    status("Restarting the playback engine to load an update...");
+    Bun.spawnSync(["systemctl", "--user", "stop", "peel-engine.service"], { stdout: "ignore", stderr: "ignore" });
+    current = await state();
+  }
   if (!current) {
     status("Starting the playback engine...");
     const environment = ["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
       .filter(name => process.env[name]).map(name => `--setenv=${name}=${process.env[name]}`);
-    // The user manager owns the engine, so music keeps playing when Peel quits.
-    const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-engine", ...environment, "--", launcher], { stdout: "ignore", stderr: "pipe" });
+    // The user manager owns the engine, so it outlives Peel's terminal until stopEngine runs.
+    // KillMode=mixed sends SIGTERM to Electron's main process only. When Chromium's helper
+    // processes get it too, they exit first and Electron crashes with a core dump.
+    const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-engine", "--property=KillMode=mixed", ...environment, "--", launcher], { stdout: "ignore", stderr: "pipe" });
     if (await child.exited !== 0) {
       const active = Bun.spawn(["systemctl", "--user", "is-active", "--quiet", "peel-engine.service"]);
       if (await active.exited !== 0) throw new Error(`Could not start the playback engine: ${(await new Response(child.stderr).text()).trim()}`);
@@ -115,4 +138,10 @@ export async function ensureEngine(engine: Engine, status: (text: string) => voi
     current = await state();
   }
   if (!current?.ready) throw new Error("The playback engine did not become ready. Run engine/run.sh to see why.");
+}
+
+// Stops the engine and its music when Peel closes. --no-block queues the stop with the user
+// manager and returns at once, so it completes even when the terminal is already closing.
+export function stopEngine() {
+  Bun.spawnSync(["systemctl", "--user", "stop", "--no-block", "peel-engine.service"], { stdout: "ignore", stderr: "ignore" });
 }

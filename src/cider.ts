@@ -71,6 +71,12 @@ export class Cider implements Player {
   // Counts playback starts, so a queue still being built stops when another song starts.
   private starts = 0;
 
+  // Cider adds an album or playlist itself. Play next puts each song directly after the playing
+  // one, so several songs are added last first to keep their order.
+  async enqueue(items: Media[], next: boolean) {
+    for (const item of next ? items.toReversed() : items) await this.request(next ? "/queue/add-next" : "/queue/add-later", { id: item.id, type: item.type });
+  }
+
   playItem(item: Media) { return this.command("/playback/play-item", { id: item.id, type: item.type }); }
 
   async playCollectionTrack(collection: { id: string; type: string }, items: Media[], index: number) {

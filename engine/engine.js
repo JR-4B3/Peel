@@ -8,6 +8,9 @@
   let signIn = false;
   // The playing song's rating. A song shows as a favourite or not only once Apple has answered.
   let rated = { id: "", value: undefined, checked: 0 };
+  // The queue entries the listener added, mapped to the Peel songs they came from. The rest of
+  // MusicKit's queue is the collection that was playing.
+  let added = new WeakMap();
 
   // Ratings belong to the catalog song. Library songs name it in their play parameters, and
   // songs only in the library are rated as library songs.
@@ -45,6 +48,12 @@
     attributes: { name: item.title, artistName: item.artistName, albumName: item.albumName, durationInMillis: (item.playbackDuration ?? 0) },
   });
 
+  const pending = () => music.queue.items.slice(music.queue.position + 1).filter(item => added.has(item));
+  async function insert(items, at) {
+    await music.playAt(at, { items: items.map(resource) });
+    music.queue.items.slice(at, at + items.length).forEach((item, index) => added.set(item, items[index]));
+  }
+
   window.peelEngine = {
     state() {
       if (!music) return { ready: false, signIn };
@@ -75,9 +84,35 @@
     toggleShuffle: () => { music.shuffleMode = music.shuffleMode === 1 ? 0 : 1; },
     toggleRepeat: () => { music.repeatMode = (music.repeatMode + 1) % 3; },
     // A song inside its collection: the whole list is queued, starting at the selected song.
-    play: async (items, index = 0) => { await music.setQueue({ items: items.map(resource), startWith: index, startPlaying: true }); },
+    // Songs the listener added and has not heard yet stay queued after it.
+    play: async (items, index = 0) => {
+      const waiting = pending().map(item => added.get(item));
+      added = new WeakMap();
+      await music.setQueue({ items: items.map(resource), startWith: index, startPlaying: true });
+      if (waiting.length) await insert(waiting, music.queue.position + 1);
+    },
+    // Play next goes directly after the playing song. Otherwise the songs go after the other added
+    // songs and before the rest of the collection. Songs added while nothing is queued start playing.
+    enqueue: async (items, next) => {
+      if (!music.queue.items.length) {
+        await music.setQueue({ items: items.map(resource), startPlaying: true });
+        music.queue.items.slice(1).forEach((item, index) => added.set(item, items[index + 1]));
+        return;
+      }
+      let at = music.queue.position + 1;
+      if (!next) while (added.has(music.queue.items[at])) at++;
+      await insert(items, at);
+    },
+    // Queue edits move MusicKit's own entries, so a moved song stays marked as added.
+    // Only songs after the playing one change.
+    move: (from, to) => {
+      if (Math.min(from, to) <= music.queue.position) return;
+      const [entry] = music.queue.spliceQueueItems(from, 1);
+      music.queue.spliceQueueItems(to, 0, [entry]);
+    },
+    remove: index => { if (index > music.queue.position) music.queue.spliceQueueItems(index, 1); },
     jump: index => music.changeToMediaAtIndex(index),
-    queue: () => ({ position: music.queue.position, items: music.queue.items.map(describe) }),
+    queue: () => ({ position: music.queue.position, items: music.queue.items.map(item => ({ ...describe(item), added: pending().includes(item) })) }),
     rating: async () => await readRating(music.nowPlayingItem) ?? -1,
     rate: async value => {
       const item = music.nowPlayingItem, path = ratingPath(item);

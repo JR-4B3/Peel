@@ -12,6 +12,8 @@ const home = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".
 // Apple accepts the web player's token only from music.apple.com. A tiny real page there
 // gives the engine that origin; its content policy allows MusicKit from Apple's CDN.
 const page = "https://music.apple.com/robots.txt";
+// Peel compares this with the files on disk and restarts an engine that runs older code.
+const version = crypto.createHash("sha256").update(fs.readFileSync(path.join(__dirname, "engine.js"))).update(fs.readFileSync(__filename)).digest("hex");
 const log = text => console.log(`${new Date().toISOString()} ${text}`);
 
 app.setPath("userData", home);
@@ -53,7 +55,7 @@ function serve(window, key) {
     let body = "";
     for await (const chunk of request) body += chunk;
     try {
-      if (request.method === "GET" && request.url === "/state") return reply(200, await call("state"));
+      if (request.method === "GET" && request.url === "/state") return reply(200, { ...await call("state"), version });
       if (request.method === "POST" && request.url === "/call") {
         const { method, args } = JSON.parse(body || "{}");
         return reply(200, await call(method, args));
@@ -84,9 +86,14 @@ app.whenReady().then(async () => {
     else log(text.slice(5));
   });
   // Closing the hidden window would stop playback; the engine runs until it is stopped.
-  window.on("close", event => event.preventDefault());
+  window.on("close", event => { if (!quitting) event.preventDefault(); });
   await window.loadURL(page);
   await window.webContents.executeJavaScript(fs.readFileSync(path.join(__dirname, "engine.js"), "utf8"));
   serve(window, key);
 });
 app.on("window-all-closed", () => {});
+// Peel stops the engine with SIGTERM when it closes. Electron answers SIGTERM by closing its
+// windows, which the handler above refuses, so the engine would hang until systemd aborts it.
+let quitting = false;
+app.on("before-quit", () => { quitting = true; });
+process.on("SIGTERM", () => app.quit());

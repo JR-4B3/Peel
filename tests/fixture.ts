@@ -96,6 +96,7 @@ export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number
       audible.push(song.id);
     }
     else if (path === "/queue/add-later" && /songs/.test(body.type)) await Bun.sleep(options.queueDelay ?? 0), queue.push({ track: { id: body.id, type: "songs", attributes: { ...song, id: body.id, name: body.id } } });
+    else if (path === "/queue/add-next" && /songs/.test(body.type)) queue.splice(position + 1, 0, { track: { id: body.id, type: "songs", attributes: { ...song, id: body.id, name: body.id } } });
     else if (path === "/queue/add-later") queue.push(...collection.map(item => ({ track: { id: item.id, type: "songs", attributes: item } })));
     else if (path.startsWith("/queue/items/") && request.method === "DELETE") queue.splice(Number(path.split("/").at(-1)), 1);
     else if (path === "/queue/move") {

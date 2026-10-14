@@ -72,6 +72,8 @@ export interface Player {
   playItem(item: Media): Promise<void>;
   // items is the collection as loaded so far, with the selected track at index.
   playCollectionTrack(collection: { id: string; type: string }, items: Media[], index: number): Promise<void>;
+  // Adds songs, or with Cider a whole album or playlist, after the playing song (next) or after the last queued song.
+  enqueue(items: Media[], next: boolean): Promise<void>;
   command(path: string, body?: unknown, method?: string): Promise<void>;
 }
 
