@@ -562,6 +562,34 @@ test("filtering loads the rest of the list first", async () => {
   });
 });
 
+describe("the enlarged cover", () => {
+  test("clicking an album's cover fills the window with it at the window's pixel size, and Escape closes it", async () => {
+    const requested: string[] = [];
+    const art = Bun.serve({ port: 0, fetch: request => { requested.push(new URL(request.url).pathname); return new Response("", { status: 404 }); } });
+    cleanup.push(() => art.stop(true));
+    const app = await setup(120, 36, "albums");
+    await click(app, "grid:tile:albums:0");
+    await waitFor(() => app.model.detail?.id === "l.soma" && app.model.items.length === 3);
+    app.model.detail!.artwork = `http://127.0.0.1:${art.port}/cover/{w}x{h}bb.{f}`;
+    app.model.changed(); await app.flush();
+    await click(app, "collection-cover"); await app.flush();
+    let frame = app.captureCharFrame();
+    expect(frame).toContain("Esc or click to close"); expect(frame).toContain("SOMA"); expect(frame).not.toContain("Search Apple Music");
+    // The small cached cover first, then one sized to the window, rounded up to whole hundreds.
+    await waitFor(() => requested.length >= 2);
+    expect(requested).toContain("/cover/240x240bb.jpg");
+    expect(requested.some(path => /^\/cover\/([6-9]|[1-3]\d)00x\d+bb\.jpg$/.test(path))).toBe(true);
+    app.mockInput.pressEscape();
+    await waitFor(() => !app.renderer.root.findDescendantById("cover-view")); await app.flush();
+    frame = app.captureCharFrame();
+    expect(frame).toContain("Search Apple Music"); expect(app.model.detail?.id).toBe("l.soma");
+    app.mockInput.pressKey("c"); await app.flush();
+    expect(app.captureCharFrame()).toContain("Esc or click to close");
+    await click(app, "cover-view"); await app.flush();
+    expect(app.captureCharFrame()).not.toContain("Esc or click to close");
+  });
+});
+
 describe("artists", () => {
   test("an album's artist opens a page with top songs and every release shelf, and Escape returns", async () => {
     const app = await setup(120, 36, "albums");

@@ -1,7 +1,7 @@
 import { BoxRenderable, TextRenderable, InputRenderable, ImageRenderable, StyledText, t, fg, bold, type CliRenderer, type KeyEvent, type MouseEvent, type RenderContext } from "@opentui/core";
 import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
-import { cover } from "./artwork";
+import { cover, largeCover } from "./artwork";
 import { colour, icon } from "./theme";
 
 interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
@@ -444,6 +444,7 @@ export class PeelUI {
   private lastSidebar = "";
   private lastShelves = "";
   private disposed = false;
+  private coverView?: BoxRenderable;
   private focusChange = () => {
     // Editing ends when focus leaves the sidebar.
     if (this.editingSidebar && !this.sidebar.focused) this.editSidebar(false);
@@ -483,7 +484,7 @@ export class PeelUI {
     this.trackPanel = new BoxRenderable(ctx, { id: "tracks-panel", ...panel, title: "Home", flexGrow: 1, minWidth: 0, minHeight: 0 });
 
     this.header = new BoxRenderable(ctx, { id: "collection-header", flexDirection: "row", gap: 2, paddingX: 1, paddingY: 1, height: 10, flexShrink: 0 });
-    this.headerCover = new Cover(ctx, { width: 16, height: 8 });
+    this.headerCover = new Cover(ctx, { id: "collection-cover", width: 16, height: 8 });
     const info = new BoxRenderable(ctx, { flexDirection: "column", flexGrow: 1, minWidth: 0, justifyContent: "flex-end" });
     this.headerName = new TextRenderable(ctx, { fg: colour.text, attributes: 1, height: 1, truncate: true, selectable: false });
     this.headerArtist = new TextRenderable(ctx, { id: "collection-artist", fg: colour.accent, height: 1, truncate: true, selectable: false,
@@ -493,6 +494,7 @@ export class PeelUI {
     actions.add(this.button("play-collection", icon.play, "Play", () => { const first = this.model.items[0]; if (first) void this.model.activate(first); }));
     actions.add(this.button("back", icon.back, "Back  esc", () => this.back()));
     for (const item of [this.headerName, this.headerArtist, this.headerMeta, actions]) info.add(item);
+    this.headerCover.onMouseDown = event => { const detail = model.detail; if (event.button === 0 && detail) { event.stopPropagation(); this.showCover(detail.artwork, detail.name, detail.artist || detail.genre || ""); } };
     this.header.add(this.headerCover); this.header.add(info);
     // The header and the song list. Album pages stack them; wide artist pages put the top songs beside the artist.
     this.top = new BoxRenderable(ctx, { id: "top", flexDirection: "column", flexGrow: 1, minHeight: 0, minWidth: 0, flexShrink: 0 });
@@ -527,6 +529,7 @@ export class PeelUI {
 
     this.playerPanel = new BoxRenderable(ctx, { id: "player-panel", ...panel, paddingX: 1, height: 6, flexShrink: 0, flexDirection: "row", gap: 2 });
     this.playerCover = new Cover(ctx, { id: "player-cover", width: 8, height: 4, glyph: "\u{F075A}" });
+    this.playerCover.onMouseDown = event => { const song = model.playback.nowPlaying; if (event.button === 0 && song) { event.stopPropagation(); this.showCover(song.artwork?.url, song.albumName ?? song.name ?? "", song.artistName ?? ""); } };
     this.playerPanel.add(this.playerCover);
     const deck = new BoxRenderable(ctx, { flexDirection: "column", flexGrow: 1, minWidth: 0 });
     const nowPlaying = new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2 });
@@ -803,6 +806,7 @@ export class PeelUI {
     }
     // Narrow windows show the player's buttons without their keys.
     if (this.renderer.terminalWidth < 100) pairs.push(["space", "play"], ["p n", "skip"], ["- +", "volume"], ["f", "favourite"], ["s", "shuffle"], ["r", "repeat"]);
+    if (model.detail?.artwork || model.playback.nowPlaying) pairs.push(["c", "cover"]);
     if (model.view !== "queue") pairs.push(["u", "queue"]);
     pairs.push(["/", "search"], ["Tab", "next panel"]);
     return pairs;
@@ -855,6 +859,40 @@ export class PeelUI {
     const ratio = Math.max(0, Math.min(1, (event.x - this.progress.x - start) / Math.max(1, cells - 1)));
     void this.model.act("/playback/seek", { position: maximum * ratio });
   }
+  // The cover fills the window above its name. The cached small cover shows at once and is
+  // replaced by one downloaded at the window's pixel size, so it is sharp on large screens.
+  private showCover(art: string | undefined, name: string, detail: string) {
+    if (!art) return;
+    this.closeCover();
+    const ctx = this.renderer, width = ctx.terminalWidth - 4;
+    const view = new BoxRenderable(ctx, { id: "cover-view", position: "absolute", left: 0, top: 0, width: "100%", height: "100%", zIndex: 100,
+      flexDirection: "column", alignItems: "center", paddingX: 2, paddingY: 1,
+      onMouseDown: event => { if (event.button === 0) { event.stopPropagation(); this.closeCover(); } } });
+    const image = new ImageRenderable(ctx, { id: "cover-view-image", width: "100%", flexGrow: 1, minHeight: 0, fit: "fit" });
+    view.add(image);
+    view.add(new TextRenderable(ctx, { content: fit(name, width), fg: colour.text, attributes: 1, height: 1, marginTop: 1, flexShrink: 0, selectable: false }));
+    view.add(new TextRenderable(ctx, { content: fit(detail, width), fg: colour.muted, height: 1, flexShrink: 0, selectable: false }));
+    view.add(new TextRenderable(ctx, { content: "Esc or click to close", fg: colour.faint, height: 1, flexShrink: 0, selectable: false }));
+    this.root.visible = false;
+    ctx.root.add(view); this.coverView = view;
+    let sharp = false;
+    void cover(art)?.then(small => { if (small && !sharp && this.coverView === view) image.source = small; });
+    // The image is square and fits the height left after the four text rows and the padding.
+    const resolution = ctx.resolution;
+    const pixels = resolution ? Math.min((ctx.terminalHeight - 6) * resolution.height / ctx.terminalHeight, width * resolution.width / ctx.terminalWidth) : 1500;
+    void largeCover(art, pixels).then(large => {
+      if (large && this.coverView === view) { sharp = true; image.source = large; }
+      large?.dispose();
+    });
+  }
+
+  private closeCover() {
+    if (!this.coverView) return false;
+    this.coverView.destroyRecursively(); this.coverView = undefined;
+    this.root.visible = true;
+    return true;
+  }
+
   private back() {
     const closed = this.model.back();
     if (!closed) return false;
@@ -908,6 +946,14 @@ export class PeelUI {
     const grid = this.grid.focused;
     let action: (() => void) | undefined;
     if (key.ctrl && key.name === "c") action = this.quit;
+    // The enlarged cover takes the keys, except play/pause and quit.
+    else if (this.coverView) action = key.name === "space" ? () => void model.act("/playback/toggle") : key.name === "q" ? this.quit
+      : ["escape", "return", "backspace", "c"].includes(key.name) ? () => this.closeCover() : () => {};
+    else if (key.name === "c" && !this.search.focused && !this.filterInput.focused) action = () => {
+      const detail = model.detail, song = model.playback.nowPlaying;
+      if (detail?.artwork) this.showCover(detail.artwork, detail.name, detail.artist || detail.genre || "");
+      else if (song) this.showCover(song.artwork?.url, song.albumName ?? song.name ?? "", song.artistName ?? "");
+    };
     else if (key.ctrl && key.name === "f") action = () => this.search.focus();
     else if (key.ctrl && key.name === "p") action = () => void model.act("/playback/toggle");
     else if (key.name === "tab") action = () => {
@@ -969,6 +1015,7 @@ export class PeelUI {
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
+    this.closeCover();
     this.model.off("change", this.change); this.renderer.off("resize", this.resize); this.renderer.off("focused_renderable", this.focusChange); this.renderer.keyInput.off("keypress", this.key);
     this.root.destroyRecursively();
   }

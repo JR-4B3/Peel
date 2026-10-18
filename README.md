@@ -50,6 +50,7 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Open an artist | | The artist name on an album page or in the player |
 | Jump through a long song list | Page Up / Page Down, Home / End | Scroll, three songs at a time |
 | Back from an album, playlist, or artist | Escape or Backspace | Back |
+| Show the cover large, the open album's or else the playing song's | `c`. Escape or `c` closes it | The cover beside an album's name or in the player |
 | Favourite the current song | `f` | Heart |
 | Add the highlighted song, album, or playlist to the queue, after the songs already added | `e` | |
 | Play the highlighted song, album, or playlist next | Shift+E | |
