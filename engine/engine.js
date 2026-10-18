@@ -20,12 +20,15 @@
     if (id) return `/v1/me/ratings/songs/${id}`;
     return item?.id?.startsWith("i.") ? `/v1/me/ratings/library-songs/${item.id}` : "";
   };
-  // Apple answers 404 for a song without a rating. Other failures leave the rating unknown.
+  // Asked by id, Apple lists only the songs that have a rating, so an unrated song is an empty
+  // list. Asked by path, Apple answers 404, which MusicKit reports in shapes that change between
+  // versions. A failed request leaves the rating unknown.
   async function readRating(item) {
     const path = ratingPath(item);
     if (!path) return 0;
-    try { return (await music.api.music(path)).data.data?.[0]?.attributes?.value ?? 0; }
-    catch (error) { return /404|not found/i.test(String(error?.errorCode ?? error?.status ?? error?.message ?? error)) || error?.status === 404 ? 0 : undefined; }
+    const [collection, id] = [path.slice(0, path.lastIndexOf("/")), path.slice(path.lastIndexOf("/") + 1)];
+    try { return (await music.api.music(collection, { ids: id })).data.data?.[0]?.attributes?.value ?? 0; }
+    catch { return undefined; }
   }
   async function checkRating() {
     const item = music.nowPlayingItem;

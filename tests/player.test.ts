@@ -561,6 +561,21 @@ test("filtering loads the rest of the list first", async () => {
     expect(app.calls.filter(call => call.path === "/library/now-playing/rating").at(-1)?.method).toBe("DELETE");
     expect(app.model.favourite).toBe(false);
   });
+
+  test("an open album's heart favourites it through its catalog album, and l removes it", async () => {
+    const app = await setup(120, 36, "albums");
+    await click(app, "grid:tile:albums:0");
+    await waitFor(() => app.model.albumFavourite === false); await app.flush();
+    expect(app.captureCharFrame()).toContain("Favourite  l");
+    await click(app, "favourite-album");
+    await waitFor(() => app.model.status === "Added SOMA to favourite albums");
+    expect([...app.lovedAlbums]).toEqual(["1440"]);
+    await app.flush(); expect((app.renderer.root.findDescendantById("favourite-album") as any)?.plainText).toContain(icon.heart);
+    app.mockInput.pressKey("l");
+    await waitFor(() => app.model.status === "Removed SOMA from favourite albums");
+    expect(app.lovedAlbums.size).toBe(0);
+    expect(app.model.albumFavourite).toBe(false);
+  });
 });
 
 describe("the enlarged cover", () => {

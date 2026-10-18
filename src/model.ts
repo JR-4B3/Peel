@@ -79,6 +79,8 @@ export class Model extends EventEmitter {
   private queueEdits = 0;
   private activation?: { key: string; started: number; pending: boolean; promise: Promise<void> };
   private loved?: { key: string; value: boolean };
+  // Albums' favourite marks by album id, once Apple has answered.
+  private albumsLoved = new Map<string, boolean>();
   private homeRead = false;
   releases: Promise<void> = Promise.resolve();
 
@@ -222,6 +224,7 @@ export class Model extends EventEmitter {
     this.view = `collection:${item.type}:${item.id}`; this.title = item.name; this.detail = item; this.shelves = [];
     this.collection = { id: item.id, type: item.type };
     this.loader = this.songsOf(item);
+    if (item.type.includes("albums") && !this.albumsLoved.has(item.id)) void this.library.albumFavourite(item).then(value => { this.albumsLoved.set(item.id, value); this.changed(); }, () => {});
     await this.load(false);
   }
 
@@ -561,6 +564,24 @@ export class Model extends EventEmitter {
     this.lovedRevision++;
     if (saved !== value) this.status = "Apple Music did not save the favourite. Try again.";
     else this.status = value ? "Added to Favourite Songs" : "Removed from Favourite Songs";
+    this.changed();
+  }
+
+  // Undefined until Apple has said whether the open album is a favourite.
+  get albumFavourite(): boolean | undefined {
+    return this.detail?.type.includes("albums") ? this.albumsLoved.get(this.detail.id) : undefined;
+  }
+
+  async toggleAlbumFavourite() {
+    const album = this.detail;
+    if (!album?.type.includes("albums")) return;
+    const current = this.albumFavourite;
+    if (current === undefined) { this.status = "Still checking whether this album is a favourite."; this.changed(); return; }
+    this.albumsLoved.set(album.id, !current); this.changed();
+    try {
+      await this.library.favouriteAlbum(album, !current);
+      this.status = current ? `Removed ${album.name} from favourite albums` : `Added ${album.name} to favourite albums`;
+    } catch (error) { this.albumsLoved.set(album.id, current); this.fail(error); return; }
     this.changed();
   }
 

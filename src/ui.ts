@@ -434,6 +434,7 @@ export class PeelUI {
   private buttons: Button[] = [];
   private playButton: Button;
   private favouriteButton: Button;
+  private albumFavouriteButton: Button;
   private shuffleButton: Button;
   private repeatButton: Button;
   private volumeText: TextRenderable;
@@ -492,6 +493,8 @@ export class PeelUI {
     this.headerMeta = new TextRenderable(ctx, { fg: colour.muted, height: 2, truncate: true, selectable: false });
     const actions = new BoxRenderable(ctx, { flexDirection: "row", gap: 3, height: 1 });
     actions.add(this.button("play-collection", icon.play, "Play", () => { const first = this.model.items[0]; if (first) void this.model.activate(first); }));
+    this.albumFavouriteButton = this.button("favourite-album", icon.heartOutline, "Favourite  l", () => void model.toggleAlbumFavourite(), colour.faint);
+    actions.add(this.albumFavouriteButton);
     actions.add(this.button("back", icon.back, "Back  esc", () => this.back()));
     for (const item of [this.headerName, this.headerArtist, this.headerMeta, actions]) info.add(item);
     this.headerCover.onMouseDown = event => { const detail = model.detail; if (event.button === 0 && detail) { event.stopPropagation(); this.showCover(detail.artwork, detail.name, detail.artist || detail.genre || ""); } };
@@ -593,7 +596,7 @@ export class PeelUI {
     this.sidebarPanel.height = narrow ? height < 28 ? 3 : 5 : "100%";
     this.playerCover.visible = width >= 60;
     this.sidebarFooter.visible = !narrow;
-    for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "back", "sidebar-edit"].includes(button.id); button.paint(); }
+    for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "favourite-album", "back", "sidebar-edit"].includes(button.id); button.paint(); }
     this.sizeHeader();
     this.drawPlayback();
   }
@@ -709,6 +712,9 @@ export class PeelUI {
         const count = model.more ? detail.trackCount : model.items.length || detail.trackCount;
         this.headerMeta.content = [detail.releaseDate?.slice(0, 4), count ? plural(count, "song") : "", seconds && !model.more ? `${Math.round(seconds / 60)} min` : ""].filter(Boolean).join("   ");
       }
+      const loved = model.albumFavourite;
+      this.albumFavouriteButton.visible = detail.type.includes("albums");
+      this.albumFavouriteButton.set(loved ? icon.heart : icon.heartOutline, "Favourite  l", loved ? colour.heart : colour.faint);
     }
     if (this.content() === this.grid && this.tracks.focused) this.grid.focus();
     if (this.content() === this.tracks && this.grid.focused) this.tracks.focus();
@@ -801,6 +807,7 @@ export class PeelUI {
         pairs.push(["⇧O", "reverse"]);
       }
       if (model.more) pairs.push(["m", "load more"]);
+      if (model.detail?.type.includes("albums")) pairs.push(["l", "favourite album"]);
       if (model.history.length) pairs.push(["Esc", "back"]);
       pairs.push([this.grid.focused ? "⇧←→" : "←→", "seek"]);
     }
@@ -836,7 +843,7 @@ export class PeelUI {
     this.playerCover.setArt(song?.artwork?.url);
     const favourite = this.model.favourite;
     this.favouriteButton.visible = !!song;
-    this.favouriteButton.set(favourite ? icon.heart : icon.heartOutline, favourite === undefined ? "…" : "f", favourite ? colour.heart : colour.faint);
+    this.favouriteButton.set(favourite ? icon.heart : icon.heartOutline, "f", favourite ? colour.heart : colour.faint);
     const playing = connected && state.state === "playing";
     const label = !connected ? (this.model.starting ? "Starting" : "Stopped") : playing ? "Playing" : state.state === "paused" ? "Paused" : "Stopped";
     this.indicator.content = label;
@@ -1010,6 +1017,7 @@ export class PeelUI {
     else if (key.name === "n") action = () => void model.skip(1);
     else if (key.name === "p") action = () => void model.skip(-1);
     else if (key.name === "f") action = () => void model.toggleFavourite();
+    else if (key.name === "l" && model.detail?.type.includes("albums")) action = () => void model.toggleAlbumFavourite();
     else if (key.name === "left" || key.name === "right") action = () => void model.seek(key.name === "left" ? -10 : 10);
     else if (key.sequence === "+" || key.sequence === "=" || key.sequence === "-") action = () => void model.volume(key.sequence === "-" ? -0.05 : 0.05);
     else if (key.name === "s") action = () => void model.act("/playback/shuffle/toggle");
