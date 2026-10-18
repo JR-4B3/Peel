@@ -24,7 +24,7 @@ try {
     console.log(`Connected. Granted permissions: ${result.scopes.join(", ")}. Run bun start.`);
   } else if (process.argv.includes("--connect")) {
     const engine = new Engine();
-    await ensureEngine(engine, console.log, undefined, true);
+    await ensureEngine(engine, console.log);
     await saveJson("apple.json", await engine.appleTokens());
     console.log("Signed in to Apple Music. Run bun start.");
   } else {

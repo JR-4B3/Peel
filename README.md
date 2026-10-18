@@ -27,26 +27,13 @@ bun run connect
 bun start
 ```
 
-The first `bun run connect` downloads castlabs' Electron for your system, about 110 MB, and checks it against castlabs' published checksums. It then starts Peel's playback engine, which opens Apple's sign-in window. Sign in there once. Peel saves the Apple Music user token in its settings folder.
+The first `bun run connect` downloads Peel's playback engine for your system, about 110 MB, and checks it against its published checksums. It then starts the engine, which opens Apple's sign-in window. Sign in there once. Peel saves the Apple Music user token in its settings folder.
 
 ### Windows and macOS
 
-On Windows and macOS, Widevine plays music only in a player that castlabs' EVS service has signed. Signing is free but needs an EVS account. Install Python 3, then run once:
+On Windows and macOS, Widevine plays music only in a player signed through castlabs' EVS service. Peel downloads a copy of castlabs' Electron that its maintainer has already signed, from the `engine-v44.5.1+wvcus` release, so you need no castlabs account.
 
-```sh
-python3 -m pip install --upgrade castlabs-evs
-python3 -m castlabs_evs.account signup
-```
-
-If pip refuses with `externally-managed-environment`, as Homebrew's Python does, install castlabs-evs in a virtual environment and activate it in the terminal where you run `bun run connect`:
-
-```sh
-python3 -m venv ~/.local/share/castlabs-evs
-source ~/.local/share/castlabs-evs/bin/activate
-python3 -m pip install --upgrade castlabs-evs
-```
-
-On Windows, use `py -3` in place of `python3`. The next `bun run connect` signs the engine and asks for your EVS sign-in in the terminal. On macOS, Peel then signs the engine for macOS again with an ad hoc signature, because the EVS signature changes files inside the app bundle.
+To publish that release for a new Electron version, the maintainer runs `bun scripts/sign-engine.ts` once on a Mac and once on Windows. The script describes what it needs. It prints how long the signature stays valid. Publish again before that date.
 
 ### Linux
 

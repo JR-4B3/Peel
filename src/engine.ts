@@ -13,13 +13,18 @@ import type { Media, Page, Playback, Player } from "./types";
 export const engineHome = process.env.PEEL_ENGINE_HOME ?? join(systemDir(process.platform === "win32" ? "cache" : "config"), "peel-engine");
 const engineDir = fileURLToPath(new URL("../engine/", import.meta.url));
 const electronDir = join(engineDir, ".electron");
-const electronVersion = "v44.5.1+wvcus";
+export const electronVersion = "v44.5.1+wvcus";
 const electronPath = join(electronDir, process.platform === "win32" ? "electron.exe" : process.platform === "darwin" ? "Electron.app/Contents/MacOS/Electron" : "electron");
 // Widevine on Windows and macOS rejects players without a VMP signature from castlabs' EVS service.
+// Peel's maintainer signs castlabs' Electron once per version with scripts/sign-engine.ts and
+// publishes it as a release, so listeners need no EVS account. Linux uses castlabs' build directly.
 const needsSignature = process.platform === "win32" || process.platform === "darwin";
+const engineReleases = process.env.PEEL_ENGINE_RELEASES ?? "https://github.com/JR-4B3/Peel/releases/download";
+export const engineTag = `engine-${electronVersion}`;
+export const signedName = (platform: string, arch: string) => `peel-engine-${electronVersion}-${platform}-${arch}.zip`;
 const signedMarker = join(electronDir, ".vmp-signed");
 
-async function command(args: string[], interactive = false) {
+export async function command(args: string[], interactive = false) {
   const child = Bun.spawn(args, interactive ? { stdio: ["inherit", "inherit", "inherit"] } : { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
   const [output, error, code] = await Promise.all([
     interactive ? "" : new Response(child.stdout as ReadableStream).text(), interactive ? "" : new Response(child.stderr as ReadableStream).text(), child.exited,
@@ -66,47 +71,28 @@ async function extract(archive: Uint8Array<ArrayBuffer>, file: string, target: s
   if (result.code) throw new Error(`Could not unpack the playback engine: ${result.error.trim()}`);
 }
 
-async function download(status: (text: string) => void) {
-  const platform = process.platform, arch = process.arch;
+// Downloads castlabs' Electron, or on Windows and macOS the copy Peel's maintainer signed, and
+// checks it against the published checksums. scripts/sign-engine.ts passes signed = false.
+export async function download(status: (text: string) => void, target = electronDir, platform: string = process.platform, arch: string = process.arch, signed = needsSignature) {
   if (!["linux", "darwin", "win32"].includes(platform) || !["x64", "arm64"].includes(arch)) throw new Error(`Peel's playback engine has no build for ${platform} on ${arch}.`);
   status("Downloading the playback engine. This happens once...");
-  const name = `electron-${electronVersion}-${platform}-${arch}.zip`;
-  const release = `https://github.com/castlabs/electron-releases/releases/download/${electronVersion}`;
+  const name = signed ? signedName(platform, arch) : `electron-${electronVersion}-${platform}-${arch}.zip`;
+  const release = signed ? `${engineReleases}/${engineTag}` : `https://github.com/castlabs/electron-releases/releases/download/${electronVersion}`;
   const [archive, sums] = await Promise.all([fetch(`${release}/${name}`), fetch(`${release}/SHASUMS256.txt`)]);
-  if (!archive.ok || !sums.ok) throw new Error(`Could not download castlabs' Electron: HTTP ${archive.ok ? sums.status : archive.status}.`);
+  if (!archive.ok || !sums.ok) throw new Error(`Could not download the playback engine from ${release}: HTTP ${archive.ok ? sums.status : archive.status}.`);
   const bytes = await archive.arrayBuffer();
   const expected = (await sums.text()).split("\n").find(line => line.trim().endsWith(name))?.split(/\s+/)[0];
-  if (!expected || new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== expected) throw new Error("The downloaded playback engine did not match castlabs' checksum. Open Peel again to retry.");
+  if (!expected || new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== expected) throw new Error("The downloaded playback engine did not match its published checksum. Open Peel again to retry.");
   // Unpack beside the final folder and rename it into place, so an interrupted unpack is never used.
-  const partial = `${electronDir}.${process.pid}.tmp`;
+  const partial = `${target}.${process.pid}.tmp`;
   await rm(partial, { recursive: true, force: true });
   await mkdir(partial, { recursive: true });
   try {
     await extract(new Uint8Array(bytes), `${partial}.zip`, partial);
-    await rm(electronDir, { recursive: true, force: true });
-    await rename(partial, electronDir);
+    if (signed) await writeFile(join(partial, ".vmp-signed"), `${electronVersion}\n`);
+    await rm(target, { recursive: true, force: true });
+    await rename(partial, target);
   } finally { await rm(partial, { recursive: true, force: true }); }
-}
-
-// castlabs' signing tool needs a free EVS account. The first signing asks for its sign-in,
-// so it runs in the terminal during peel --connect.
-async function sign(status: (text: string) => void, interactive: boolean) {
-  status("Signing the playback engine for Widevine with castlabs EVS...");
-  const python = process.platform !== "win32" ? ["python3"] : Bun.which("py") ? ["py", "-3"] : ["python"];
-  const result = await command([...python, "-m", "castlabs_evs.vmp", "sign-pkg", electronDir], interactive);
-  if (result.code) {
-    throw new Error([
-      "Apple Music plays on Windows and macOS only in an engine signed through castlabs' free EVS service.",
-      `Run ${python.join(" ")} -m pip install --upgrade castlabs-evs, then ${python.join(" ")} -m castlabs_evs.account signup, then peel --connect.`,
-      result.error.trim(),
-    ].filter(Boolean).join(" "));
-  }
-  // The VMP signature changes files inside the app bundle, which macOS then refuses to run until it is signed again.
-  if (process.platform === "darwin") {
-    const resigned = await command(["codesign", "--force", "--deep", "--sign", "-", join(electronDir, "Electron.app")]);
-    if (resigned.code) throw new Error(`Could not sign the playback engine for macOS: ${resigned.error.trim()}`);
-  }
-  await writeFile(signedMarker, `${electronVersion}\n`);
 }
 
 // Electron's archive includes a version file. A different version, from an older Peel, is replaced.
@@ -141,13 +127,11 @@ async function withInstallLock(status: (text: string) => void, work: () => Promi
   try { await work(); } finally { await rm(lock, { recursive: true, force: true }); }
 }
 
-// Downloads castlabs' Electron for this system once, and signs it where Widevine requires it.
-export async function installEngine(status: (text: string) => void = () => {}, interactive = false) {
+// Downloads the playback engine for this system once. An unsigned copy on Windows or macOS,
+// from an earlier Peel, is replaced by the signed one.
+export async function installEngine(status: (text: string) => void = () => {}) {
   if (await installed()) return;
-  await withInstallLock(status, async () => {
-    if (!await downloaded()) await download(status);
-    if (needsSignature && !await installed()) await sign(status, interactive);
-  });
+  await withInstallLock(status, async () => { if (!await installed()) await download(status); });
 }
 
 // Electron started with ELECTRON_RUN_AS_NODE runs as plain Node and cannot load the engine.
@@ -313,7 +297,7 @@ async function launchEngine(): Promise<{ failed: Promise<string> } | undefined> 
 
 // Starts the engine in the background when it is not running. Peel's first launch also
 // downloads castlabs' Electron, and a first sign-in waits for the listener.
-export async function ensureEngine(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal, interactive = false) {
+export async function ensureEngine(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal) {
   const state = () => engine.state().catch(() => undefined);
   let current = await state();
   // An engine started before Peel's files were updated keeps running the old code until it restarts.
@@ -325,7 +309,7 @@ export async function ensureEngine(engine: Engine, status: (text: string) => voi
   let failure: string | undefined;
   if (!current) {
     signal?.throwIfAborted();
-    await installEngine(status, interactive);
+    await installEngine(status);
     signal?.throwIfAborted();
     status("Starting the playback engine...");
     void (await launchEngine())?.failed.then(message => { failure = message; });
@@ -353,7 +337,7 @@ export function stopEngine(engine: Engine) {
 
 // bun run engine installs the engine and runs it in this terminal, with its log visible.
 if (import.meta.main) {
-  await installEngine(console.log, true);
+  await installEngine(console.log);
   const child = Bun.spawn([electronPath, engineDir, ...electronArgs(), ...process.argv.slice(2)], {
     stdio: ["inherit", "inherit", "inherit"], env: engineEnvironment(),
   });
