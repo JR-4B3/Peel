@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
-import { existsSync, openSync } from "node:fs";
-import { mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { closeSync, existsSync, openSync } from "node:fs";
+import { mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -109,10 +109,47 @@ async function sign(status: (text: string) => void, interactive: boolean) {
   await writeFile(signedMarker, `${electronVersion}\n`);
 }
 
+// Electron's archive includes a version file. A different version, from an older Peel, is replaced.
+async function downloaded() {
+  return existsSync(electronPath) && (await readFile(join(electronDir, "version"), "utf8").catch(() => "")).trim() === electronVersion.slice(1);
+}
+
+async function installed() {
+  return await downloaded() && (!needsSignature || (await readFile(signedMarker, "utf8").catch(() => "")).trim() === electronVersion);
+}
+
+// Two Peels starting at once would otherwise replace each other's engine mid-install. The lock
+// is a folder, which only one process can create. A lock older than 15 minutes is from an
+// installer that died, since a download and an EVS sign-in finish well within that.
+async function withInstallLock(status: (text: string) => void, work: () => Promise<void>) {
+  const lock = `${electronDir}.lock`;
+  for (let waiting = false; ; waiting = true) {
+    try { await mkdir(lock); break; } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const since = (await stat(lock).catch(() => undefined))?.mtimeMs;
+      if (since !== undefined && Date.now() - since > 15 * 60 * 1000) { await rm(lock, { recursive: true, force: true }); continue; }
+      if (!waiting) status("Waiting for another Peel to finish installing the playback engine...");
+      await sleep(500);
+    }
+  }
+  try { await work(); } finally { await rm(lock, { recursive: true, force: true }); }
+}
+
 // Downloads castlabs' Electron for this system once, and signs it where Widevine requires it.
 export async function installEngine(status: (text: string) => void = () => {}, interactive = false) {
-  if (!existsSync(electronPath)) await download(status);
-  if (needsSignature && !existsSync(signedMarker)) await sign(status, interactive);
+  if (await installed()) return;
+  await withInstallLock(status, async () => {
+    if (!await downloaded()) await download(status);
+    if (needsSignature && !await installed()) await sign(status, interactive);
+  });
+}
+
+// Electron started with ELECTRON_RUN_AS_NODE runs as plain Node and cannot load the engine.
+// Terminals inside Electron apps, such as T3 Code's, set it for their own child processes.
+function engineEnvironment() {
+  const environment: Record<string, string | undefined> = { ...process.env, PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir, PEEL_OWNER: String(process.pid) };
+  delete environment.ELECTRON_RUN_AS_NODE;
+  return environment;
 }
 
 function electronArgs() {
@@ -123,7 +160,7 @@ function electronArgs() {
 
 // On a Linux desktop with systemd, the user manager owns the engine, so closing Peel's terminal
 // does not take it down mid-song. Elsewhere the engine runs as a detached process.
-function systemdSession() {
+export function systemdSession() {
   return process.platform === "linux" && !!Bun.which("systemd-run") && existsSync("/run/systemd/system")
     && !!process.env.XDG_RUNTIME_DIR && existsSync(join(process.env.XDG_RUNTIME_DIR, "systemd"));
 }
@@ -169,6 +206,7 @@ export class Engine implements Player {
   private call(method: string, ...args: unknown[]) { return this.send("/call", { method, args }); }
   state(): Promise<State> { return this.send("/state"); }
   async quit() { await this.send("/quit", {}, false); }
+  async release() { await this.send("/release", {}, false); }
 
   async snapshot(): Promise<Playback> {
     const state = await this.state();
@@ -237,8 +275,9 @@ async function quitEngine(engine: Engine) {
   while (Date.now() < until && await engine.state().then(() => true, () => false)) await sleep(250);
 }
 
-async function launchEngine() {
-  const environment: Record<string, string> = { PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir };
+// For a detached engine, failed settles with a message if it fails to start or exits.
+async function launchEngine(): Promise<{ failed: Promise<string> } | undefined> {
+  const environment: Record<string, string> = { PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir, PEEL_OWNER: String(process.pid) };
   const args = [electronPath, engineDir, ...electronArgs()];
   if (systemdSession()) {
     const settings = Object.entries(environment).map(([name, value]) => `--setenv=${name}=${value}`);
@@ -253,9 +292,17 @@ async function launchEngine() {
     return;
   }
   await mkdir(engineHome, { recursive: true, mode: 0o700 });
-  const log = openSync(join(engineHome, "engine.log"), "a");
-  // A detached process gets its own session on Linux and macOS, and no console window on Windows.
-  spawn(args[0]!, args.slice(1), { detached: true, windowsHide: true, stdio: ["ignore", log, log], env: { ...process.env, ...environment } }).unref();
+  const logPath = join(engineHome, "engine.log");
+  const log = openSync(logPath, "a");
+  try {
+    // A detached process gets its own session on Linux and macOS, and no console window on Windows.
+    const child = spawn(args[0]!, args.slice(1), { detached: true, windowsHide: true, stdio: ["ignore", log, log], env: engineEnvironment() });
+    child.unref();
+    return { failed: new Promise(resolve => {
+      child.once("error", error => resolve(`Could not start the playback engine: ${error.message}`));
+      child.once("exit", code => resolve(`The playback engine exited with code ${code} while starting. Its log is ${logPath}.`));
+    }) };
+  } finally { closeSync(log); }
 }
 
 // Starts the engine in the background when it is not running. Peel's first launch also
@@ -269,16 +316,20 @@ export async function ensureEngine(engine: Engine, status: (text: string) => voi
     await quitEngine(engine);
     current = await state();
   }
+  let failure: string | undefined;
   if (!current) {
+    signal?.throwIfAborted();
     await installEngine(status, interactive);
+    signal?.throwIfAborted();
     status("Starting the playback engine...");
-    await launchEngine();
+    void (await launchEngine())?.failed.then(message => { failure = message; });
   }
   // A first sign-in can take a few minutes.
   const until = Date.now() + 5 * 60 * 1000;
   while (!current?.ready && Date.now() < until) {
     if (current?.signIn) status("Sign in to Apple Music in the window that opened.");
     await sleep(250, undefined, { signal });
+    if (failure) throw new Error(failure);
     current = await state();
   }
   if (!current?.ready) throw new Error(`The playback engine did not become ready. Run bun run engine in ${fileURLToPath(new URL("..", import.meta.url))} to see why.`);
@@ -286,18 +337,19 @@ export async function ensureEngine(engine: Engine, status: (text: string) => voi
 
 // Stops the engine and its music when Peel closes. On systemd, --no-block queues the stop with
 // the user manager and returns at once, so it completes even when the terminal is already
-// closing. Elsewhere Peel asks the engine to quit. An engine also quits within a second once
-// every Peel that used it has exited, which covers a terminal closed before either runs.
+// closing. Elsewhere Peel releases the engine, which quits once no other Peel still uses it.
+// An engine also quits within a second once every Peel that used it has exited, which covers
+// a terminal closed before either runs.
 export function stopEngine(engine: Engine) {
   if (systemdSession()) Bun.spawnSync(["systemctl", "--user", "stop", "--no-block", "peel-engine.service"], { stdout: "ignore", stderr: "ignore" });
-  else void engine.quit().catch(() => {});
+  else void engine.release().catch(() => {});
 }
 
 // bun run engine installs the engine and runs it in this terminal, with its log visible.
 if (import.meta.main) {
   await installEngine(console.log, true);
   const child = Bun.spawn([electronPath, engineDir, ...electronArgs(), ...process.argv.slice(2)], {
-    stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir },
+    stdio: ["inherit", "inherit", "inherit"], env: engineEnvironment(),
   });
   process.exitCode = await child.exited;
 }

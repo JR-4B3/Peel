@@ -48,8 +48,11 @@ async function developerToken() {
 }
 
 // Each Peel sends its process ID. Once every Peel that used the engine has exited, the engine
-// quits, so music stops even when a terminal closes before Peel can stop it.
+// quits, so music stops even when a terminal closes before Peel can stop it. The Peel that
+// started the engine counts from the start, so a Peel closed while the engine loads stops it too.
 const owners = new Set();
+const launcher = Number(process.env.PEEL_OWNER);
+if (Number.isInteger(launcher) && launcher > 0) owners.add(launcher);
 function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
 }
@@ -69,7 +72,15 @@ function serve(window, key) {
     const reply = (status, value) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value ?? null)); };
     if (request.headers["x-peel-key"] !== key) return reply(403, { error: "Wrong engine key" });
     const owner = Number(request.headers["x-peel-owner"]);
-    if (Number.isInteger(owner) && owner > 0) owners.add(owner);
+    const known = Number.isInteger(owner) && owner > 0;
+    // A closing Peel releases the engine. Music stops only when no other Peel still uses it.
+    if (request.method === "POST" && request.url === "/release") {
+      if (known) owners.delete(owner);
+      reply(200, null);
+      if (!owners.size) { log("the last Peel has closed"); app.quit(); }
+      return;
+    }
+    if (known) owners.add(owner);
     let body = "";
     for await (const chunk of request) body += chunk;
     try {

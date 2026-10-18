@@ -38,6 +38,14 @@ python3 -m pip install --upgrade castlabs-evs
 python3 -m castlabs_evs.account signup
 ```
 
+If pip refuses with `externally-managed-environment`, as Homebrew's Python does, install castlabs-evs in a virtual environment and activate it in the terminal where you run `bun run connect`:
+
+```sh
+python3 -m venv ~/.local/share/castlabs-evs
+source ~/.local/share/castlabs-evs/bin/activate
+python3 -m pip install --upgrade castlabs-evs
+```
+
 On Windows, use `py -3` in place of `python3`. The next `bun run connect` signs the engine and asks for your EVS sign-in in the terminal. On macOS, Peel then signs the engine for macOS again with an ad hoc signature, because the EVS signature changes files inside the app bundle.
 
 ### Linux
