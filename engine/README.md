@@ -1,10 +1,12 @@
-# Engine prototype
+# Playback engine
 
-A hidden MusicKit JS player in castlabs' Electron, which adds Widevine. It tests whether Peel can play Apple Music without Cider. Throwaway code: it plays one song and logs timings.
+A hidden MusicKit JS player in castlabs' Electron, which adds Widevine. Peel starts it and controls it through a local HTTP interface that requires a private key.
 
-`./run.sh --ozone-platform=wayland` downloads castlabs' Electron v44.5.1+wvcus into `.electron` once, then starts the engine. `PEEL_PLAY_TERM="artist title"` plays the first matching song. `PEEL_ENGINE_SHOW=1` shows the engine window.
+`bun run engine`, from the project folder, downloads castlabs' Electron v44.5.1+wvcus for this system into `.electron` once, signs it with castlabs EVS on Windows and macOS, then runs the engine in the terminal. `PEEL_ENGINE_SHOW=1` shows the engine window.
 
-The engine loads `https://music.apple.com/robots.txt`, because Apple accepts the web player's token only from music.apple.com, and injects `engine.js`. The page's content policy allows MusicKit from Apple's CDN. The first run opens Apple's sign-in window. The sign-in is kept in `~/.config/peel-engine`.
+The engine loads `https://music.apple.com/robots.txt`, because Apple accepts the web player's token only from music.apple.com, and injects `engine.js`. The page's content policy allows MusicKit from Apple's CDN. The first run opens Apple's sign-in window. The sign-in is kept in the engine's profile folder, `~/.config/peel-engine` on Linux.
+
+Each request from Peel carries its process ID. Once every Peel that sent one has exited, the engine quits. `POST /quit` stops it at once.
 
 Measured on main on 8 October 2026, with Cider running:
 

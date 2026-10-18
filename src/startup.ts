@@ -1,3 +1,4 @@
+import { spawn } from "node:child_process";
 import { setTimeout as sleep } from "node:timers/promises";
 import { finishNiriBackground, prepareNiriBackground, showCiderForApproval } from "./niri-background";
 
@@ -67,7 +68,9 @@ export async function ensureCider(base: string, token: string, hide: boolean, st
     startedAt = Date.now();
     if (running.code !== 0) {
       if (hide && token) await prepareNiriBackground();
-      const launch = await run(["systemd-run", "--user", "--collect", "--unit=peel-cider", "--", executable]);
+      // Without systemd, Cider runs as a detached process in its own session.
+      if (!Bun.which("systemd-run")) spawn(executable, [], { detached: true, stdio: "ignore" }).unref();
+      const launch = Bun.which("systemd-run") ? await run(["systemd-run", "--user", "--collect", "--unit=peel-cider", "--", executable]) : { code: 0, error: "" };
       if (launch.code !== 0) {
         // Concurrent Peel launches can race for the same unit; the winner owns Cider.
         const active = await run(["systemctl", "--user", "is-active", "peel-cider.service"]);

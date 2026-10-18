@@ -24,7 +24,7 @@ try {
     console.log(`Connected. Granted permissions: ${result.scopes.join(", ")}. Run bun start.`);
   } else if (process.argv.includes("--connect")) {
     const engine = new Engine();
-    await ensureEngine(engine, console.log);
+    await ensureEngine(engine, console.log, undefined, true);
     await saveJson("apple.json", await engine.appleTokens());
     console.log("Signed in to Apple Music. Run bun start.");
   } else {
@@ -70,7 +70,7 @@ try {
     let interval: ReturnType<typeof setInterval> | undefined;
     const ui = new PeelUI(renderer, model, () => { clearInterval(interval); ui.dispose(); renderer.destroy(); });
     // q, Ctrl+C, and closing the terminal window all destroy the renderer. The engine stops with it.
-    renderer.on("destroy", () => { startup.abort(); clearInterval(interval); ui.dispose(); if (!useCider) stopEngine(); });
+    renderer.on("destroy", () => { startup.abort(); clearInterval(interval); ui.dispose(); if (!useCider) stopEngine(player as Engine); });
     interval = setInterval(() => void model.refresh(), 1000);
     void model.start();
     // Start the player alongside browsing, so it is usually ready by the first song.

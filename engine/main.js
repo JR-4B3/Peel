@@ -8,7 +8,9 @@ const os = require("node:os");
 const path = require("node:path");
 
 const port = Number(process.env.PEEL_ENGINE_PORT ?? 10768);
-const home = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "peel-engine");
+// Peel passes the folders for this system. The fallbacks are Linux's.
+const home = process.env.PEEL_ENGINE_HOME ?? path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "peel-engine");
+const cacheDir = process.env.PEEL_CACHE_DIR ?? path.join(process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache"), "peel");
 // Apple accepts the web player's token only from music.apple.com. A tiny real page there
 // gives the engine that origin; its content policy allows MusicKit from Apple's CDN.
 const page = "https://music.apple.com/robots.txt";
@@ -18,6 +20,8 @@ const log = text => console.log(`${new Date().toISOString()} ${text}`);
 
 app.setPath("userData", home);
 app.disableHardwareAcceleration();
+// The engine has no window of its own to show, so it stays out of the macOS Dock.
+app.dock?.hide();
 if (!app.requestSingleInstanceLock()) app.exit(0);
 
 function readJson(name, fallback) { try { return JSON.parse(fs.readFileSync(path.join(home, name), "utf8")); } catch { return fallback; } }
@@ -29,7 +33,7 @@ function writeJson(name, value) {
 }
 
 async function developerToken() {
-  const cache = path.join(process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache"), "peel", "apple-developer-token.json");
+  const cache = path.join(cacheDir, "apple-developer-token.json");
   try {
     const cached = JSON.parse(fs.readFileSync(cache, "utf8"));
     if (cached.expires - Date.now() > 86400000) return cached.token;
@@ -43,6 +47,18 @@ async function developerToken() {
   throw new Error("Apple Music's web player script no longer contains its developer token.");
 }
 
+// Each Peel sends its process ID. Once every Peel that used the engine has exited, the engine
+// quits, so music stops even when a terminal closes before Peel can stop it.
+const owners = new Set();
+function alive(pid) {
+  try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
+}
+setInterval(() => {
+  if (!owners.size) return;
+  for (const pid of owners) if (!alive(pid)) owners.delete(pid);
+  if (!owners.size) { log("every Peel has exited"); app.quit(); }
+}, 1000).unref();
+
 // Only the page's player methods can be called, by name, with JSON arguments.
 function serve(window, key) {
   const call = (method, args = []) => {
@@ -52,10 +68,13 @@ function serve(window, key) {
   http.createServer(async (request, response) => {
     const reply = (status, value) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value ?? null)); };
     if (request.headers["x-peel-key"] !== key) return reply(403, { error: "Wrong engine key" });
+    const owner = Number(request.headers["x-peel-owner"]);
+    if (Number.isInteger(owner) && owner > 0) owners.add(owner);
     let body = "";
     for await (const chunk of request) body += chunk;
     try {
       if (request.method === "GET" && request.url === "/state") return reply(200, { ...await call("state"), version });
+      if (request.method === "POST" && request.url === "/quit") { reply(200, null); return app.quit(); }
       if (request.method === "POST" && request.url === "/call") {
         const { method, args } = JSON.parse(body || "{}");
         return reply(200, await call(method, args));
@@ -78,6 +97,8 @@ app.whenReady().then(async () => {
   });
   // Apple's sign-in opens as a popup. It must be visible so the listener can sign in.
   window.webContents.setWindowOpenHandler(() => ({ action: "allow", overrideBrowserWindowOptions: { show: true, width: 520, height: 720, webPreferences: { session: engine } } }));
+  // A process without a Dock icon on macOS does not come to the front by itself.
+  window.webContents.on("did-create-window", popup => { popup.focus(); app.focus({ steal: true }); });
   window.webContents.on("console-message", event => {
     const text = event.message ?? "";
     if (!text.startsWith("peel:")) return;
@@ -92,8 +113,8 @@ app.whenReady().then(async () => {
   serve(window, key);
 });
 app.on("window-all-closed", () => {});
-// Peel stops the engine with SIGTERM when it closes. Electron answers SIGTERM by closing its
-// windows, which the handler above refuses, so the engine would hang until systemd aborts it.
+// systemd stops the engine with SIGTERM. Electron answers SIGTERM by closing its windows,
+// which the handler above refuses, so the engine would hang until systemd aborts it.
 let quitting = false;
 app.on("before-quit", () => { quitting = true; });
 process.on("SIGTERM", () => app.quit());

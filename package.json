@@ -6,6 +6,7 @@
   "scripts": {
     "start": "bun src/index.ts",
     "connect": "bun src/index.ts --connect",
+    "engine": "bun src/engine.ts",
     "test": "bun test",
     "check": "tsc --noEmit",
     "verify:live": "bun scripts/verify-live.ts"

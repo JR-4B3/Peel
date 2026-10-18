@@ -1,13 +1,132 @@
-import { readFile } from "node:fs/promises";
-import { homedir } from "node:os";
-import { join } from "node:path";
+import { spawn } from "node:child_process";
+import { existsSync, openSync } from "node:fs";
+import { mkdir, readFile, rename, rm, symlink, writeFile } from "node:fs/promises";
+import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { fileURLToPath } from "node:url";
+import { cacheDir, systemDir } from "./config";
 import type { Media, Page, Playback, Player } from "./types";
 
 // Peel's own playback engine in engine/: MusicKit JS in castlabs' Electron. It writes its
-// port and a private key to ~/.config/peel-engine/key.json each time it starts.
-export const engineHome = process.env.PEEL_ENGINE_HOME ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "peel-engine");
-const launcher = new URL("../engine/run.sh", import.meta.url).pathname;
+// port and a private key to key.json in this folder each time it starts. Windows keeps the
+// engine's browser profile in the local AppData folder, which does not roam between PCs.
+export const engineHome = process.env.PEEL_ENGINE_HOME ?? join(systemDir(process.platform === "win32" ? "cache" : "config"), "peel-engine");
+const engineDir = fileURLToPath(new URL("../engine/", import.meta.url));
+const electronDir = join(engineDir, ".electron");
+const electronVersion = "v44.5.1+wvcus";
+const electronPath = join(electronDir, process.platform === "win32" ? "electron.exe" : process.platform === "darwin" ? "Electron.app/Contents/MacOS/Electron" : "electron");
+// Widevine on Windows and macOS rejects players without a VMP signature from castlabs' EVS service.
+const needsSignature = process.platform === "win32" || process.platform === "darwin";
+const signedMarker = join(electronDir, ".vmp-signed");
+
+async function command(args: string[], interactive = false) {
+  const child = Bun.spawn(args, interactive ? { stdio: ["inherit", "inherit", "inherit"] } : { stdin: "ignore", stdout: "pipe", stderr: "pipe" });
+  const [output, error, code] = await Promise.all([
+    interactive ? "" : new Response(child.stdout as ReadableStream).text(), interactive ? "" : new Response(child.stderr as ReadableStream).text(), child.exited,
+  ]);
+  return { output, error, code };
+}
+
+// Unpacks a zip file. Linux distributions do not all include unzip, and Electron's Linux
+// archive needs only files, folders, symlinks, and their permissions. ZIP64 is not supported.
+async function unzip(archive: Uint8Array<ArrayBuffer>, target: string) {
+  const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
+  let end = archive.length - 22;
+  while (end >= 0 && view.getUint32(end, true) !== 0x06054b50) end--;
+  if (end < 0) throw new Error("The playback engine's archive is damaged.");
+  const count = view.getUint16(end + 10, true);
+  let entry = view.getUint32(end + 16, true);
+  for (let index = 0; index < count; index++) {
+    if (view.getUint32(entry, true) !== 0x02014b50) throw new Error("The playback engine's archive is damaged.");
+    const method = view.getUint16(entry + 10, true), size = view.getUint32(entry + 20, true);
+    const nameLength = view.getUint16(entry + 28, true), mode = view.getUint32(entry + 38, true) >>> 16;
+    const name = new TextDecoder().decode(archive.subarray(entry + 46, entry + 46 + nameLength));
+    const local = view.getUint32(entry + 42, true);
+    entry += 46 + nameLength + view.getUint16(entry + 30, true) + view.getUint16(entry + 32, true);
+    if (name.startsWith("/") || name.split("/").includes("..")) throw new Error(`The playback engine's archive contains an unsafe path: ${name}`);
+    const path = join(target, name);
+    if (name.endsWith("/")) { await mkdir(path, { recursive: true }); continue; }
+    const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
+    const stored = archive.subarray(start, start + size);
+    const data = method === 0 ? stored : method === 8 ? Bun.inflateSync(stored) : undefined;
+    if (!data) throw new Error(`The playback engine's archive uses an unsupported compression for ${name}.`);
+    await mkdir(dirname(path), { recursive: true });
+    if ((mode & 0o170000) === 0o120000) await symlink(new TextDecoder().decode(data), path);
+    else await writeFile(path, data, { mode: mode & 0o777 || 0o644 });
+  }
+}
+
+// Windows 10 and later include bsdtar, which reads zip files. ditto keeps the symlinks in
+// macOS's app bundle.
+async function extract(archive: Uint8Array<ArrayBuffer>, file: string, target: string) {
+  if (process.platform === "linux") return unzip(archive, target);
+  await writeFile(file, archive);
+  const result = await command(process.platform === "win32" ? ["tar", "-xf", file, "-C", target] : ["ditto", "-x", "-k", file, target]);
+  await rm(file, { force: true });
+  if (result.code) throw new Error(`Could not unpack the playback engine: ${result.error.trim()}`);
+}
+
+async function download(status: (text: string) => void) {
+  const platform = process.platform, arch = process.arch;
+  if (!["linux", "darwin", "win32"].includes(platform) || !["x64", "arm64"].includes(arch)) throw new Error(`Peel's playback engine has no build for ${platform} on ${arch}.`);
+  status("Downloading the playback engine. This happens once...");
+  const name = `electron-${electronVersion}-${platform}-${arch}.zip`;
+  const release = `https://github.com/castlabs/electron-releases/releases/download/${electronVersion}`;
+  const [archive, sums] = await Promise.all([fetch(`${release}/${name}`), fetch(`${release}/SHASUMS256.txt`)]);
+  if (!archive.ok || !sums.ok) throw new Error(`Could not download castlabs' Electron: HTTP ${archive.ok ? sums.status : archive.status}.`);
+  const bytes = await archive.arrayBuffer();
+  const expected = (await sums.text()).split("\n").find(line => line.trim().endsWith(name))?.split(/\s+/)[0];
+  if (!expected || new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== expected) throw new Error("The downloaded playback engine did not match castlabs' checksum. Open Peel again to retry.");
+  // Unpack beside the final folder and rename it into place, so an interrupted unpack is never used.
+  const partial = `${electronDir}.${process.pid}.tmp`;
+  await rm(partial, { recursive: true, force: true });
+  await mkdir(partial, { recursive: true });
+  try {
+    await extract(new Uint8Array(bytes), `${partial}.zip`, partial);
+    await rm(electronDir, { recursive: true, force: true });
+    await rename(partial, electronDir);
+  } finally { await rm(partial, { recursive: true, force: true }); }
+}
+
+// castlabs' signing tool needs a free EVS account. The first signing asks for its sign-in,
+// so it runs in the terminal during peel --connect.
+async function sign(status: (text: string) => void, interactive: boolean) {
+  status("Signing the playback engine for Widevine with castlabs EVS...");
+  const python = process.platform !== "win32" ? ["python3"] : Bun.which("py") ? ["py", "-3"] : ["python"];
+  const result = await command([...python, "-m", "castlabs_evs.vmp", "sign-pkg", electronDir], interactive);
+  if (result.code) {
+    throw new Error([
+      "Apple Music plays on Windows and macOS only in an engine signed through castlabs' free EVS service.",
+      `Run ${python.join(" ")} -m pip install --upgrade castlabs-evs, then ${python.join(" ")} -m castlabs_evs.account signup, then peel --connect.`,
+      result.error.trim(),
+    ].filter(Boolean).join(" "));
+  }
+  // The VMP signature changes files inside the app bundle, which macOS then refuses to run until it is signed again.
+  if (process.platform === "darwin") {
+    const resigned = await command(["codesign", "--force", "--deep", "--sign", "-", join(electronDir, "Electron.app")]);
+    if (resigned.code) throw new Error(`Could not sign the playback engine for macOS: ${resigned.error.trim()}`);
+  }
+  await writeFile(signedMarker, `${electronVersion}\n`);
+}
+
+// Downloads castlabs' Electron for this system once, and signs it where Widevine requires it.
+export async function installEngine(status: (text: string) => void = () => {}, interactive = false) {
+  if (!existsSync(electronPath)) await download(status);
+  if (needsSignature && !existsSync(signedMarker)) await sign(status, interactive);
+}
+
+function electronArgs() {
+  // Electron cannot always detect Wayland on its own, for example when started outside the desktop session.
+  if (process.platform !== "linux") return [];
+  return [process.env.WAYLAND_DISPLAY ? "--ozone-platform=wayland" : "--ozone-platform-hint=auto"];
+}
+
+// On a Linux desktop with systemd, the user manager owns the engine, so closing Peel's terminal
+// does not take it down mid-song. Elsewhere the engine runs as a detached process.
+function systemdSession() {
+  return process.platform === "linux" && !!Bun.which("systemd-run") && existsSync("/run/systemd/system")
+    && !!process.env.XDG_RUNTIME_DIR && existsSync(join(process.env.XDG_RUNTIME_DIR, "systemd"));
+}
 
 // The same hash engine/main.js reports, from the engine's files on disk.
 export async function engineVersion() {
@@ -38,7 +157,7 @@ export class Engine implements Player {
     try {
       response = await fetch(`http://127.0.0.1:${access.port}${path}`, {
         method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body),
-        headers: { "x-peel-key": access.key, "content-type": "application/json" }, signal: AbortSignal.timeout(30000),
+        headers: { "x-peel-key": access.key, "x-peel-owner": String(process.pid), "content-type": "application/json" }, signal: AbortSignal.timeout(30000),
       });
     } catch { this.access = undefined; throw new Error("Peel's playback engine is not running."); }
     if (response.status === 403 && retry) { await this.read(); return this.send(path, body, false); }
@@ -49,6 +168,7 @@ export class Engine implements Player {
 
   private call(method: string, ...args: unknown[]) { return this.send("/call", { method, args }); }
   state(): Promise<State> { return this.send("/state"); }
+  async quit() { await this.send("/quit", {}, false); }
 
   async snapshot(): Promise<Playback> {
     const state = await this.state();
@@ -106,42 +226,78 @@ export class Engine implements Player {
   }
 }
 
+// Asks a running engine to quit and waits until it has.
+async function quitEngine(engine: Engine) {
+  if (systemdSession()) {
+    Bun.spawnSync(["systemctl", "--user", "stop", "peel-engine.service"], { stdout: "ignore", stderr: "ignore" });
+    return;
+  }
+  await engine.quit().catch(() => {});
+  const until = Date.now() + 10000;
+  while (Date.now() < until && await engine.state().then(() => true, () => false)) await sleep(250);
+}
+
+async function launchEngine() {
+  const environment: Record<string, string> = { PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir };
+  const args = [electronPath, engineDir, ...electronArgs()];
+  if (systemdSession()) {
+    const settings = Object.entries(environment).map(([name, value]) => `--setenv=${name}=${value}`);
+    for (const name of ["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) if (process.env[name]) settings.push(`--setenv=${name}=${process.env[name]}`);
+    // KillMode=mixed sends SIGTERM to Electron's main process only. When Chromium's helper
+    // processes get it too, they exit first and Electron crashes with a core dump.
+    const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-engine", "--property=KillMode=mixed", ...settings, "--", ...args], { stdout: "ignore", stderr: "pipe" });
+    if (await child.exited !== 0) {
+      const active = Bun.spawn(["systemctl", "--user", "is-active", "--quiet", "peel-engine.service"]);
+      if (await active.exited !== 0) throw new Error(`Could not start the playback engine: ${(await new Response(child.stderr).text()).trim()}`);
+    }
+    return;
+  }
+  await mkdir(engineHome, { recursive: true, mode: 0o700 });
+  const log = openSync(join(engineHome, "engine.log"), "a");
+  // A detached process gets its own session on Linux and macOS, and no console window on Windows.
+  spawn(args[0]!, args.slice(1), { detached: true, windowsHide: true, stdio: ["ignore", log, log], env: { ...process.env, ...environment } }).unref();
+}
+
 // Starts the engine in the background when it is not running. Peel's first launch also
 // downloads castlabs' Electron, and a first sign-in waits for the listener.
-export async function ensureEngine(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal) {
+export async function ensureEngine(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal, interactive = false) {
   const state = () => engine.state().catch(() => undefined);
   let current = await state();
   // An engine started before Peel's files were updated keeps running the old code until it restarts.
   if (current && current.version !== await engineVersion()) {
     status("Restarting the playback engine to load an update...");
-    Bun.spawnSync(["systemctl", "--user", "stop", "peel-engine.service"], { stdout: "ignore", stderr: "ignore" });
+    await quitEngine(engine);
     current = await state();
   }
   if (!current) {
+    await installEngine(status, interactive);
     status("Starting the playback engine...");
-    const environment = ["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
-      .filter(name => process.env[name]).map(name => `--setenv=${name}=${process.env[name]}`);
-    // The user manager owns the engine, so it outlives Peel's terminal until stopEngine runs.
-    // KillMode=mixed sends SIGTERM to Electron's main process only. When Chromium's helper
-    // processes get it too, they exit first and Electron crashes with a core dump.
-    const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-engine", "--property=KillMode=mixed", ...environment, "--", launcher], { stdout: "ignore", stderr: "pipe" });
-    if (await child.exited !== 0) {
-      const active = Bun.spawn(["systemctl", "--user", "is-active", "--quiet", "peel-engine.service"]);
-      if (await active.exited !== 0) throw new Error(`Could not start the playback engine: ${(await new Response(child.stderr).text()).trim()}`);
-    }
+    await launchEngine();
   }
-  // The first start downloads Electron. A first sign-in can take a few minutes.
+  // A first sign-in can take a few minutes.
   const until = Date.now() + 5 * 60 * 1000;
   while (!current?.ready && Date.now() < until) {
     if (current?.signIn) status("Sign in to Apple Music in the window that opened.");
     await sleep(250, undefined, { signal });
     current = await state();
   }
-  if (!current?.ready) throw new Error("The playback engine did not become ready. Run engine/run.sh to see why.");
+  if (!current?.ready) throw new Error(`The playback engine did not become ready. Run bun run engine in ${fileURLToPath(new URL("..", import.meta.url))} to see why.`);
 }
 
-// Stops the engine and its music when Peel closes. --no-block queues the stop with the user
-// manager and returns at once, so it completes even when the terminal is already closing.
-export function stopEngine() {
-  Bun.spawnSync(["systemctl", "--user", "stop", "--no-block", "peel-engine.service"], { stdout: "ignore", stderr: "ignore" });
+// Stops the engine and its music when Peel closes. On systemd, --no-block queues the stop with
+// the user manager and returns at once, so it completes even when the terminal is already
+// closing. Elsewhere Peel asks the engine to quit. An engine also quits within a second once
+// every Peel that used it has exited, which covers a terminal closed before either runs.
+export function stopEngine(engine: Engine) {
+  if (systemdSession()) Bun.spawnSync(["systemctl", "--user", "stop", "--no-block", "peel-engine.service"], { stdout: "ignore", stderr: "ignore" });
+  else void engine.quit().catch(() => {});
+}
+
+// bun run engine installs the engine and runs it in this terminal, with its log visible.
+if (import.meta.main) {
+  await installEngine(console.log, true);
+  const child = Bun.spawn([electronPath, engineDir, ...electronArgs(), ...process.argv.slice(2)], {
+    stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir },
+  });
+  process.exitCode = await child.exited;
 }
