@@ -41,10 +41,13 @@ export function cover(template?: string, dir = join(cacheDir, "artwork")): Promi
   return image;
 }
 
-// A cover at a given pixel size, for the enlarged view. It skips the shared cache, so the
-// caller owns the image and disposes it. Sizes are rounded up to whole hundreds, so the
-// disk cache keeps few copies of one cover.
+// Round up to whole hundreds so the disk cache keeps few copies of one cover.
+export function largeCoverSize(pixels: number) {
+  return Math.min(3000, Math.max(600, Math.ceil(pixels / 100) * 100));
+}
+
+// The enlarged cover skips the shared cache. Its caller owns and disposes the image.
 export function largeCover(template: string, pixels: number, dir?: string) {
-  const side = Math.min(3000, Math.max(600, Math.ceil(pixels / 100) * 100));
+  const side = largeCoverSize(pixels);
   return fetchCover(artworkUrl(template, side), dir).catch(() => undefined);
 }

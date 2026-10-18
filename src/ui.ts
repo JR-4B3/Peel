@@ -1,7 +1,7 @@
 import { BoxRenderable, TextRenderable, InputRenderable, ImageRenderable, StyledText, t, fg, bold, type CliRenderer, type KeyEvent, type MouseEvent, type RenderContext } from "@opentui/core";
 import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
-import { cover, largeCover } from "./artwork";
+import { cover, largeCover, largeCoverSize } from "./artwork";
 import { colour, icon } from "./theme";
 
 interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
@@ -864,26 +864,34 @@ export class PeelUI {
   private showCover(art: string | undefined, name: string, detail: string) {
     if (!art) return;
     this.closeCover();
-    const ctx = this.renderer, width = ctx.terminalWidth - 4;
+    const ctx = this.renderer;
     const view = new BoxRenderable(ctx, { id: "cover-view", position: "absolute", left: 0, top: 0, width: "100%", height: "100%", zIndex: 100,
       flexDirection: "column", alignItems: "center", paddingX: 2, paddingY: 1,
       onMouseDown: event => { if (event.button === 0) { event.stopPropagation(); this.closeCover(); } } });
     const image = new ImageRenderable(ctx, { id: "cover-view-image", width: "100%", flexGrow: 1, minHeight: 0, fit: "fit" });
     view.add(image);
-    view.add(new TextRenderable(ctx, { content: fit(name, width), fg: colour.text, attributes: 1, height: 1, marginTop: 1, flexShrink: 0, selectable: false }));
-    view.add(new TextRenderable(ctx, { content: fit(detail, width), fg: colour.muted, height: 1, flexShrink: 0, selectable: false }));
+    view.add(new TextRenderable(ctx, { content: name, fg: colour.text, attributes: 1, width: "100%", textAlign: "center", truncate: true, height: 1, marginTop: 1, flexShrink: 0, selectable: false }));
+    view.add(new TextRenderable(ctx, { content: detail, fg: colour.muted, width: "100%", textAlign: "center", truncate: true, height: 1, flexShrink: 0, selectable: false }));
     view.add(new TextRenderable(ctx, { content: "Esc or click to close", fg: colour.faint, height: 1, flexShrink: 0, selectable: false }));
     this.root.visible = false;
     ctx.root.add(view); this.coverView = view;
-    let sharp = false;
-    void cover(art)?.then(small => { if (small && !sharp && this.coverView === view) image.source = small; });
-    // The image is square and fits the height left after the four text rows and the padding.
-    const resolution = ctx.resolution;
-    const pixels = resolution ? Math.min((ctx.terminalHeight - 6) * resolution.height / ctx.terminalHeight, width * resolution.width / ctx.terminalWidth) : 1500;
-    void largeCover(art, pixels).then(large => {
-      if (large && this.coverView === view) { sharp = true; image.source = large; }
-      large?.dispose();
-    });
+    let requested = 0, loaded = 0;
+    void cover(art)?.then(small => { if (small && !loaded && this.coverView === view) image.source = small; });
+    const sharpen = () => {
+      // The image fits the height left after the four text rows and the padding.
+      const resolution = ctx.resolution;
+      const pixels = resolution ? Math.min((ctx.terminalHeight - 6) * resolution.height / ctx.terminalHeight, (ctx.terminalWidth - 4) * resolution.width / ctx.terminalWidth) : 1500;
+      const size = largeCoverSize(pixels);
+      if (size <= requested) return;
+      requested = size;
+      void largeCover(art, size).then(large => {
+        if (large && this.coverView === view && size > loaded) { loaded = size; image.source = large; }
+        large?.dispose();
+      });
+    };
+    ctx.on("resize", sharpen);
+    view.once("destroyed", () => ctx.off("resize", sharpen));
+    sharpen();
   }
 
   private closeCover() {

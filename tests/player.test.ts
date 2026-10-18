@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { ImageRenderable } from "@opentui/core";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { AppleMusic } from "../src/apple";
 import { Cider } from "../src/cider";
@@ -563,6 +564,66 @@ test("filtering loads the rest of the list first", async () => {
 });
 
 describe("the enlarged cover", () => {
+  // A valid 2 by 2 PNG exercises decoding and image ownership.
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGOUi1rAwMDAxMDAwMDAAAAMyAEcmM2rsQAAAABJRU5ErkJggg==", "base64");
+
+  test("growing the window requests a sharper cover and restores the full caption", async () => {
+    const requested: string[] = [];
+    const art = Bun.serve({ port: 0, fetch: request => { requested.push(new URL(request.url).pathname); return new Response(png); } });
+    cleanup.push(() => art.stop(true));
+    const app = await setup(60, 36, "albums");
+    Object.defineProperty(app.renderer, "resolution", { get: () => ({ width: app.renderer.terminalWidth * 10, height: app.renderer.terminalHeight * 20 }) });
+    await click(app, "grid:tile:albums:0");
+    await waitFor(() => app.model.detail?.id === "l.soma");
+    const name = "An album with a title longer than the narrow window can display in one line";
+    app.model.detail!.name = name;
+    app.model.detail!.artwork = `http://127.0.0.1:${art.port}/resize/{w}x{h}bb.{f}`;
+    app.model.changed(); await app.flush();
+    await click(app, "collection-cover"); await app.flush();
+    const image = app.renderer.root.findDescendantById("cover-view-image") as ImageRenderable;
+    await waitFor(() => requested.includes("/resize/600x600bb.jpg") && image.image?.width === 2 && !image.loading);
+    expect(image.loadError).toBeNull();
+    expect(app.captureCharFrame()).not.toContain(name);
+    app.resize(120, 60); await app.flush();
+    await waitFor(() => requested.includes("/resize/1100x1100bb.jpg"));
+    await waitFor(() => !image.loading);
+    expect(image.image?.width).toBe(2);
+    expect(app.captureCharFrame()).toContain(name);
+  });
+
+  test("a slower smaller download cannot replace the sharper image after resizing", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    let smallerFinished = false;
+    const art = Bun.serve({ port: 0, async fetch(request) {
+      if (new URL(request.url).pathname.includes("600x600")) { await pending; smallerFinished = true; }
+      return new Response(png);
+    } });
+    cleanup.push(() => { release(); art.stop(true); });
+    const app = await setup(60, 36);
+    Object.defineProperty(app.renderer, "resolution", { get: () => ({ width: app.renderer.terminalWidth * 10, height: app.renderer.terminalHeight * 20 }) });
+    app.model.playback.nowPlaying!.artwork = { url: `http://127.0.0.1:${art.port}/slow/{w}x{h}bb.{f}` };
+    app.model.changed(); await app.flush();
+    const listeners = app.renderer.listenerCount("resize");
+    await click(app, "player-cover"); await app.flush();
+    const image = app.renderer.root.findDescendantById("cover-view-image") as ImageRenderable;
+    await waitFor(() => image.image?.width === 2);
+    const small = image.source;
+    app.resize(120, 60); await app.flush();
+    await waitFor(() => image.source !== small && !image.loading);
+    const sharp = image.source;
+    release(); await waitFor(() => smallerFinished); await Bun.sleep(20); await app.flush();
+    expect(image.source).toBe(sharp);
+    expect(image.image?.width).toBe(2);
+    const before = app.calls.filter(call => call.path === "/playback/toggle").length;
+    app.mockInput.pressKey(" ");
+    await waitFor(() => app.calls.filter(call => call.path === "/playback/toggle").length === before + 1);
+    expect(app.renderer.root.findDescendantById("cover-view")).toBeDefined();
+    await click(app, "cover-view-image"); await app.flush();
+    expect(app.renderer.root.findDescendantById("cover-view")).toBeUndefined();
+    expect(app.renderer.listenerCount("resize")).toBe(listeners);
+  });
+
   test("clicking an album's cover fills the window with it at the window's pixel size, and Escape closes it", async () => {
     const requested: string[] = [];
     const art = Bun.serve({ port: 0, fetch: request => { requested.push(new URL(request.url).pathname); return new Response("", { status: 404 }); } });
