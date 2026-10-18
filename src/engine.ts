@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync } from "node:fs";
 import { mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
@@ -19,7 +20,8 @@ const electronPath = join(electronDir, process.platform === "win32" ? "electron.
 // Peel's maintainer signs castlabs' Electron once per version with scripts/sign-engine.ts and
 // publishes it as a release, so listeners need no EVS account. Linux uses castlabs' build directly.
 const needsSignature = process.platform === "win32" || process.platform === "darwin";
-const engineReleases = process.env.PEEL_ENGINE_RELEASES ?? "https://github.com/JR-4B3/Peel/releases/download";
+const engineRepository = "JR-4B3/Peel";
+const engineReleases = process.env.PEEL_ENGINE_RELEASES ?? `https://github.com/${engineRepository}/releases/download`;
 export const engineTag = `engine-${electronVersion}`;
 export const signedName = (platform: string, arch: string) => `peel-engine-${electronVersion}-${platform}-${arch}.zip`;
 const signedMarker = join(electronDir, ".vmp-signed");
@@ -71,6 +73,18 @@ async function extract(archive: Uint8Array<ArrayBuffer>, file: string, target: s
   if (result.code) throw new Error(`Could not unpack the playback engine: ${result.error.trim()}`);
 }
 
+// While Peel's repository is private, its releases answer 404 without a GitHub sign-in. The gh
+// CLI, when signed in with access, downloads them instead.
+async function fetchAsset(release: string, name: string, signed: boolean) {
+  const response = await fetch(`${release}/${name}`);
+  if (response.ok || !signed || process.env.PEEL_ENGINE_RELEASES || !Bun.which("gh")) return response;
+  const file = join(tmpdir(), `peel-${process.pid}-${name}`);
+  try {
+    const result = await command(["gh", "release", "download", engineTag, "-R", engineRepository, "-p", name, "-O", file, "--clobber"]);
+    return result.code ? response : new Response(await readFile(file));
+  } finally { await rm(file, { force: true }); }
+}
+
 // Downloads castlabs' Electron, or on Windows and macOS the copy Peel's maintainer signed, and
 // checks it against the published checksums. scripts/sign-engine.ts passes signed = false.
 export async function download(status: (text: string) => void, target = electronDir, platform: string = process.platform, arch: string = process.arch, signed = needsSignature) {
@@ -78,7 +92,7 @@ export async function download(status: (text: string) => void, target = electron
   status("Downloading the playback engine. This happens once...");
   const name = signed ? signedName(platform, arch) : `electron-${electronVersion}-${platform}-${arch}.zip`;
   const release = signed ? `${engineReleases}/${engineTag}` : `https://github.com/castlabs/electron-releases/releases/download/${electronVersion}`;
-  const [archive, sums] = await Promise.all([fetch(`${release}/${name}`), fetch(`${release}/SHASUMS256.txt`)]);
+  const [archive, sums] = await Promise.all([fetchAsset(release, name, signed), fetchAsset(release, "SHASUMS256.txt", signed)]);
   if (!archive.ok || !sums.ok) throw new Error(`Could not download the playback engine from ${release}: HTTP ${archive.ok ? sums.status : archive.status}.`);
   const bytes = await archive.arrayBuffer();
   const expected = (await sums.text()).split("\n").find(line => line.trim().endsWith(name))?.split(/\s+/)[0];
