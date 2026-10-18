@@ -49,7 +49,8 @@ PLIST
 #!/bin/bash
 launcher=$(cat "$(dirname "$0")/../Resources/peel-launcher")
 if [[ -d /Applications/Ghostty.app || -d "$HOME/Applications/Ghostty.app" ]]; then
-  exec open -na Ghostty --args --title=Peel -e "$launcher"
+  # With -e, Ghostty asks for confirmation each time another app passes it a command. --command does not.
+  exec open -na Ghostty --args --title=Peel --command="$launcher"
 fi
 exec osascript - "$launcher" <<'SCRIPT'
 on run argv
