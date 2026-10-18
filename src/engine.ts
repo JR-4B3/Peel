@@ -118,16 +118,22 @@ async function installed() {
   return await downloaded() && (!needsSignature || (await readFile(signedMarker, "utf8").catch(() => "")).trim() === electronVersion);
 }
 
+function alive(pid: number) {
+  try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }
+}
+
 // Two Peels starting at once would otherwise replace each other's engine mid-install. The lock
-// is a folder, which only one process can create. A lock older than 15 minutes is from an
-// installer that died, since a download and an EVS sign-in finish well within that.
+// is a folder, which only one process can create, holding the installer's process ID. A lock
+// whose installer has exited, for example because its terminal closed, is taken over at once.
+// A lock without an ID for more than ten seconds is from an installer that died while creating it.
 async function withInstallLock(status: (text: string) => void, work: () => Promise<void>) {
-  const lock = `${electronDir}.lock`;
+  const lock = `${electronDir}.lock`, owner = join(lock, "pid");
   for (let waiting = false; ; waiting = true) {
-    try { await mkdir(lock); break; } catch (error) {
+    try { await mkdir(lock); await writeFile(owner, String(process.pid)); break; } catch (error) {
       if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+      const pid = Number(await readFile(owner, "utf8").catch(() => ""));
       const since = (await stat(lock).catch(() => undefined))?.mtimeMs;
-      if (since !== undefined && Date.now() - since > 15 * 60 * 1000) { await rm(lock, { recursive: true, force: true }); continue; }
+      if (pid > 0 ? !alive(pid) : since !== undefined && Date.now() - since > 10000) { await rm(lock, { recursive: true, force: true }); continue; }
       if (!waiting) status("Waiting for another Peel to finish installing the playback engine...");
       await sleep(500);
     }
