@@ -562,6 +562,17 @@ test("filtering loads the rest of the list first", async () => {
     expect(app.model.favourite).toBe(false);
   });
 
+  test("a song the player has not rated yet is looked up with Apple right away", async () => {
+    const api = fixture({ silentRating: true }); cleanup.push(() => api.server.stop(true));
+    api.playback.nowPlaying = { name: "Selected song", artistName: "Skrillex", playParams: { id: "i.selected" } };
+    const model = new Model(api.library, api.player);
+    await model.start(); await model.refresh();
+    await waitFor(() => model.favourite === true);
+    api.playback.nowPlaying = { name: "Soma", artistName: "Skrillex", playParams: { id: "i.other" } };
+    await model.refresh();
+    await waitFor(() => model.favourite === false);
+  });
+
   test("an open album's heart favourites it through its catalog album, and l removes it", async () => {
     const app = await setup(120, 36, "albums");
     await click(app, "grid:tile:albums:0");

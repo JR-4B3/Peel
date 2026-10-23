@@ -139,6 +139,7 @@ export class Model extends EventEmitter {
         this.playbackError = undefined;
         // A queued song leaves the queue when it starts playing.
         if (this.view === "queue" && !this.loading && playing !== this.playback.nowPlaying?.playParams?.id) void this.requeue();
+        void this.lookUpFavourite();
         const recovering = !this.connected;
         this.connected = true;
         if (recovering && !this.starting) this.status = "Ready to play";
@@ -537,6 +538,21 @@ export class Model extends EventEmitter {
   private songKey() {
     const song = this.playback.nowPlaying;
     return song ? song.playParams?.catalogId ?? song.playParams?.id ?? `${song.name}/${song.artistName}` : "";
+  }
+
+  // The player can take seconds to report a song's favourite mark, or never report it, so Peel
+  // asks Apple itself as soon as a song starts. A failed lookup is tried again on the next refresh.
+  private favouriteLookup = "";
+  private async lookUpFavourite() {
+    const key = this.songKey(), song = this.playback.nowPlaying;
+    if (!key || !song || this.favourite !== undefined || this.favouriteLookup === key) return;
+    this.favouriteLookup = key;
+    const id = song.playParams?.id ?? key;
+    const catalogId = song.playParams?.catalogId ?? (/^\d+$/.test(id) ? id : undefined);
+    try {
+      const loved = await this.library.ratings([{ id, catalogId, type: "songs", name: song.name ?? "", artist: song.artistName ?? "", album: song.albumName ?? "", duration: 0 }]);
+      if (this.songKey() === key && this.loved?.key !== key) { this.loved = { key, value: loved.has(id) }; this.changed(); }
+    } catch { if (this.favouriteLookup === key) this.favouriteLookup = ""; }
   }
 
   async toggleFavourite() {

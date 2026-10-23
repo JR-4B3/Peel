@@ -3,7 +3,7 @@ import { Cider } from "../src/cider";
 import { stopped, type Playback } from "../src/types";
 
 // Serve Cider's v2 envelopes for playback and Apple Music's native JSON for the library.
-export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number } = {}) {
+export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number; silentRating?: boolean } = {}) {
   const playback: Playback = { ...structuredClone(stopped), nowPlaying: { name: "Soma", artistName: "Skrillex" }, time: { currentTime: 30, duration: 200 } };
   const calls: { path: string; method: string; body: any }[] = [];
   const song = { id: "i.soma", name: "Soma", artistName: "Skrillex", albumName: "SOMA", durationMs: 200000 };
@@ -89,7 +89,7 @@ export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number
     const body = request.method === "GET" ? undefined : await request.json();
     calls.push({ path, method: request.method, body });
     let data: any = {};
-    if (path === "/playback") data = { ...playback, nowPlaying: playback.nowPlaying && { ...playback.nowPlaying, inFavorites: rating === 1 } };
+    if (path === "/playback") data = { ...playback, nowPlaying: playback.nowPlaying && { ...playback.nowPlaying, inFavorites: options.silentRating ? undefined : rating === 1 } };
     else if (path === "/playback/toggle") playback.state = playback.state === "playing" ? "paused" : "playing";
     else if (path === "/playback/pause") playback.state = "paused";
     else if (path === "/playback/play") playback.state = "playing";
