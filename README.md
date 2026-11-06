@@ -31,6 +31,8 @@ The first `bun run connect` downloads Peel's playback engine for your system, ab
 
 ### Windows and macOS
 
+Windows playback is experimental. Its signed engine archive still needs publication before a fresh Windows install can play music.
+
 On Windows and macOS, Widevine plays music only in a player signed through castlabs' EVS service. Peel downloads a copy of castlabs' Electron that its maintainer has already signed, from the `engine-v44.5.1+wvcus` release, so you need no castlabs account.
 
 To publish that release for a new Electron version, the maintainer runs `bun scripts/sign-engine.ts` once on a Mac and once on Windows. The script describes what it needs. It prints how long the signature stays valid. Publish again before that date. Peel compares its signed copy with the release's checksums once a day and downloads a renewed copy by itself. If the download fails, Peel keeps the copy it has.

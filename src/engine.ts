@@ -143,7 +143,7 @@ export async function download(status: (text: string) => void, target = electron
 function checksum(sums: string, name: string) {
   for (const line of sums.split("\n")) {
     const [hash, file] = line.trim().split(/\s+/);
-    if (file === name && /^[0-9a-f]{64}$/.test(hash ?? "")) return hash;
+    if (file?.replace(/^\*/, "") === name && /^[0-9a-f]{64}$/.test(hash ?? "")) return hash;
   }
 }
 
