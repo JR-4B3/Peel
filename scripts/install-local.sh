@@ -13,7 +13,7 @@ cd "$peel_project_dir"
 "$peel_bun" install --frozen-lockfile
 mkdir -p "$HOME/.local/bin"
 peel_launcher="$HOME/.local/bin/peel"
-if [[ -e "$peel_launcher" ]] && ! head -3 "$peel_launcher" | rg -q '^# Peel launcher'; then
+if [[ -e "$peel_launcher" ]] && ! head -3 "$peel_launcher" | grep -q '^# Peel launcher'; then
   echo 'An existing ~/.local/bin/peel belongs to another program. Leaving it in place.' >&2
   exit 1
 fi
@@ -23,12 +23,68 @@ fi
   printf 'exec %q src/index.ts "$@"\n' "$peel_bun"
 } > "$peel_launcher"
 chmod 755 "$peel_launcher"
+if [[ "$(uname -s)" == Darwin ]]; then
+  # macOS opens apps, not desktop entries. Peel.app opens a terminal window that runs the launcher.
+  peel_app="$HOME/Applications/Peel.app"
+  if [[ -e "$peel_app" && ! -e "$peel_app/Contents/Resources/peel-launcher" ]]; then
+    echo 'An existing ~/Applications/Peel.app belongs to another program. Leaving it in place.' >&2
+    exit 1
+  fi
+  mkdir -p "$peel_app/Contents/MacOS" "$peel_app/Contents/Resources"
+  printf '%s\n' "$peel_launcher" > "$peel_app/Contents/Resources/peel-launcher"
+  cat > "$peel_app/Contents/Info.plist" <<'PLIST'
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0"><dict>
+  <key>CFBundleExecutable</key><string>Peel</string>
+  <key>CFBundleIdentifier</key><string>io.github.jr4b3.peel</string>
+  <key>CFBundleName</key><string>Peel</string>
+  <key>CFBundlePackageType</key><string>APPL</string>
+  <key>CFBundleIconFile</key><string>peel</string>
+</dict></plist>
+PLIST
+  # Ghostty shows album covers and includes the Nerd Font symbols. Terminal.app needs a Nerd Font
+  # and shows covers as coloured blocks.
+  cat > "$peel_app/Contents/MacOS/Peel" <<'APP'
+#!/bin/bash
+launcher=$(cat "$(dirname "$0")/../Resources/peel-launcher")
+if [[ -d /Applications/Ghostty.app || -d "$HOME/Applications/Ghostty.app" ]]; then
+  # With -e, Ghostty asks for confirmation each time another app passes it a command. --command does not.
+  # Ghostty runs --command through a shell, so the path is single-quoted for it. A quote in the
+  # path becomes '\'' and spaces stay part of the path. sed does the replacement, because macOS's
+  # bash 3.2 keeps quotes in a ${var//...} replacement and would break the command.
+  escaped=$(printf '%s' "$launcher" | sed "s/'/'\\\\''/g")
+  quoted="'$escaped'"
+  exec open -na Ghostty --args --title=Peel --command="exec $quoted"
+fi
+exec osascript - "$launcher" <<'SCRIPT'
+on run argv
+  tell application "Terminal"
+    do script "exec " & quoted form of (item 1 of argv)
+    activate
+  end tell
+end run
+SCRIPT
+APP
+  chmod 755 "$peel_app/Contents/MacOS/Peel"
+  # iconutil builds the app's icon from the logo's PNG at each size macOS asks for.
+  peel_icons=$(mktemp -d)
+  mkdir -p "$peel_icons/peel.iconset"
+  for size in 16 32 128 256 512; do
+    sips -z "$size" "$size" "$peel_project_dir/assets/peel.png" --out "$peel_icons/peel.iconset/icon_${size}x${size}.png" >/dev/null
+    sips -z $((size * 2)) $((size * 2)) "$peel_project_dir/assets/peel.png" --out "$peel_icons/peel.iconset/icon_${size}x${size}@2x.png" >/dev/null
+  done
+  iconutil -c icns -o "$peel_app/Contents/Resources/peel.icns" "$peel_icons/peel.iconset"
+  rm -rf "$peel_icons"
+  printf 'Installed %s and %s. Run peel --connect once, then peel.\n' "$peel_launcher" "$peel_app"
+  exit 0
+fi
 peel_apps_dir="$HOME/.local/share/applications"
 mkdir -p "$peel_apps_dir"
 peel_desktop="$peel_apps_dir/peel.desktop"
 # Ghostty requires a GTK application ID, which needs at least one dot.
 peel_window_class=io.github.jr4b3.peel
-if [[ -e "$peel_desktop" ]] && ! rg -q '^X-Peel-Launcher=true$' "$peel_desktop"; then
+if [[ -e "$peel_desktop" ]] && ! grep -q '^X-Peel-Launcher=true$' "$peel_desktop"; then
   echo 'An existing peel.desktop belongs to another program. Leaving it in place.' >&2
   exit 1
 fi
@@ -47,6 +103,8 @@ peel_desktop_launcher=${peel_desktop_launcher//%/%%}
   if command -v ghostty >/dev/null 2>&1; then
     printf 'Terminal=false\nStartupWMClass=%s\n' "$peel_window_class"
     printf 'Exec=ghostty --class=%s --title=Peel --gtk-single-instance=false --confirm-close-surface=false -e "%s"\n' "$peel_window_class" "$peel_desktop_launcher"
+  elif command -v kitty >/dev/null 2>&1; then
+    printf 'Terminal=false\nStartupWMClass=peel\nExec=kitty --class peel --title Peel "%s"\n' "$peel_desktop_launcher"
   elif command -v alacritty >/dev/null 2>&1; then
     printf 'Terminal=false\nExec=alacritty --title Peel --class peel -e "%s"\n' "$peel_desktop_launcher"
   elif command -v konsole >/dev/null 2>&1; then

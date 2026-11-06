@@ -20,6 +20,8 @@ const log = text => console.log(`${new Date().toISOString()} ${text}`);
 
 app.setPath("userData", home);
 app.disableHardwareAcceleration();
+// The engine has no window of its own to show, so it stays out of the macOS Dock.
+app.dock?.hide();
 if (!app.requestSingleInstanceLock()) app.exit(0);
 
 function readJson(name, fallback) { try { return JSON.parse(fs.readFileSync(path.join(home, name), "utf8")); } catch { return fallback; } }
@@ -97,6 +99,7 @@ function serve(window, key) {
         if (body.length > maxBody) return reply(413, { error: "Request too large" });
       }
       if (request.method === "GET" && request.url === "/state") return reply(200, { ...await call("state"), version });
+      if (request.method === "POST" && request.url === "/quit") { reply(200, null); return app.quit(); }
       if (request.method === "POST" && request.url === "/call") {
         const { method, args } = JSON.parse(body || "{}");
         return reply(200, await call(method, args));
@@ -119,6 +122,8 @@ app.whenReady().then(async () => {
   });
   // Apple's sign-in opens as a popup. It must be visible so the listener can sign in.
   window.webContents.setWindowOpenHandler(() => ({ action: "allow", overrideBrowserWindowOptions: { show: true, width: 520, height: 720, webPreferences: { session: engine } } }));
+  // A process without a Dock icon on macOS does not come to the front by itself.
+  window.webContents.on("did-create-window", popup => { popup.focus(); app.focus({ steal: true }); });
   window.webContents.on("console-message", event => {
     const text = event.message ?? "";
     if (!text.startsWith("peel:")) return;
@@ -133,8 +138,8 @@ app.whenReady().then(async () => {
   serve(window, key);
 });
 app.on("window-all-closed", () => {});
-// Peel stops the engine with SIGTERM when it closes. Electron answers SIGTERM by closing its
-// windows, which the handler above refuses, so the engine would hang until systemd aborts it.
+// systemd stops the engine with SIGTERM. Electron answers SIGTERM by closing its windows,
+// which the handler above refuses, so the engine would hang until systemd aborts it.
 let quitting = false;
 app.on("before-quit", () => { quitting = true; });
 process.on("SIGTERM", () => app.quit());

@@ -9,8 +9,16 @@ export interface Preferences {
   heartsInFavourites: boolean;
 }
 
-export const configDir = process.env.PEEL_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "peel");
-export const cacheDir = process.env.PEEL_CACHE_DIR ?? join(process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache"), "peel");
+// Each system keeps settings and caches in its own place: the XDG directories on Linux,
+// ~/Library on macOS, and AppData on Windows.
+export function systemDir(kind: "config" | "cache") {
+  if (process.platform === "win32") return kind === "config" ? process.env.APPDATA ?? join(homedir(), "AppData", "Roaming") : process.env.LOCALAPPDATA ?? join(homedir(), "AppData", "Local");
+  if (process.platform === "darwin") return join(homedir(), "Library", kind === "config" ? "Application Support" : "Caches");
+  return kind === "config" ? process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config") : process.env.XDG_CACHE_HOME ?? join(homedir(), ".cache");
+}
+
+export const configDir = process.env.PEEL_CONFIG_DIR ?? join(systemDir("config"), "peel");
+export const cacheDir = process.env.PEEL_CACHE_DIR ?? join(systemDir("cache"), "peel");
 export const defaults: Preferences = { order: [], hidden: [], heartsInFavourites: false };
 
 export async function readPreferences(dir = configDir): Promise<Preferences> {
