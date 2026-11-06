@@ -5,6 +5,7 @@ import type { Preferences } from "./config";
 // says its engine differs, which stops the music if this computer plays it.
 export interface UpdateState { version?: string; channel?: string; installed: boolean; message: string; ready?: string; older?: boolean; newEngine?: boolean; checking?: boolean }
 import { defaults } from "./config";
+import type { DeviceView, Pairing } from "./devices";
 import { stopped, type ArtistShelf, type Home, type Library, type Media, type Page, type Playback, type Player } from "./types";
 
 export interface Navigation { id: string; name: string; media?: Media; hidden?: boolean }
@@ -86,7 +87,9 @@ export class Model extends EventEmitter {
   // Counts queue reads and edits. A read shows its answer only if nothing newer started meanwhile.
   private queueRevision = 0;
   private activation?: { key: string; started: number; pending: boolean; promise: Promise<void> };
-  private loved?: { key: string; value: boolean };
+  // The playing song's favourite mark from Apple or from this Peel. A mark set here (local) wins
+  // until the player reports the same, then the player's report wins again.
+  private loved?: { key: string; value: boolean; local?: boolean };
   // Albums' favourite marks by album id, once Apple has answered.
   private albumsLoved = new Map<string, boolean>();
   private homeRead = false;
@@ -150,6 +153,7 @@ export class Model extends EventEmitter {
         const playing = this.playback.nowPlaying?.playParams?.id, revision = this.playback.queueRevision;
         this.playback = await this.player.snapshot();
         this.playbackError = undefined;
+        this.followFavourite();
         // A queued song leaves the queue when it starts playing.
         if (this.view === "queue" && !this.loading && (playing !== this.playback.nowPlaying?.playParams?.id || revision !== this.playback.queueRevision)) void this.requeue();
         void this.lookUpFavourite();
@@ -623,10 +627,30 @@ export class Model extends EventEmitter {
     return done && jumped;
   }
 
-  // Undefined until Apple has said whether the playing song is a favourite.
+  // Undefined until Apple has said whether the playing song is a favourite. The player's answer
+  // wins, so a favourite set on another device or in another app shows here too.
   get favourite(): boolean | undefined {
-    const key = this.songKey();
-    return this.loved?.key === key ? this.loved.value : this.playback.nowPlaying?.inFavorites;
+    const key = this.songKey(), reported = this.playback.nowPlaying?.inFavorites;
+    return this.loved?.key === key && (this.loved.local || reported === undefined) ? this.loved.value : reported;
+  }
+
+  // The rows of the playing song show the player's answer too.
+  private followFavourite() {
+    const key = this.songKey(), reported = this.playback.nowPlaying?.inFavorites, song = this.playback.nowPlaying;
+    if (reported === undefined || !song) return;
+    if (this.loved?.key === key && this.loved.local) {
+      if (this.loved.value !== reported) return;
+      this.loved = { key, value: reported };
+    }
+    const id = song.playParams?.id, catalog = song.playParams?.catalogId;
+    // Library songs and catalog songs have separate ratings, so a row follows only its own song: the
+    // same ID, or the catalog song itself when a catalog song plays.
+    const library = !!id && id.startsWith("i.");
+    const matches = (item: Media) => /songs/.test(item.type) && (item.id === id || !library && !!catalog && !item.type.startsWith("library-") && item.id === catalog);
+    let changed = false;
+    const lists = [this.items, ...this.history.map(entry => entry.items), ...[...this.lists.values()].map(entry => entry.items)];
+    for (const items of new Set(lists)) for (const item of items) if (matches(item) && item.loved !== undefined && item.loved !== reported) { item.loved = reported; changed = true; }
+    if (changed) this.lovedRevision++;
   }
 
   private songKey(playback = this.playback) {
@@ -656,7 +680,7 @@ export class Model extends EventEmitter {
     if (this.favourite === undefined) { this.status = "Still checking whether this song is a favourite."; this.changed(); return; }
     const value = !this.favourite;
     const id = this.playback.nowPlaying?.playParams?.id;
-    this.loved = { key, value }; this.changed();
+    this.loved = { key, value, local: true }; this.changed();
     // The player rates whatever plays when the command runs. A command queued before this one,
     // such as starting another song, can change that, so the song is checked first.
     let moved = false;
@@ -681,7 +705,7 @@ export class Model extends EventEmitter {
       }
     } catch {}
     if (this.songKey() !== key) return;
-    this.loved = { key, value: saved };
+    this.loved = { key, value: saved, local: true };
     // The song's row shows its heart too.
     for (const item of this.items) if (item.id === key || item.catalogId === key) item.loved = saved;
     this.favouriteEdits++;
@@ -720,6 +744,50 @@ export class Model extends EventEmitter {
     const hidden = this.preferences.hidden.includes(id) ? this.preferences.hidden.filter(value => value !== id) : [...this.preferences.hidden, id];
     await this.persist({ ...this.preferences, hidden });
   }
+  // Peels on the network, for the devices popup. index.ts fills them from src/devices.ts.
+  devices: DeviceView[] = [];
+  pairing?: Pairing;
+  // The device this Peel controls when it is not this computer.
+  target?: string;
+  targetId?: string;
+  onPlayOn?: (id: string) => Promise<void>;
+  onPair?: (id: string) => void;
+  onForgetDevices?: () => Promise<void>;
+  // Opening the devices popup lets nearby devices ask to pair for a while.
+  onDevicesOpened?: () => void;
+
+  // Moves the music to a device, or makes this computer the one that plays.
+  playOn(id: string) {
+    const device = this.devices.find(device => device.id === id);
+    return this.switchTarget(async () => {
+      await this.onPlayOn?.(id);
+      if (this.preferences.remote) await this.persist({ ...this.preferences, remote: undefined });
+      return device?.self ? "Playing on this computer" : `Playing on ${device?.name ?? "the other device"}`;
+    });
+  }
+
+  // Another Peel moved the music, or the device that played went offline.
+  retarget(apply: () => string | undefined) { return this.switchTarget(async () => apply()); }
+
+  private switchTarget(change: () => Promise<string | undefined>) {
+    this.commands = this.commands.then(async () => {
+      this.switchingOutput = true; this.changed();
+      try {
+        await this.refreshing;
+        const text = await change();
+        if (text) {
+          this.connected = false; this.queueRevision++;
+          this.loved = undefined; this.favouriteLookup = "";
+          this.status = text;
+        }
+      } catch (error) { this.fail(error); }
+      finally { this.switchingOutput = false; }
+      await this.refresh();
+      if (this.view === "queue") await this.requeue();
+    });
+    return this.commands;
+  }
+
   outputTargets: string[] = [];
   onOutput?: (host?: string) => Promise<void>;
   private switchingOutput = false;

@@ -15,7 +15,8 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 - Song lists can be filtered by title, artist, or album, sorted, and narrowed to favourites. Favourite songs show a heart before their title.
 - Playback controls use icons with their keyboard shortcut beside them when the terminal is at least 100 columns wide. There is one player strip at the bottom with the current cover and a favourite heart.
 - Mouse clicks and keyboard shortcuts control the same actions.
-- Lyrics are deferred.
+- `y` shows the playing song's lyrics, beside the songs in wide windows and in their place otherwise.
+- Every Peel on the same network is a device, like Spotify Connect. `d` opens a small popup above the player that lists them. Choosing one moves the music there. See [Devices](#devices).
 
 ## Run
 
@@ -107,6 +108,8 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Add the highlighted song, album, or playlist to the queue, after the songs already added | `e` | |
 | Play the highlighted song, album, or playlist next | Shift+E | |
 | Show the queue | `u` | Queue in the sidebar |
+| Choose which device plays, or pair one | `d`, then Up / Down and Enter. Escape closes it | The devices button beside lyrics |
+| Show lyrics | `y` | The lyrics button |
 | Move a song in the queue | Shift+Up / Shift+Down, or `K` / `J` | |
 | Play a queued song next | Shift+E in the queue | |
 | Remove a song from the queue | `x` or Delete | |
@@ -137,6 +140,28 @@ The filter field takes words and release years together, for example `kanye 2004
 
 Filtering, sorting, or narrowing to favourites first loads the rest of the list, so it covers the whole playlist. Rows keep their playlist number. Selecting a song plays the list as shown.
 
+## Devices
+
+Every Peel on the same network is a device. Press `d`, or click the devices button beside the lyrics button, to open a popup above the player. It lists this computer, your paired devices with what each one plays, and nearby Peels you have not paired yet.
+
+- **Pairing.** Press `d` on both computers. On one, choose the other under the nearby devices. A device accepts pairing requests only for two minutes after its popup was opened, so nobody else on the network can put a pairing prompt on your screen. Both screens show the same six-digit code. You do not type it anywhere. It is there so you can check that you pair with your own device: if both screens show the same code, press Enter on both. You pair once. Pairing a device with any device in your group adds it to the whole group, so three computers need two pairings, not three.
+- **Moving the music.** Choose a paired device. Peel moves the queue, the playing song, and its position there, and the device that played stops. If the new device cannot start, the music keeps playing where it was.
+- **Controlling.** Every Peel controls whichever device plays. Play, pause, skip, seek, volume, favourites, and queue edits all go to that device, and every open Peel shows its song, queue, and hearts. When another Peel moves the music, this one follows.
+- **No device is in charge.** The device that plays holds the queue only because it plays it. Each device keeps working without the others.
+
+A device appears while Peel is open on it. Closing Peel there stops its music, and the other Peels control their own computer again. Devices find each other by UDP broadcast on port 10771 and connect on TCP port 10770. `PEEL_DEVICE_PORT` and `PEEL_DISCOVERY_PORT` change them, and `PEEL_DEVICES=off` keeps a Peel off the network. The first time, macOS may ask whether your terminal may find devices on the local network. Allow it.
+
+### Away from home
+
+Devices find each other only on the same network. To control a device from elsewhere, install [Tailscale](https://tailscale.com) on both computers and sign in to the same account. Then:
+
+1. Pair the devices once while both are on the same network.
+2. Paired devices tell each other all their addresses, their Tailscale addresses too. Away from home, Peel tries each one, so the devices reconnect over Tailscale within a few seconds.
+
+Peel needs nothing else from Tailscale. The connection between the devices stays encrypted by Peel as well.
+
+[docs/remote-play.md](docs/remote-play.md) describes how it works and its limits.
+
 ## Settings
 
 Settings, at the end of the sidebar, lists these. Enter switches the highlighted one, and Peel saves it in `layout.json` in its settings folder.
@@ -146,6 +171,9 @@ Settings, at the end of the sidebar, lists these. Enter switches the highlighted
 | Audio quality | High, AAC at 256 kbps, or Standard, AAC at 64 kbps, which uses a quarter of the data. With Cider, Cider's own settings choose. Hi-Res Lossless is not available in Peel yet. |
 | Updates | Stable or Nightly. Choosing one checks it at once. |
 | Hearts in Favourite Songs | Every song in Favourite Songs is a favourite, so its rows show no heart unless this is on. |
+| Devices | Opens the devices popup, like `d`. |
+| Forget paired devices | Takes this computer out of its device group. Press Enter twice. |
+| Control over SSH | Shown once you added an SSH host with `peel --remote <host>`. See [remote play](docs/remote-play.md). |
 
 Sidebar changes save to `layout.json` in Peel's settings folder. Home is always first and cannot be moved or hidden. `CIDER_API_BASE` defaults to `http://127.0.0.1:10767`.
 

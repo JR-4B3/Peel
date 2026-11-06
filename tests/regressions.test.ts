@@ -232,16 +232,15 @@ test.skipIf(!existsSync(new URL("../engine/run.sh", import.meta.url)))("#20 an e
 });
 
 
-test("a retained remote host keeps its engine when the last controller releases", async () => {
+test("the engine quits when the last Peel closes, even after an old SSH helper asked it to stay", async () => {
   const { context, server, quits } = engineMain({ PEEL_OWNER: "101" });
   context.serve({ webContents: { executeJavaScript: async () => ({ ready: true }) } }, "test-key");
   await once(server(), "listening"); cleanup.push(() => server().close());
   const port = (server().address() as net.AddressInfo).port;
   const send = (path: string) => fetch(`http://127.0.0.1:${port}${path}`, { method: "POST", headers: { "x-peel-key": "test-key", "x-peel-owner": "101" } });
   expect((await send("/retain")).ok).toBe(true);
-  await send("/release");
   expect(quits.length).toBe(0);
-  await send("/quit");
+  await send("/release");
   expect(quits.length).toBe(1);
 });
 

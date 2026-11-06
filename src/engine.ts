@@ -302,6 +302,14 @@ export class Engine implements Player {
 
   // The songs the listener added that have not played yet. The rest of the playing collection is not listed.
   async queue(offset = 0): Promise<Page> {
+    // Engines from before the added method answer with the whole queue instead.
+    const page = await this.call("added", offset, 100).catch(() => undefined);
+    if (page?.items) return {
+      more: !!page.more, items: page.items.map((item: Queue["items"][number] & { queueIndex: number }) => ({
+        id: item.id, type: item.type, name: item.attributes.name ?? "Untitled", artist: item.attributes.artistName ?? "",
+        album: item.attributes.albumName ?? "", duration: (item.attributes.durationInMillis ?? 0) / 1000, queueIndex: item.queueIndex,
+      })),
+    };
     const queue: Queue = await this.call("queue");
     const added = queue.items.map((item, index) => ({ item, index })).filter(({ item }) => item.added);
     const items = added.slice(offset, offset + 100).map(({ item, index }) => ({
@@ -311,6 +319,8 @@ export class Engine implements Player {
     return { items, more: offset + 100 < added.length };
   }
   async queuePosition() {
+    const place = await this.call("position").catch(() => undefined);
+    if (Number.isInteger(place?.position) && Number.isInteger(place?.total)) return place as { position: number; total: number };
     const queue: Queue = await this.call("queue");
     return { position: queue.position, total: queue.items.length };
   }
