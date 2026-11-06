@@ -118,7 +118,8 @@ export async function readyVersion(dir = appDir): Promise<Ready> {
   // Nightly versions end in a commit hash, which semver would compare as text. The release
   // number decides first, then the build date.
   const next = await currentBuild(join(root, "versions", ready));
-  const release = Bun.semver.order(ready.split("-")[0]!, build.version.split("-")[0]!);
+  let release = 0;
+  try { release = Bun.semver.order(ready.split("-")[0]!, build.version.split("-")[0]!); } catch {}
   const older = release < 0 || release === 0 && !!next?.date && next.date < build.date;
   return { ready, older, newEngine: await engine(dir) !== await engine(join(root, "versions", ready)) };
 }

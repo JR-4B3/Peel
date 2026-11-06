@@ -113,11 +113,15 @@ try {
     // process waits for the new one, which keeps the engine owned until the new Peel closes.
     let restartInto: string | undefined;
     model.playsLocally = () => !useCider && player instanceof DevicePlayer && !player.host;
-    // The version to start is read again, since another Peel window may have changed it.
-    model.onRestart = () => void readyVersion().then(({ ready }) => {
-      if (!ready) { model.update = { ...model.update, ready: undefined }; model.status = "The update is no longer installed. Check for updates again."; model.changed(); return; }
-      restartInto = ready; renderer.destroy();
-    });
+    // The version to start is read again, since another Peel window may have changed it. A change
+    // updates the row, so the listener sees what the restart would do before choosing it again.
+    model.onRestart = () => void readyVersion().then(next => {
+      const shown = model.update;
+      if (next.ready && next.ready === shown.ready && next.newEngine === shown.newEngine && next.older === shown.older) { restartInto = next.ready; renderer.destroy(); return; }
+      model.update = { ...shown, ...next, ready: next.ready };
+      model.status = next.ready ? `Another Peel window installed ${next.ready}. Check the row and choose it again.` : "The update is no longer installed. Check for updates again.";
+      model.changed();
+    }, error => model.fail(error));
     const restart = async (version: string) => {
       if (player instanceof DevicePlayer) player.detach();
       // OpenTUI restores the terminal right after its destroy event, so the new Peel starts after that.
