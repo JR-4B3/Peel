@@ -59,7 +59,7 @@ Each launcher runs this checkout. Then use `peel --connect` and `peel`, or open 
 
 On Linux, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` move these folders. On every system, `PEEL_CONFIG_DIR`, `PEEL_CACHE_DIR`, and `PEEL_ENGINE_HOME` override them directly.
 
-Quitting Peel stops the engine. If the terminal closes before Peel can stop it, the engine finds within a second that no Peel is using it and quits. `bun run engine` runs the engine in the terminal with its log visible.
+Quitting Peel releases the engine, which quits once no other Peel uses it. If the terminal closes before Peel can release it, the engine finds within a second that no Peel is using it and quits. `bun run engine` runs the engine in the terminal with its log visible.
 
 ### Cider instead of the engine
 
