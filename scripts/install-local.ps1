@@ -37,6 +37,7 @@ if ((Test-Path $launcher) -and -not (Select-String -Path $launcher -Pattern '^re
 if ($releaseRoot) {
   $root = $releaseRoot.Replace('%', '%%')
   $start = @(
+    'set "PEEL_VERSION="',
     ('set /p PEEL_VERSION=<"{0}\current"' -f $root),
     ('cd /d "{0}\versions\%PEEL_VERSION%"' -f $root),
     # Every version shares one engine download.
@@ -45,7 +46,7 @@ if ($releaseRoot) {
 } else {
   $start = @(('cd /d "{0}"' -f $project.Replace('%', '%%')))
 }
-$lines = @('@echo off', 'rem Peel launcher', 'chcp 65001 >nul') + $start + @(('"{0}" src\index.ts %*' -f $bun.Replace('%', '%%')))
+$lines = @('@echo off', 'rem Peel launcher', 'setlocal', 'chcp 65001 >nul') + $start + @(('"{0}" src\index.ts %*' -f $bun.Replace('%', '%%')))
 [System.IO.File]::WriteAllText($launcher, ($lines -join "`r`n") + "`r`n", (New-Object System.Text.UTF8Encoding $false))
 
 # New terminals find peel once its folder is on the user's PATH.

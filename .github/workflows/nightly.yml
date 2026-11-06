@@ -22,6 +22,7 @@ jobs:
       - id: check
         # A night without new commits on main publishes nothing. Starting it by hand always builds.
         run: |
+          [ "$GITHUB_REF" = refs/heads/main ] || { echo "Nightly builds must use main" >&2; exit 1; }
           built=$(git ls-remote origin refs/tags/nightly | cut -f1)
           if [ "$built" = "$GITHUB_SHA" ] && [ "$GITHUB_EVENT_NAME" = schedule ]; then build=false; else build=true; fi
           echo "build=$build" >> "$GITHUB_OUTPUT"

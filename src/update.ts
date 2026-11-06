@@ -4,11 +4,11 @@
 // starts. Updates unpack beside it and switch current, so the running Peel is never changed.
 // A source checkout has no version.json and updates through git instead.
 import { existsSync } from "node:fs";
-import { mkdir, readdir, readFile, rename, rm, writeFile } from "node:fs/promises";
+import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { cacheDir, readPreferences, saveJson, type Channel } from "./config";
+import { readPreferences, saveJson, type Channel } from "./config";
 
 export const repository = process.env.PEEL_REPOSITORY ?? "JR-4B3/Peel";
 const api = process.env.PEEL_RELEASES_API ?? `https://api.github.com/repos/${repository}/releases`;
@@ -50,7 +50,7 @@ export async function latestRelease(channel: Channel): Promise<Release> {
   const info = asset("version.json"), archive = asset("peel.tar.gz"), sums = asset("SHASUMS256.txt");
   if (!info || !archive || !sums) throw new Error(`The ${channel} release is missing files. It may still be uploading.`);
   const build = await (await fetch(info, { signal: AbortSignal.timeout(15000) })).json() as Build;
-  if (typeof build.version !== "string" || !/^[\w.+-]+$/.test(build.version)) throw new Error(`The ${channel} release has no valid version.`);
+  if (typeof build.version !== "string" || !/^[\w][\w.+-]*$/.test(build.version)) throw new Error(`The ${channel} release has no valid version.`);
   return { ...build, archive, sums };
 }
 
@@ -94,40 +94,40 @@ export async function installRelease(release: Release, root: string, status: (te
   const pointer = join(root, `current.${process.pid}.tmp`);
   await writeFile(pointer, release.version);
   await rename(pointer, join(root, "current"));
-  await prune(versions, [release.version, (await currentBuild())?.version]);
+
 }
 
-// Keeps the new version and the one running now. Windows refuses to remove a version whose files
-// are still open, so that one goes on a later update.
-async function prune(versions: string, keep: (string | undefined)[]) {
-  for (const name of await readdir(versions).catch(() => [])) {
-    if (!keep.includes(name) && !name.endsWith(".partial")) await rm(join(versions, name), { recursive: true, force: true }).catch(() => {});
-  }
-}
-
+// Keep installed versions for rollback and for other Peel windows still using them.
 export interface UpdateResult { build?: Build; message: string }
 
 // Checks the channel and installs a newer build in the background. A source checkout only reports
 // its version. force skips the six-hour wait, for a channel the listener just chose.
-export async function checkForUpdate(channel: Channel, force = false, now = Date.now()): Promise<UpdateResult> {
-  const build = await currentBuild(), root = installRoot();
+let checking: Promise<unknown> = Promise.resolve();
+export function checkForUpdate(channel: Channel, force = false, now = Date.now(), dir = appDir): Promise<UpdateResult> {
+  const result = checking.catch(() => {}).then(() => update(channel, force, now, dir));
+  checking = result;
+  return result;
+}
+
+async function update(channel: Channel, force: boolean, now: number, dir: string): Promise<UpdateResult> {
+  const build = await currentBuild(dir), root = installRoot(dir);
   if (!build || !root) return { message: "Running from a source folder, which updates through git. bun src/update.ts install sets up a release that updates itself." };
   const label = `Peel ${build.version}`;
-  const record = join(cacheDir, "update.json");
-  const last = await readFile(record, "utf8").then(text => JSON.parse(text) as { checked: number; channel: Channel; message: string }).catch(() => undefined);
-  if (!force && last && last.channel === channel && now - last.checked < checkInterval) return { build, message: last.message };
+  const record = join(root, "update.json");
+  const last = await readFile(record, "utf8").then(text => JSON.parse(text) as { checked: number; channel: Channel; running: string; installed?: string; message: string }).catch(() => undefined);
+  if (!force && last && last.channel === channel && last.running === build.version && now - last.checked < checkInterval) return { build, message: last.message };
   let message: string;
   try {
     const release = await latestRelease(channel);
+    await installRelease(release, root);
     if (release.version === build.version) message = `${label}, the newest ${channel} build.`;
     else {
-      await installRelease(release, root);
       message = `Peel ${release.version} is installed. It starts the next time you open Peel.`;
     }
   } catch (error) {
     message = `${label}. Could not update: ${error instanceof Error ? error.message : String(error)} Peel tries again later.`;
   }
-  await saveJson("update.json", { checked: now, channel, message }, cacheDir).catch(() => {});
+  await saveJson("update.json", { checked: now, channel, running: build.version, message }, root).catch(() => {});
   return { build, message };
 }
 

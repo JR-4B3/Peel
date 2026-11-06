@@ -128,3 +128,35 @@ test("a channel without a release says so", async () => {
   const { update } = await releases();
   await expect(update.latestRelease("nightly")).rejects.toThrow("no nightly release");
 });
+
+
+test("switching channels back before reopening restores the running release", async () => {
+  const { dir, build, update } = await releases();
+  await build("stable", "0.2.0"); await build("nightly", "0.3.0-nightly.test");
+  const root = join(dir, "install"), running = join(root, "versions", "0.2.0");
+  await update.installRelease(await update.latestRelease("stable"), root);
+  await update.checkForUpdate("nightly", true, Date.now(), running);
+  expect(await readFile(join(root, "current"), "utf8")).toBe("0.3.0-nightly.test");
+  await update.checkForUpdate("stable", true, Date.now(), running);
+  expect(await readFile(join(root, "current"), "utf8")).toBe("0.2.0");
+});
+
+test("an update already running never says it starts on the next launch", async () => {
+  const { dir, build, update } = await releases();
+  await build("stable", "0.2.0"); await build("nightly", "0.3.0-nightly.test");
+  const root = join(dir, "install");
+  await update.installRelease(await update.latestRelease("stable"), root);
+  await update.checkForUpdate("nightly", true, Date.now(), join(root, "versions", "0.2.0"));
+  const result = await update.checkForUpdate("nightly", false, Date.now(), join(root, "versions", "0.3.0-nightly.test"));
+  expect(result.message).not.toContain("next time");
+  expect(result.message).toContain("newest nightly");
+});
+
+test("rapid channel changes finish with the last chosen release", async () => {
+  const { dir, build, update } = await releases();
+  await build("stable", "0.2.0"); await build("nightly", "0.3.0-nightly.test");
+  const root = join(dir, "install"), running = join(root, "versions", "0.2.0");
+  await update.installRelease(await update.latestRelease("stable"), root);
+  await Promise.all([update.checkForUpdate("nightly", true, Date.now(), running), update.checkForUpdate("stable", true, Date.now(), running)]);
+  expect(await readFile(join(root, "current"), "utf8")).toBe("0.2.0");
+});
