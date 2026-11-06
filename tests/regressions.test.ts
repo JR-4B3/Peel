@@ -230,3 +230,33 @@ test.skipIf(!existsSync(new URL("../engine/run.sh", import.meta.url)))("#20 an e
   await writeFile(join(engine, ".electron", "electron"), "#!/bin/sh\necho incomplete\n", { mode: 0o755 });
   expect(start("ok")).toEqual({ code: 0, output: "ran" });
 });
+
+
+test("a retained remote host keeps its engine when the last controller releases", async () => {
+  const { context, server, quits } = engineMain({ PEEL_OWNER: "101" });
+  context.serve({ webContents: { executeJavaScript: async () => ({ ready: true }) } }, "test-key");
+  await once(server(), "listening"); cleanup.push(() => server().close());
+  const port = (server().address() as net.AddressInfo).port;
+  const send = (path: string) => fetch(`http://127.0.0.1:${port}${path}`, { method: "POST", headers: { "x-peel-key": "test-key", "x-peel-owner": "101" } });
+  expect((await send("/retain")).ok).toBe(true);
+  await send("/release");
+  expect(quits.length).toBe(0);
+  await send("/quit");
+  expect(quits.length).toBe(1);
+});
+
+test("commands from different controllers finish in order on the host", async () => {
+  const { context, server } = engineMain({});
+  const completed: string[] = [];
+  context.serve({ webContents: { executeJavaScript: async (source: string) => {
+    if (source.includes(".enqueue(")) { await Bun.sleep(30); completed.push("enqueue"); }
+    if (source.includes(".remove(")) completed.push("remove");
+    return null;
+  } } }, "test-key");
+  await once(server(), "listening"); cleanup.push(() => server().close());
+  const port = (server().address() as net.AddressInfo).port;
+  const send = (method: string) => fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method, args: [] }) });
+  const first = send("enqueue"); await Bun.sleep(5); const second = send("remove");
+  await Promise.all([first, second]);
+  expect(completed).toEqual(["enqueue", "remove"]);
+});

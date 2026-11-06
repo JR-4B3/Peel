@@ -1,27 +1,23 @@
-# Remote play
+# Desktop remote control
 
-Status: plan only. Nothing is built yet.
+Peel can control another computer through SSH. The playback computer owns the audio and queue. Every controller reads that same queue. No audio plays on the controller and no engine port opens to the network.
 
-Goal: control from any device that runs Peel where the music plays, and send it to other rooms. Only an Apple Music subscription may be needed. One subscription streams to one place at a time, so this means "the same music in the rooms you pick", not different songs per room.
+## Setup
 
-## Roles
+Install the same Peel version on both computers. On the playback computer, run `peel --connect` once to sign in. Enable SSH access and verify that `ssh main` works from the controller with an SSH key. The host needs a running desktop session for Electron.
 
-| Role | Runs there | Hardware |
-| --- | --- | --- |
-| Source | Peel's engine, or the hi-res pipeline on Linux | A real PC that stays on (t480 or main) |
-| Speakers | Snapcast client, AirPlay, or Bluetooth | Anything. A Pi Zero or an old phone is enough |
-| Remotes | Peel's terminal app, the phone web app (`mobile` branch), or `ssh` into the source | Anything with a browser or an SSH client |
+On the controller, run `peel --remote main`. This saves `main` as the playback target. Later launches keep using it. Add another host with `peel --remote <ssh-host>`.
 
-## Steps
+In Settings, click "Control playback on" to cycle through this computer and saved hosts. The player names the remote host beside the song. Play, pause, next, previous, seek, volume, favourites, and queue controls all use the selected engine.
 
-1. The source accepts Peel's existing playback commands (`/playback/toggle`, `/playback/seek`, `/queue/jump` and the rest in `src/engine.ts`) over the network, protected by a key. Today they listen only on `127.0.0.1`.
-2. The web frontend for phones, built as a remote (see the `mobile` branch).
-3. A device switcher: the "Playing on main ▾" control in every Peel lists the devices running Peel and moves playback between them.
-4. Speakers: a Snapcast server on the source sends PipeWire's output to every Snapcast client in sync, lossless (FLAC or PCM). Peel gets an Output screen built on Snapcast's JSON-RPC API, plus PipeWire's AirPlay sink.
+Closing a controller leaves the remote engine playing. Reopening Peel reads its queue again. Run `peel --stop-host` on the host to shut down a retained engine. Rebooting or upgrading the host engine clears its in-memory queue.
 
-## Notes from the checks on 2026-11-05
+Use `peel --local` to return to this computer's engine. This changes which computer you control. It does not move music or a queue between engines. A failed remote connection never starts the local player as a fallback. Commands with a lost response are not replayed.
 
-- PipeWire on main already has the AirPlay sink, RTP, and Snapcast discovery.
-- t480's repositories have `snapserver` and `snapclient` 0.34. Main's (Nobara) don't.
-- Away from home: self-hosted WireGuard keeps it subscription-only. Tailscale would work but adds an account, so it can only be optional.
-- The Mac is off most of the time, so it can't be the source.
+The SSH helper starts through `~/.local/bin/peel`, which the Linux and macOS installers create. Windows can control a host through its OpenSSH client. Hosting on Windows needs a compatible remote launcher and is not tested.
+
+## Remaining work
+
+Moving the queue and playback position between output computers, automatic discovery, and high-resolution playback still need implementation. The current engine uses Apple's MusicKit web player at 256 or 64 kbps AAC. Linux's experimental Waydroid hi-res pipeline is separate.
+
+Mobile and synchronized room audio are outside this change.

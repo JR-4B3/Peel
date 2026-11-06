@@ -28,6 +28,7 @@ export interface Playback {
   volume: number;
   repeatMode: "none" | "one" | "all";
   shuffleMode: boolean;
+  queueRevision?: string;
 }
 
 export interface Page {

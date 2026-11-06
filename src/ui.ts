@@ -889,7 +889,7 @@ export class PeelUI {
     const connected = this.model.connected;
     const song = state.nowPlaying;
     this.title.content = song ? song.name ?? "Untitled" : "Nothing playing";
-    this.subtitle.content = song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : this.model.starting ? "Starting the player..." : "Choose a song to start";
+    this.subtitle.content = [this.model.preferences.remote ? `On ${this.model.preferences.remote}` : "", song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : this.model.starting ? "Starting the player..." : "Choose a song to start"].filter(Boolean).join("  /  ");
     this.playerCover.setArt(song?.artwork?.url);
     const favourite = this.model.favourite;
     this.favouriteButton.visible = !!song;
@@ -1019,6 +1019,14 @@ export class PeelUI {
         activate: () => void model.setPreference({ heartsInFavourites: !hearts }, `Hearts in Favourite Songs: ${hearts ? "hidden" : "shown"}`),
       },
     ];
+    if (model.onOutput) rows.push({
+      id: "output", lead: icon.volumeUp, name: "Control playback on", right: preferences.remote ?? "This computer",
+      description: "Each computer keeps its queue. Remote music continues when you close Peel. Add a computer with peel --remote <ssh-host>.",
+      activate: () => {
+        const targets = [undefined, ...model.outputTargets];
+        void model.selectOutput(targets[(targets.indexOf(preferences.remote) + 1) % targets.length]);
+      },
+    });
     return rows;
   }
 

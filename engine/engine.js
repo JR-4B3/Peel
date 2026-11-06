@@ -74,6 +74,7 @@
             playParams: { id: item.id, catalogId: catalogId(item) },
           } : null,
           time: { currentTime: music.currentPlaybackTime ?? 0, duration: music.currentPlaybackDuration ?? 0 },
+          queueRevision: JSON.stringify([music.queue.position, music.queue.items.map(item => [item.id, added.has(item)])]),
           volume: music.volume, repeatMode: repeats[music.repeatMode] ?? "none", shuffleMode: music.shuffleMode === 1,
         },
       };
@@ -109,7 +110,8 @@
     },
     // Queue edits move MusicKit's own entries, so a moved song stays marked as added.
     // Only songs after the playing one change.
-    move: (from, to) => {
+    move: (from, to, expected, target) => {
+      if (expected && music.queue.items[from]?.id !== expected || target && music.queue.items[to]?.id !== target) throw new Error("The queue changed on another controller. Try again.");
       if (Math.min(from, to) <= music.queue.position) return;
       const [entry] = music.queue.spliceQueueItems(from, 1);
       music.queue.spliceQueueItems(to, 0, [entry]);
@@ -121,7 +123,10 @@
       music.bitrate = value === "standard" ? rates.STANDARD : rates.HIGH;
       return music.bitrate;
     },
-    remove: index => { if (index > music.queue.position) music.queue.spliceQueueItems(index, 1); },
+    remove: (index, expected) => {
+      if (expected && music.queue.items[index]?.id !== expected) throw new Error("The queue changed on another controller. Try again.");
+      if (index > music.queue.position) music.queue.spliceQueueItems(index, 1);
+    },
     jump: index => music.changeToMediaAtIndex(index),
     queue: () => ({ position: music.queue.position, items: music.queue.items.map(item => ({ ...describe(item), added: pending().includes(item) })) }),
     rating: async () => await readRating(music.nowPlayingItem) ?? -1,

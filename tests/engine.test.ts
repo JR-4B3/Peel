@@ -168,3 +168,14 @@ test("the engine switches MusicKit's stream between 256 and 64 kbps", async () =
   expect(music.bitrate).toBe(64);
   expect(engine.quality("high")).toBe(256);
 });
+
+
+test("a stale queue removal or move cannot edit another controller's song", async () => {
+  const { engine, music } = await musicKit();
+  await engine.play([song("c1"), song("c2")], 0);
+  await engine.enqueue([song("a1"), song("a2")], false);
+  engine.remove(1, "a1");
+  expect(() => engine.remove(1, "a1")).toThrow("queue changed");
+  expect(() => engine.move(1, 2, "a1", "c2")).toThrow("queue changed");
+  expect(music.items.map((item: any) => item.id)).toEqual(["c1", "a2", "c2"]);
+});
