@@ -50,7 +50,10 @@ PLIST
 launcher=$(cat "$(dirname "$0")/../Resources/peel-launcher")
 if [[ -d /Applications/Ghostty.app || -d "$HOME/Applications/Ghostty.app" ]]; then
   # With -e, Ghostty asks for confirmation each time another app passes it a command. --command does not.
-  exec open -na Ghostty --args --title=Peel --command="$launcher"
+  # Ghostty runs --command through a shell, so the path is single-quoted for it. A quote in the
+  # path becomes '\'' and spaces stay part of the path.
+  quoted="'${launcher//\'/\'\\\'\'}'"
+  exec open -na Ghostty --args --title=Peel --command="exec $quoted"
 fi
 exec osascript - "$launcher" <<'SCRIPT'
 on run argv

@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { closeSync, existsSync, openSync } from "node:fs";
-import { mkdir, readFile, rename, rm, stat, symlink, writeFile } from "node:fs/promises";
+import { lstat, mkdir, readFile, rename, rm, stat, symlink, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -34,9 +34,24 @@ export async function command(args: string[], interactive = false) {
   return { output, error, code };
 }
 
+const unsafe = (name: string) => new Error(`The playback engine's archive contains an unsafe path: ${name}`);
+
+// Creates the folders down to an entry. Each one must be a real folder, not a symlink, so no
+// entry can be written outside target through a link an earlier entry created.
+async function folders(target: string, parts: string[], name: string) {
+  let current = target;
+  for (const part of parts) {
+    current = join(current, part);
+    const info = await lstat(current).catch(() => undefined);
+    if (!info) await mkdir(current);
+    else if (!info.isDirectory()) throw unsafe(name);
+  }
+}
+
 // Unpacks a zip file. Linux distributions do not all include unzip, and Electron's Linux
 // archive needs only files, folders, symlinks, and their permissions. ZIP64 is not supported.
-async function unzip(archive: Uint8Array<ArrayBuffer>, target: string) {
+// Symlinks may only point down into their own folder, and no entry replaces an existing one.
+export async function unzip(archive: Uint8Array<ArrayBuffer>, target: string) {
   const view = new DataView(archive.buffer, archive.byteOffset, archive.byteLength);
   let end = archive.length - 22;
   while (end >= 0 && view.getUint32(end, true) !== 0x06054b50) end--;
@@ -50,16 +65,21 @@ async function unzip(archive: Uint8Array<ArrayBuffer>, target: string) {
     const name = new TextDecoder().decode(archive.subarray(entry + 46, entry + 46 + nameLength));
     const local = view.getUint32(entry + 42, true);
     entry += 46 + nameLength + view.getUint16(entry + 30, true) + view.getUint16(entry + 32, true);
-    if (name.startsWith("/") || name.split("/").includes("..")) throw new Error(`The playback engine's archive contains an unsafe path: ${name}`);
-    const path = join(target, name);
-    if (name.endsWith("/")) { await mkdir(path, { recursive: true }); continue; }
+    const parts = name.split("/").filter(part => part && part !== ".");
+    if (name.startsWith("/") || !parts.length || parts.includes("..")) throw unsafe(name);
+    if (name.endsWith("/")) { await folders(target, parts, name); continue; }
+    const path = join(target, ...parts);
     const start = local + 30 + view.getUint16(local + 26, true) + view.getUint16(local + 28, true);
     const stored = archive.subarray(start, start + size);
     const data = method === 0 ? stored : method === 8 ? Bun.inflateSync(stored) : undefined;
     if (!data) throw new Error(`The playback engine's archive uses an unsupported compression for ${name}.`);
-    await mkdir(dirname(path), { recursive: true });
-    if ((mode & 0o170000) === 0o120000) await symlink(new TextDecoder().decode(data), path);
-    else await writeFile(path, data, { mode: mode & 0o777 || 0o644 });
+    await folders(target, parts.slice(0, -1), name);
+    if ((mode & 0o170000) === 0o120000) {
+      const link = new TextDecoder().decode(data);
+      if (!link || link.startsWith("/") || link.split("/").includes("..")) throw unsafe(`${name} -> ${link}`);
+      await symlink(link, path);
+    }
+    else await writeFile(path, data, { mode: mode & 0o777 || 0o644, flag: "wx" });
   }
 }
 
@@ -75,8 +95,8 @@ async function extract(archive: Uint8Array<ArrayBuffer>, file: string, target: s
 
 // While Peel's repository is private, its releases answer 404 without a GitHub sign-in. The gh
 // CLI, when signed in with access, downloads them instead.
-async function fetchAsset(release: string, name: string, signed: boolean) {
-  const response = await fetch(`${release}/${name}`);
+async function fetchAsset(release: string, name: string, signed: boolean, signal?: AbortSignal) {
+  const response = await fetch(`${release}/${name}`, { signal });
   if (response.ok || !signed || process.env.PEEL_ENGINE_RELEASES || !Bun.which("gh")) return response;
   const file = join(tmpdir(), `peel-${process.pid}-${name}`);
   try {
@@ -95,18 +115,64 @@ export async function download(status: (text: string) => void, target = electron
   const [archive, sums] = await Promise.all([fetchAsset(release, name, signed), fetchAsset(release, "SHASUMS256.txt", signed)]);
   if (!archive.ok || !sums.ok) throw new Error(`Could not download the playback engine from ${release}: HTTP ${archive.ok ? sums.status : archive.status}.`);
   const bytes = await archive.arrayBuffer();
-  const expected = (await sums.text()).split("\n").find(line => line.trim().endsWith(name))?.split(/\s+/)[0];
+  const expected = checksum(await sums.text(), name);
   if (!expected || new Bun.CryptoHasher("sha256").update(bytes).digest("hex") !== expected) throw new Error("The downloaded playback engine did not match its published checksum. Open Peel again to retry.");
-  // Unpack beside the final folder and rename it into place, so an interrupted unpack is never used.
-  const partial = `${target}.${process.pid}.tmp`;
+  // Unpack beside the final folder and rename it into place, so an interrupted unpack is never
+  // used. The copy it replaces is moved aside first and put back if the switch fails.
+  const partial = `${target}.${process.pid}.tmp`, previous = `${target}.${process.pid}.old`;
   await rm(partial, { recursive: true, force: true });
+  await rm(previous, { recursive: true, force: true });
   await mkdir(partial, { recursive: true });
   try {
     await extract(new Uint8Array(bytes), `${partial}.zip`, partial);
-    if (signed) await writeFile(join(partial, ".vmp-signed"), `${electronVersion}\n`);
-    await rm(target, { recursive: true, force: true });
-    await rename(partial, target);
-  } finally { await rm(partial, { recursive: true, force: true }); }
+    // The signed archive's checksum tells a renewed signature for the same version apart.
+    if (signed) await writeFile(join(partial, ".vmp-signed"), `${electronVersion}\n${expected}\n`);
+    const replacing = existsSync(target);
+    if (replacing) await rename(target, previous);
+    try { await rename(partial, target); } catch (error) { if (replacing) await rename(previous, target); throw error; }
+  } finally {
+    await rm(partial, { recursive: true, force: true });
+    await rm(previous, { recursive: true, force: true });
+  }
+}
+
+// The checksum SHASUMS256.txt lists for a file, from lines of "<sha256>  <name>".
+function checksum(sums: string, name: string) {
+  for (const line of sums.split("\n")) {
+    const [hash, file] = line.trim().split(/\s+/);
+    if (file === name && /^[0-9a-f]{64}$/.test(hash ?? "")) return hash;
+  }
+}
+
+// castlabs' VMP signatures run out, so Peel's maintainer signs the same Electron version again
+// and replaces the release's archives and checksums. At most once a day Peel compares the
+// release's checksum with the one its signed copy came from and downloads the renewed copy when
+// they differ. A failed check or download keeps the copy Peel has, and is tried again a day later.
+const renewalInterval = 24 * 60 * 60 * 1000;
+const renewalChecked = (target: string) => join(target, ".vmp-checked");
+
+async function renewalDue(target: string, now: number) {
+  const last = (await stat(renewalChecked(target)).catch(() => undefined))?.mtimeMs ?? 0;
+  return now - last >= renewalInterval;
+}
+
+export async function renewSignature(status: (text: string) => void, target = electronDir, platform: string = process.platform, arch: string = process.arch, now = Date.now()) {
+  if (!await renewalDue(target, now)) return false;
+  let renewed = false;
+  try {
+    const name = signedName(platform, arch);
+    const sums = await fetchAsset(`${engineReleases}/${engineTag}`, "SHASUMS256.txt", true, AbortSignal.timeout(15000));
+    const published = sums.ok ? checksum(await sums.text(), name) : undefined;
+    const current = (await readFile(join(target, ".vmp-signed"), "utf8").catch(() => "")).split("\n")[1]?.trim();
+    if (published && published !== current) {
+      status("Downloading the playback engine's renewed signature...");
+      await download(() => {}, target, platform, arch, true);
+      renewed = true;
+    }
+  } catch {}
+  const checked = renewalChecked(target), time = new Date(now);
+  await writeFile(checked, "").then(() => utimes(checked, time, time)).catch(() => {});
+  return renewed;
 }
 
 // Electron's archive includes a version file. A different version, from an older Peel, is replaced.
@@ -114,8 +180,9 @@ async function downloaded() {
   return existsSync(electronPath) && (await readFile(join(electronDir, "version"), "utf8").catch(() => "")).trim() === electronVersion.slice(1);
 }
 
+// The marker's first line is the Electron version. Its second, the signed archive's checksum.
 async function installed() {
-  return await downloaded() && (!needsSignature || (await readFile(signedMarker, "utf8").catch(() => "")).trim() === electronVersion);
+  return await downloaded() && (!needsSignature || (await readFile(signedMarker, "utf8").catch(() => "")).split("\n")[0]?.trim() === electronVersion);
 }
 
 function alive(pid: number) {
@@ -144,7 +211,10 @@ async function withInstallLock(status: (text: string) => void, work: () => Promi
 // Downloads the playback engine for this system once. An unsigned copy on Windows or macOS,
 // from an earlier Peel, is replaced by the signed one.
 export async function installEngine(status: (text: string) => void = () => {}) {
-  if (await installed()) return;
+  if (await installed()) {
+    if (needsSignature && await renewalDue(electronDir, Date.now())) await withInstallLock(status, async () => { await renewSignature(status); });
+    return;
+  }
   await withInstallLock(status, async () => { if (!await installed()) await download(status); });
 }
 
