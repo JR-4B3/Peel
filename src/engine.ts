@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { cacheDir } from "./config";
 import type { Media, Page, Playback, Player } from "./types";
 
 // Peel's own playback engine in engine/: MusicKit JS in castlabs' Electron. It writes its
@@ -38,7 +39,7 @@ export class Engine implements Player {
     try {
       response = await fetch(`http://127.0.0.1:${access.port}${path}`, {
         method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body),
-        headers: { "x-peel-key": access.key, "content-type": "application/json" }, signal: AbortSignal.timeout(30000),
+        headers: { "x-peel-key": access.key, "x-peel-owner": String(process.pid), "content-type": "application/json" }, signal: AbortSignal.timeout(30000),
       });
     } catch { this.access = undefined; throw new Error("Peel's playback engine is not running."); }
     if (response.status === 403 && retry) { await this.read(); return this.send(path, body, false); }
@@ -49,6 +50,7 @@ export class Engine implements Player {
 
   private call(method: string, ...args: unknown[]) { return this.send("/call", { method, args }); }
   state(): Promise<State> { return this.send("/state"); }
+  async release() { await this.send("/release", {}, false); }
 
   async snapshot(): Promise<Playback> {
     const state = await this.state();
@@ -97,7 +99,7 @@ export class Engine implements Player {
       "/playback/repeat/toggle": () => this.call("toggleRepeat"),
       "/queue/jump": () => this.call("jump", body.index),
       "/queue/move": () => this.call("move", body.from, body.to),
-      "/library/now-playing/rating": () => this.call("rate", method === "DELETE" ? 0 : body.rating),
+      "/library/now-playing/rating": () => this.call("rate", method === "DELETE" ? 0 : body.rating, ...(body.id ? [body.id] : [])),
     };
     const removed = method === "DELETE" && path.match(/^\/queue\/items\/(\d+)$/);
     const run = removed ? () => this.call("remove", Number(removed[1])) : commands[path];
@@ -119,8 +121,10 @@ export async function ensureEngine(engine: Engine, status: (text: string) => voi
   }
   if (!current) {
     status("Starting the playback engine...");
-    const environment = ["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
-      .filter(name => process.env[name]).map(name => `--setenv=${name}=${process.env[name]}`);
+    // The engine runs under the user manager, which does not have Peel's environment. It gets
+    // the same profile and cache folders this Peel uses, so both read the same key.json.
+    const environment = [`--setenv=PEEL_ENGINE_HOME=${engineHome}`, `--setenv=PEEL_CACHE_DIR=${cacheDir}`, `--setenv=PEEL_OWNER=${process.pid}`, ...["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
+      .filter(name => process.env[name]).map(name => `--setenv=${name}=${process.env[name]}`)];
     // The user manager owns the engine, so it outlives Peel's terminal until stopEngine runs.
     // KillMode=mixed sends SIGTERM to Electron's main process only. When Chromium's helper
     // processes get it too, they exit first and Electron crashes with a core dump.
@@ -140,8 +144,10 @@ export async function ensureEngine(engine: Engine, status: (text: string) => voi
   if (!current?.ready) throw new Error("The playback engine did not become ready. Run engine/run.sh to see why.");
 }
 
-// Stops the engine and its music when Peel closes. --no-block queues the stop with the user
-// manager and returns at once, so it completes even when the terminal is already closing.
-export function stopEngine() {
-  Bun.spawnSync(["systemctl", "--user", "stop", "--no-block", "peel-engine.service"], { stdout: "ignore", stderr: "ignore" });
+// Releases the engine when Peel closes. The engine quits, and the music stops, once no other
+// Peel still uses it. It also quits within a second once every Peel that used it has exited,
+// which covers a terminal closed before the release arrives. Stopping the systemd unit here
+// would stop the music for every other Peel too.
+export function stopEngine(engine: Engine) {
+  void engine.release().catch(() => {});
 }

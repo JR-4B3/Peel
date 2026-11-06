@@ -70,7 +70,7 @@ try {
     let interval: ReturnType<typeof setInterval> | undefined;
     const ui = new PeelUI(renderer, model, () => { clearInterval(interval); ui.dispose(); renderer.destroy(); });
     // q, Ctrl+C, and closing the terminal window all destroy the renderer. The engine stops with it.
-    renderer.on("destroy", () => { startup.abort(); clearInterval(interval); ui.dispose(); if (!useCider) stopEngine(); });
+    renderer.on("destroy", () => { startup.abort(); clearInterval(interval); ui.dispose(); if (!useCider) stopEngine(player as Engine); });
     interval = setInterval(() => void model.refresh(), 1000);
     void model.start();
     // Start the player alongside browsing, so it is usually ready by the first song.
