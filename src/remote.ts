@@ -62,9 +62,11 @@ export class DevicePlayer extends Engine {
   private local = new Engine();
   private remote?: RemoteConnection;
   private localUsed = false;
+  private detached = false;
   host?: string;
   constructor(host?: string, private status: (text: string) => void = () => {}) {
-    super(undefined, (path, body) => this.remote ? this.remote.request(path, body) : this.local.send(path, body));
+    super(undefined, (path, body) => this.detached ? Promise.reject(new Error("Peel restarted into an update."))
+      : this.remote ? this.remote.request(path, body) : this.local.send(path, body));
     if (host) { this.remote = new RemoteConnection(host, status); this.host = host; }
   }
   async ensure(signal?: AbortSignal) {
@@ -82,6 +84,9 @@ export class DevicePlayer extends Engine {
     } catch (error) { next?.close(); throw error; }
     this.remote?.close(); this.remote = next; this.host = host;
   }
+  // Closes the remote connection but keeps this computer's engine, for a Peel restarting into an
+  // update. Requests still on their way fail instead of reaching another engine.
+  detach() { this.detached = true; this.remote?.close(); }
   async release() {
     this.remote?.close();
     if (this.localUsed) await this.local.release();

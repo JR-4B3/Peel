@@ -44,7 +44,8 @@ test("the settings page switches quality, update channel, and hearts, and saves 
   expect(app.channels).toEqual(["nightly"]);
   frame = app.captureCharFrame();
   expect(frame).toContain("Nightly");
-  app.mockInput.pressKey("j"); app.mockInput.pressEnter();
+  // The update row sits between the channel and the hearts.
+  app.mockInput.pressKey("j"); app.mockInput.pressKey("j"); app.mockInput.pressEnter();
   await Bun.sleep(20); await app.flush();
   expect(app.saved.at(-1)).toMatchObject({ quality: "standard", channel: "nightly", heartsInFavourites: true });
   expect(app.captureCharFrame()).toContain("Shown");
@@ -72,9 +73,11 @@ test("a started engine gets the saved quality", async () => {
 async function releases() {
   const dir = await mkdtemp(join(tmpdir(), "peel-releases-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const builds: Record<string, { archive: Uint8Array<ArrayBuffer>; version: string; sum?: string }> = {};
-  async function build(channel: string, version: string) {
+  async function build(channel: string, version: string, engine = "engine") {
     const source = join(dir, `src-${version}`);
     await mkdir(join(source, "src"), { recursive: true });
+    await mkdir(join(source, "engine"), { recursive: true });
+    for (const name of ["engine.js", "main.js"]) await writeFile(join(source, "engine", name), `// ${engine} ${name}\n`);
     await writeFile(join(source, "package.json"), JSON.stringify({ name: "peel-fixture", version: "0.0.0", private: true }));
     await writeFile(join(source, "version.json"), JSON.stringify({ version, channel, commit: "abcdef1234", date: "2026-11-06" }));
     await writeFile(join(source, "src", "index.ts"), "console.log('peel')\n");
@@ -159,4 +162,81 @@ test("rapid channel changes finish with the last chosen release", async () => {
   await update.installRelease(await update.latestRelease("stable"), root);
   await Promise.all([update.checkForUpdate("nightly", true, Date.now(), running), update.checkForUpdate("stable", true, Date.now(), running)]);
   expect(await readFile(join(root, "current"), "utf8")).toBe("0.2.0");
+});
+
+test("the update row checks now, and offers a restart once a newer Peel is ready", async () => {
+  const app = await settings(true);
+  let checks = 0, restarts = 0;
+  app.model.onCheckUpdate = () => { checks++; };
+  app.model.onRestart = () => { restarts++; };
+  app.model.update = { installed: true, version: "0.2.0", message: "Peel 0.2.0, the newest stable build." };
+  app.model.changed(); await app.flush();
+  expect(app.captureCharFrame()).toContain("Check for updates");
+  app.mockInput.pressKey("j"); app.mockInput.pressKey("j"); app.mockInput.pressEnter();
+  await Bun.sleep(20);
+  expect(checks).toBe(1);
+
+  app.model.update = { ...app.model.update, ready: "0.3.0", newEngine: false };
+  app.model.changed(); await app.flush();
+  let frame = app.captureCharFrame();
+  for (const text of ["Restart to update", "0.3.0", "The music keeps playing"]) expect(frame).toContain(text);
+  // A new engine stops the music only when this computer plays it.
+  app.model.update = { ...app.model.update, newEngine: true };
+  app.model.changed(); await app.flush();
+  expect(app.captureCharFrame()).toContain("The music keeps playing");
+  app.model.playsLocally = () => true;
+  app.model.changed(); await app.flush();
+  frame = app.captureCharFrame();
+  expect(frame).toContain("The music stops and the queue clears");
+  app.mockInput.pressEnter();
+  await Bun.sleep(20);
+  expect({ checks, restarts }).toEqual({ checks: 1, restarts: 1 });
+});
+
+test("an installed update is ready for a restart, which says whether the engine changes", async () => {
+  const { dir, build, update } = await releases();
+  await build("stable", "0.2.0"); await build("nightly", "0.3.0-nightly.test");
+  const root = join(dir, "install"), running = join(root, "versions", "0.2.0");
+  await update.installRelease(await update.latestRelease("stable"), root);
+  expect(await update.readyVersion(running)).toEqual({});
+  const result = await update.checkForUpdate("nightly", true, Date.now(), running);
+  expect({ ready: result.ready, older: result.older, newEngine: result.newEngine }).toEqual({ ready: "0.3.0-nightly.test", older: false, newEngine: false });
+  expect(update.restartCommand("0.3.0-nightly.test", running).cwd).toBe(join(root, "versions", "0.3.0-nightly.test"));
+  // A cached check still reports it.
+  expect((await update.checkForUpdate("nightly", false, Date.now(), running)).ready).toBe("0.3.0-nightly.test");
+
+  await build("nightly", "0.4.0-nightly.test", "changed engine");
+  expect(await update.checkForUpdate("nightly", true, Date.now(), running)).toMatchObject({ ready: "0.4.0-nightly.test", newEngine: true });
+  // Switching back to the running release leaves nothing to restart into.
+  expect((await update.checkForUpdate("stable", true, Date.now(), running)).ready).toBeUndefined();
+});
+
+test("switching to an older release offers a switch, not an update", async () => {
+  const { dir, build, update } = await releases();
+  await build("stable", "0.2.0"); await build("nightly", "0.3.0-nightly.20261106.2d4205c");
+  const root = join(dir, "install"), running = join(root, "versions", "0.3.0-nightly.20261106.2d4205c");
+  await update.installRelease(await update.latestRelease("nightly"), root);
+  const result = await update.checkForUpdate("stable", true, Date.now(), running);
+  expect({ ready: result.ready, older: result.older }).toEqual({ ready: "0.2.0", older: true });
+});
+
+test("a later nightly from the same day is newer, whatever its commit hash", async () => {
+  const { dir, build, update } = await releases();
+  await build("nightly", "0.1.0-nightly.20261106.2d4205c");
+  const root = join(dir, "install"), running = join(root, "versions", "0.1.0-nightly.20261106.2d4205c");
+  await update.installRelease(await update.latestRelease("nightly"), root);
+  // A numeric hash sorts before a lettered one in semver, which must not make it older.
+  await build("nightly", "0.1.0-nightly.20261106.4417365");
+  const result = await update.checkForUpdate("nightly", true, Date.now(), running);
+  expect({ ready: result.ready, older: result.older }).toEqual({ ready: "0.1.0-nightly.20261106.4417365", older: false });
+});
+
+test("a restart keeps its arguments but not the saved output choice, and versions show short", async () => {
+  const { dir, update } = await releases();
+  const running = join(dir, "install", "versions", "0.2.0");
+  expect(update.restartCommand("0.3.0", running, ["--remote", "main", "--debug"]).cmd.slice(1)).toEqual(["src/index.ts", "--debug"]);
+  expect(update.restartCommand("0.3.0", running, ["--local"]).cmd.slice(1)).toEqual(["src/index.ts"]);
+  expect(() => update.restartCommand("0.3.0", join(dir, "checkout"))).toThrow("source folder");
+  expect(update.shortVersion("0.1.0-nightly.20261106.4417365")).toBe("0.1.0 nightly 4417365");
+  expect(update.shortVersion("0.2.0")).toBe("0.2.0");
 });
