@@ -228,6 +228,7 @@ export class DeviceNetwork extends EventEmitter {
   // When this device last tried to reach each device, so retries take turns.
   private attempts = new Map<string, number>();
   private turns = new Map<string, number>();
+  private missed = new WeakMap<Session, number>();
   private sockets = new Set<ServerWebSocket<SocketData>>();
   private clients = new Set<WebSocket>();
   private server?: Server<SocketData>;
@@ -444,7 +445,14 @@ export class DeviceNetwork extends EventEmitter {
         if (Array.isArray(status?.keys) && (status.keys.some((key: string) => !this.groupKeys.some(own => own.id === key)) || this.groupKeys.some(own => !status.keys.includes(own.id)))) await this.sync(session);
         const summary = status?.summary && typeof status.summary.state === "string" ? { state: status.summary.state, song: typeof status.summary.song === "string" ? status.summary.song : undefined, artist: typeof status.summary.artist === "string" ? status.summary.artist : undefined } : undefined;
         if (JSON.stringify(summary) !== JSON.stringify(this.summaries.get(id))) { this.summaries.set(id, summary); this.changed(); }
-      } catch {}
+        this.missed.delete(session);
+      } catch {
+        // A computer that went to sleep keeps its connection open but stops answering. Two missed
+        // checks in a row, about ten seconds, count as offline.
+        const missed = (this.missed.get(session) ?? 0) + 1;
+        this.missed.set(session, missed);
+        if (missed >= 2 && !session.closed) session.end();
+      }
     }));
   }
 

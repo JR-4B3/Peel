@@ -425,3 +425,16 @@ test("a device found on this network replaces a connection made another way", as
   expect(mac.network.online(main.network.id)).toBe(true);
   await mac.network.request(main.network.id, "/call", { method: "pause", args: [] });
 });
+
+test("a device that stops answering, as one that went to sleep, counts as offline", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  mac.player.onRetarget = () => { mac.player.applyTarget(); };
+  await link(mac, main);
+  Object.assign(mac.fake.state, { items: [song("c1")], position: 0, playing: true });
+  await mac.player.playOn(main.network.id);
+  // main keeps its connection open but answers nothing.
+  (main.network as any).handle = () => new Promise(() => {});
+  for (let count = 0; count < 200 && mac.network.online(main.network.id); count++) await Bun.sleep(100);
+  expect(mac.network.online(main.network.id)).toBe(false);
+  await waitFor(() => mac.player.peer === undefined, "the Mac controlling itself");
+}, 30000);
