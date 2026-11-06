@@ -23,10 +23,12 @@ function zip(entries: Entry[]) {
     const name = encoder.encode(entry.name), data = encoder.encode(entry.link ?? entry.data ?? "");
     const mode = entry.link !== undefined ? 0o120777 : entry.name.endsWith("/") ? 0o040755 : 0o100644;
     const local = new Uint8Array(30 + name.length + data.length), l = new DataView(local.buffer);
-    l.setUint32(0, 0x04034b50, true); l.setUint16(4, 20, true); l.setUint32(18, data.length, true); l.setUint32(22, data.length, true);
+    // Windows' tar checks each entry's CRC-32, as real archives carry it.
+    const crc = Bun.hash.crc32(data);
+    l.setUint32(0, 0x04034b50, true); l.setUint16(4, 20, true); l.setUint32(14, crc, true); l.setUint32(18, data.length, true); l.setUint32(22, data.length, true);
     l.setUint16(26, name.length, true); local.set(name, 30); local.set(data, 30 + name.length);
     const central = new Uint8Array(46 + name.length), c = new DataView(central.buffer);
-    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 0x031e, true); c.setUint16(6, 20, true);
+    c.setUint32(0, 0x02014b50, true); c.setUint16(4, 0x031e, true); c.setUint16(6, 20, true); c.setUint32(16, crc, true);
     c.setUint32(20, data.length, true); c.setUint32(24, data.length, true); c.setUint16(28, name.length, true);
     c.setUint32(38, mode << 16 >>> 0, true); c.setUint32(42, offset, true); central.set(name, 46);
     locals.push(local); centrals.push(central); offset += local.length;
