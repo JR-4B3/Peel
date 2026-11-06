@@ -5,7 +5,7 @@ import { mkdir, mkdtemp, readFile, readlink, rm, writeFile } from "node:fs/promi
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { publish, publishedSums } from "../scripts/sign-engine";
-import { electronVersion, engineTag, renewSignature, signedName, unzip } from "../src/engine";
+import { download, electronVersion, engineTag, renewSignature, signedName, unzip } from "../src/engine";
 
 const cleanup: (() => unknown)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
@@ -189,4 +189,18 @@ test.skipIf(process.platform === "win32")("#14 the Mac launcher's Ghostty comman
   // Ghostty hands the command to a shell, as sh -c does here.
   const run = Bun.spawnSync(["sh", "-c", commandLine]);
   expect({ code: run.exitCode, output: run.stdout.toString().trim() }).toEqual({ code: 0, output: "launched" });
+});
+
+
+test("the engine installer accepts castlabs binary-mode checksum filenames", async () => {
+  const target = join(await temporary(), "engine");
+  const archive = zip([{ name: "version", data: electronVersion.slice(1) }]);
+  const sum = new Bun.CryptoHasher("sha256").update(archive).digest("hex");
+  const original = globalThis.fetch;
+  globalThis.fetch = (async (url: string | URL) => String(url).endsWith("SHASUMS256.txt")
+    ? new Response(`${sum} *electron-${electronVersion}-linux-x64.zip\n`)
+    : new Response(archive)) as typeof fetch;
+  cleanup.push(() => { globalThis.fetch = original; });
+  await download(() => {}, target, "linux", "x64", false);
+  expect(await readFile(join(target, "version"), "utf8")).toBe(electronVersion.slice(1));
 });
