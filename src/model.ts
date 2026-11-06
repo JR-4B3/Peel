@@ -79,6 +79,8 @@ export class Model extends EventEmitter {
   private queueEdits = 0;
   private activation?: { key: string; started: number; pending: boolean; promise: Promise<void> };
   private loved?: { key: string; value: boolean };
+  // Albums' favourite marks by album id, once Apple has answered.
+  private albumsLoved = new Map<string, boolean>();
   private homeRead = false;
   releases: Promise<void> = Promise.resolve();
 
@@ -137,6 +139,7 @@ export class Model extends EventEmitter {
         this.playbackError = undefined;
         // A queued song leaves the queue when it starts playing.
         if (this.view === "queue" && !this.loading && playing !== this.playback.nowPlaying?.playParams?.id) void this.requeue();
+        void this.lookUpFavourite();
         const recovering = !this.connected;
         this.connected = true;
         if (recovering && !this.starting) this.status = "Ready to play";
@@ -222,6 +225,7 @@ export class Model extends EventEmitter {
     this.view = `collection:${item.type}:${item.id}`; this.title = item.name; this.detail = item; this.shelves = [];
     this.collection = { id: item.id, type: item.type };
     this.loader = this.songsOf(item);
+    if (item.type.includes("albums") && !this.albumsLoved.has(item.id)) void this.library.albumFavourite(item).then(value => { this.albumsLoved.set(item.id, value); this.changed(); }, () => {});
     await this.load(false);
   }
 
@@ -536,6 +540,21 @@ export class Model extends EventEmitter {
     return song ? song.playParams?.catalogId ?? song.playParams?.id ?? `${song.name}/${song.artistName}` : "";
   }
 
+  // The player can take seconds to report a song's favourite mark, or never report it, so Peel
+  // asks Apple itself as soon as a song starts. A failed lookup is tried again on the next refresh.
+  private favouriteLookup = "";
+  private async lookUpFavourite() {
+    const key = this.songKey(), song = this.playback.nowPlaying;
+    if (!key || !song || this.favourite !== undefined || this.favouriteLookup === key) return;
+    this.favouriteLookup = key;
+    const id = song.playParams?.id ?? key;
+    const catalogId = song.playParams?.catalogId ?? (/^\d+$/.test(id) ? id : undefined);
+    try {
+      const loved = await this.library.ratings([{ id, catalogId, type: "songs", name: song.name ?? "", artist: song.artistName ?? "", album: song.albumName ?? "", duration: 0 }]);
+      if (this.songKey() === key && this.loved?.key !== key) { this.loved = { key, value: loved.has(id) }; this.changed(); }
+    } catch { if (this.favouriteLookup === key) this.favouriteLookup = ""; }
+  }
+
   async toggleFavourite() {
     const key = this.songKey();
     if (!key || !this.connected) return;
@@ -561,6 +580,24 @@ export class Model extends EventEmitter {
     this.lovedRevision++;
     if (saved !== value) this.status = "Apple Music did not save the favourite. Try again.";
     else this.status = value ? "Added to Favourite Songs" : "Removed from Favourite Songs";
+    this.changed();
+  }
+
+  // Undefined until Apple has said whether the open album is a favourite.
+  get albumFavourite(): boolean | undefined {
+    return this.detail?.type.includes("albums") ? this.albumsLoved.get(this.detail.id) : undefined;
+  }
+
+  async toggleAlbumFavourite() {
+    const album = this.detail;
+    if (!album?.type.includes("albums")) return;
+    const current = this.albumFavourite;
+    if (current === undefined) { this.status = "Still checking whether this album is a favourite."; this.changed(); return; }
+    this.albumsLoved.set(album.id, !current); this.changed();
+    try {
+      await this.library.favouriteAlbum(album, !current);
+      this.status = current ? `Removed ${album.name} from favourite albums` : `Added ${album.name} to favourite albums`;
+    } catch (error) { this.albumsLoved.set(album.id, current); this.fail(error); return; }
     this.changed();
   }
 

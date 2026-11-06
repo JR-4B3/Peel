@@ -12,7 +12,7 @@ export function artworkUrl(template: string, pixels = size) {
   return template.replace("{w}x{h}", `${pixels}x${pixels}`).replace("{f}", "jpg").replace(/\/\d+x\d+(\w*)\.(png|jpe?g|webp)$/, `/${pixels}x${pixels}$1.jpg`);
 }
 
-async function fetchCover(url: string, dir: string) {
+async function fetchCover(url: string, dir = join(cacheDir, "artwork")) {
   const file = join(dir, `${new Bun.CryptoHasher("sha1").update(url).digest("hex")}.jpg`);
   let bytes: Uint8Array;
   try { bytes = new Uint8Array(await readFile(file)); }
@@ -39,4 +39,15 @@ export function cover(template?: string, dir = join(cacheDir, "artwork")): Promi
     void evicted.then(value => value?.dispose());
   }
   return image;
+}
+
+// Round up to whole hundreds so the disk cache keeps few copies of one cover.
+export function largeCoverSize(pixels: number) {
+  return Math.min(3000, Math.max(600, Math.ceil(pixels / 100) * 100));
+}
+
+// The enlarged cover skips the shared cache. Its caller owns and disposes the image.
+export function largeCover(template: string, pixels: number, dir?: string) {
+  const side = largeCoverSize(pixels);
+  return fetchCover(artworkUrl(template, side), dir).catch(() => undefined);
 }

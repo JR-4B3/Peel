@@ -1,4 +1,5 @@
 import { afterEach, describe, expect, test } from "bun:test";
+import { ImageRenderable } from "@opentui/core";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { AppleMusic } from "../src/apple";
 import { Cider } from "../src/cider";
@@ -559,6 +560,120 @@ test("filtering loads the rest of the list first", async () => {
     await waitFor(() => app.model.status === "Removed from Favourite Songs");
     expect(app.calls.filter(call => call.path === "/library/now-playing/rating").at(-1)?.method).toBe("DELETE");
     expect(app.model.favourite).toBe(false);
+  });
+
+  test("a song the player has not rated yet is looked up with Apple right away", async () => {
+    const api = fixture({ silentRating: true }); cleanup.push(() => api.server.stop(true));
+    api.playback.nowPlaying = { name: "Selected song", artistName: "Skrillex", playParams: { id: "i.selected" } };
+    const model = new Model(api.library, api.player);
+    await model.start(); await model.refresh();
+    await waitFor(() => model.favourite === true);
+    api.playback.nowPlaying = { name: "Soma", artistName: "Skrillex", playParams: { id: "i.other" } };
+    await model.refresh();
+    await waitFor(() => model.favourite === false);
+  });
+
+  test("an open album's heart favourites it through its catalog album, and l removes it", async () => {
+    const app = await setup(120, 36, "albums");
+    await click(app, "grid:tile:albums:0");
+    await waitFor(() => app.model.albumFavourite === false); await app.flush();
+    expect(app.captureCharFrame()).toContain("Favourite  l");
+    await click(app, "favourite-album");
+    await waitFor(() => app.model.status === "Added SOMA to favourite albums");
+    expect([...app.lovedAlbums]).toEqual(["1440"]);
+    await app.flush(); expect((app.renderer.root.findDescendantById("favourite-album") as any)?.plainText).toContain(icon.heart);
+    app.mockInput.pressKey("l");
+    await waitFor(() => app.model.status === "Removed SOMA from favourite albums");
+    expect(app.lovedAlbums.size).toBe(0);
+    expect(app.model.albumFavourite).toBe(false);
+  });
+});
+
+describe("the enlarged cover", () => {
+  // A valid 2 by 2 PNG exercises decoding and image ownership.
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGOUi1rAwMDAxMDAwMDAAAAMyAEcmM2rsQAAAABJRU5ErkJggg==", "base64");
+
+  test("growing the window requests a sharper cover and restores the full caption", async () => {
+    const requested: string[] = [];
+    const art = Bun.serve({ port: 0, fetch: request => { requested.push(new URL(request.url).pathname); return new Response(png); } });
+    cleanup.push(() => art.stop(true));
+    const app = await setup(60, 36, "albums");
+    Object.defineProperty(app.renderer, "resolution", { get: () => ({ width: app.renderer.terminalWidth * 10, height: app.renderer.terminalHeight * 20 }) });
+    await click(app, "grid:tile:albums:0");
+    await waitFor(() => app.model.detail?.id === "l.soma");
+    const name = "An album with a title longer than the narrow window can display in one line";
+    app.model.detail!.name = name;
+    app.model.detail!.artwork = `http://127.0.0.1:${art.port}/resize/{w}x{h}bb.{f}`;
+    app.model.changed(); await app.flush();
+    await click(app, "collection-cover"); await app.flush();
+    const image = app.renderer.root.findDescendantById("cover-view-image") as ImageRenderable;
+    await waitFor(() => requested.includes("/resize/600x600bb.jpg") && image.image?.width === 2 && !image.loading);
+    expect(image.loadError).toBeNull();
+    expect(app.captureCharFrame()).not.toContain(name);
+    app.resize(120, 60); await app.flush();
+    await waitFor(() => requested.includes("/resize/1100x1100bb.jpg"));
+    await waitFor(() => !image.loading);
+    expect(image.image?.width).toBe(2);
+    expect(app.captureCharFrame()).toContain(name);
+  });
+
+  test("a slower smaller download cannot replace the sharper image after resizing", async () => {
+    let release!: () => void;
+    const pending = new Promise<void>(resolve => { release = resolve; });
+    let smallerFinished = false;
+    const art = Bun.serve({ port: 0, async fetch(request) {
+      if (new URL(request.url).pathname.includes("600x600")) { await pending; smallerFinished = true; }
+      return new Response(png);
+    } });
+    cleanup.push(() => { release(); art.stop(true); });
+    const app = await setup(60, 36);
+    Object.defineProperty(app.renderer, "resolution", { get: () => ({ width: app.renderer.terminalWidth * 10, height: app.renderer.terminalHeight * 20 }) });
+    app.model.playback.nowPlaying!.artwork = { url: `http://127.0.0.1:${art.port}/slow/{w}x{h}bb.{f}` };
+    app.model.changed(); await app.flush();
+    const listeners = app.renderer.listenerCount("resize");
+    await click(app, "player-cover"); await app.flush();
+    const image = app.renderer.root.findDescendantById("cover-view-image") as ImageRenderable;
+    await waitFor(() => image.image?.width === 2);
+    const small = image.source;
+    app.resize(120, 60); await app.flush();
+    await waitFor(() => image.source !== small && !image.loading);
+    const sharp = image.source;
+    release(); await waitFor(() => smallerFinished); await Bun.sleep(20); await app.flush();
+    expect(image.source).toBe(sharp);
+    expect(image.image?.width).toBe(2);
+    const before = app.calls.filter(call => call.path === "/playback/toggle").length;
+    app.mockInput.pressKey(" ");
+    await waitFor(() => app.calls.filter(call => call.path === "/playback/toggle").length === before + 1);
+    expect(app.renderer.root.findDescendantById("cover-view")).toBeDefined();
+    await click(app, "cover-view-image"); await app.flush();
+    expect(app.renderer.root.findDescendantById("cover-view")).toBeUndefined();
+    expect(app.renderer.listenerCount("resize")).toBe(listeners);
+  });
+
+  test("clicking an album's cover fills the window with it at the window's pixel size, and Escape closes it", async () => {
+    const requested: string[] = [];
+    const art = Bun.serve({ port: 0, fetch: request => { requested.push(new URL(request.url).pathname); return new Response("", { status: 404 }); } });
+    cleanup.push(() => art.stop(true));
+    const app = await setup(120, 36, "albums");
+    await click(app, "grid:tile:albums:0");
+    await waitFor(() => app.model.detail?.id === "l.soma" && app.model.items.length === 3);
+    app.model.detail!.artwork = `http://127.0.0.1:${art.port}/cover/{w}x{h}bb.{f}`;
+    app.model.changed(); await app.flush();
+    await click(app, "collection-cover"); await app.flush();
+    let frame = app.captureCharFrame();
+    expect(frame).toContain("Esc or click to close"); expect(frame).toContain("SOMA"); expect(frame).not.toContain("Search Apple Music");
+    // The small cached cover first, then one sized to the window, rounded up to whole hundreds.
+    await waitFor(() => requested.length >= 2);
+    expect(requested).toContain("/cover/240x240bb.jpg");
+    expect(requested.some(path => /^\/cover\/([6-9]|[1-3]\d)00x\d+bb\.jpg$/.test(path))).toBe(true);
+    app.mockInput.pressEscape();
+    await waitFor(() => !app.renderer.root.findDescendantById("cover-view")); await app.flush();
+    frame = app.captureCharFrame();
+    expect(frame).toContain("Search Apple Music"); expect(app.model.detail?.id).toBe("l.soma");
+    app.mockInput.pressKey("c"); await app.flush();
+    expect(app.captureCharFrame()).toContain("Esc or click to close");
+    await click(app, "cover-view"); await app.flush();
+    expect(app.captureCharFrame()).not.toContain("Esc or click to close");
   });
 });
 

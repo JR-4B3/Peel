@@ -84,7 +84,9 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Open an artist | | The artist name on an album page or in the player |
 | Jump through a long song list | Page Up / Page Down, Home / End | Scroll, three songs at a time |
 | Back from an album, playlist, or artist | Escape or Backspace | Back |
+| Show the cover large, the open album's or else the playing song's | `c`. Escape or `c` closes it | The cover beside an album's name or in the player |
 | Favourite the current song | `f` | Heart |
+| Favourite the open album | `l` | Favourite, beside Play |
 | Add the highlighted song, album, or playlist to the queue, after the songs already added | `e` | |
 | Play the highlighted song, album, or playlist next | Shift+E | |
 | Show the queue | `u` | Queue in the sidebar |
@@ -111,6 +113,8 @@ Left and Right move between covers on Home, Albums, Artists, and artist pages, a
 Apple Music does not report how often you played a song, so an artist page shows Apple's top songs for that artist, its most played songs across Apple Music. Selecting one plays that song. Search shows up to three matching artists above the songs and albums.
 
 The heart sets Apple Music's favourite rating, then reads the stored rating back before it changes. It shows filled or empty only once Apple has answered. Until then `f` does nothing, so an unknown state cannot remove a favourite and move it in Favourite Songs. Ratings belong to catalog songs, so library songs are rated through their catalog entry.
+
+An album page has its own heart, beside Play. Library albums are rated through their catalog album, and albums only in your library are rated as library albums. Rating an album needs Peel's own Apple Music sign-in, because Cider's proxy only reads.
 
 The filter field takes words and release years together, for example `kanye 2004-2010`. Every word must appear in the title, artist, or album, ignoring case and accents. Years can be a range (`2015-2020`), a bound (`>2018`, `<2000`, `>=2018`, `2018+`), or a decade (`90s`, `1990s`). A bare year such as `2016` matches that release year or the number in a title.
 

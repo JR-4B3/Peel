@@ -49,6 +49,8 @@ export function webPlayerToken(refresh = false, dir = cacheDir): Promise<string>
 
 export interface AppleOptions {
   base?: string;
+  // Lyrics come from the web player's own host; api.music.apple.com rejects the lyrics endpoint.
+  lyricsBase?: string;
   developerToken?: (refresh: boolean) => Promise<string>;
   storefront?: string;
   // Asks the playback engine for a current Music User Token after Apple rejects the saved one.
@@ -59,20 +61,23 @@ export interface AppleOptions {
 
 export class AppleMusic implements Library {
   readonly base: string;
+  readonly lyricsBase: string;
   private developerToken: (refresh: boolean) => Promise<string>;
   private storefront?: Promise<string>;
   private renewing?: Promise<string | undefined>;
 
   constructor(private userToken: string, private options: AppleOptions = {}) {
     this.base = options.base ?? process.env.APPLE_MUSIC_API_BASE ?? "https://api.music.apple.com";
+    this.lyricsBase = options.lyricsBase ?? (options.base ? options.base : process.env.APPLE_MUSIC_LYRICS_BASE ?? "https://amp-api.music.apple.com");
     this.developerToken = options.developerToken ?? (refresh => webPlayerToken(refresh));
     if (options.storefront) this.storefront = Promise.resolve(options.storefront);
   }
 
-  private async fetch(path: string, developer: string) {
+  private async fetch(path: string, developer: string, init: RequestInit = {}, base = this.base) {
     try {
-      return await fetch(`${this.base.replace(/\/$/, "")}/${path}`, {
-        headers: { Authorization: `Bearer ${developer}`, "Music-User-Token": this.userToken, Origin: "https://music.apple.com" },
+      return await fetch(`${base.replace(/\/$/, "")}/${path}`, {
+        ...init,
+        headers: { Authorization: `Bearer ${developer}`, "Music-User-Token": this.userToken, Origin: "https://music.apple.com", ...init.body ? { "Content-Type": "application/json" } : {} },
         signal: AbortSignal.timeout(35000),
       });
     } catch { throw new Error("Cannot reach Apple Music. Check the network connection."); }
@@ -80,29 +85,32 @@ export class AppleMusic implements Library {
 
   // Apple answers 401 for a stale developer token and 403 for a stale user token.
   // Each is renewed once per request, so a lasting rejection cannot loop.
-  async request(path: string): Promise<Resource> {
+  // Cider's proxy only reads, so changes such as ratings need Peel's own sign-in.
+  async request(path: string, init: RequestInit = {}, base = this.base): Promise<Resource> {
+    const write = !!init.method && init.method !== "GET";
     this.userToken ||= await this.renewUser() ?? "";
     if (!this.userToken) {
-      if (this.options.proxy) return this.options.proxy(path);
+      if (this.options.proxy && !write) return this.options.proxy(path);
       throw new Error("Peel has no Apple Music sign-in. Run peel --connect.");
     }
     // Cider's proxy fills in the storefront itself, so the fallback keeps the placeholder.
     const original = path;
     path = path.replace("$STOREFRONT", await this.storefrontId(path));
-    let response = await this.fetch(path, await this.developerToken(false));
-    if (response.status === 401) response = await this.fetch(path, await this.developerToken(true));
+    let response = await this.fetch(path, await this.developerToken(false), init, base);
+    if (response.status === 401) response = await this.fetch(path, await this.developerToken(true), init, base);
     if (response.status === 401 || response.status === 403) {
       const token = await this.renewUser();
-      if (token && token !== this.userToken) { this.userToken = token; response = await this.fetch(path, await this.developerToken(false)); }
+      if (token && token !== this.userToken) { this.userToken = token; response = await this.fetch(path, await this.developerToken(false), init, base); }
     }
     if (response.status === 401 || response.status === 403) {
       // Later requests skip the rejected sign-in until Cider provides a new one.
-      if (this.options.proxy) { this.userToken = ""; return this.options.proxy(original); }
+      if (this.options.proxy) { this.userToken = ""; if (!write) return this.options.proxy(original); }
       throw new Error("Apple Music rejected Peel's sign-in. Run peel --connect.");
     }
     if (response.status === 404) return { data: [] };
     if (!response.ok) throw new Error(`Apple Music returned HTTP ${response.status}.`);
-    return await response.json();
+    // A deleted rating has no body.
+    return response.status === 204 ? {} : await response.json();
   }
 
   // Concurrent rejections share one renewal, so the saved sign-in is written once.
@@ -120,6 +128,13 @@ export class AppleMusic implements Library {
     });
     // A failed lookup must be retried on the next request.
     return this.storefront.catch(error => { this.storefront = undefined; throw error; });
+  }
+
+  // The time-synced lyrics of a catalog song as TTML, or undefined when Apple has none.
+  async lyrics(catalogId: string): Promise<string | undefined> {
+    const response = await this.request(`v1/catalog/$STOREFRONT/songs/${encodeURIComponent(catalogId)}/lyrics`, {}, this.lyricsBase);
+    const ttml = response.data?.[0]?.attributes?.ttml;
+    return typeof ttml === "string" ? ttml : undefined;
   }
 
   async playlists(): Promise<Media[]> {
@@ -198,6 +213,34 @@ export class AppleMusic implements Library {
       ask("library-songs", songs.filter(item => !item.catalogId && item.id.startsWith("i.")).map(item => item.id)),
     ]);
     return new Set(songs.filter(item => item.catalogId ? catalog.has(item.catalogId) : library.has(item.id)).map(item => item.id));
+  }
+
+  // Apple keeps an album's favourite mark on the catalog album, which library albums reach through
+  // their catalog link. An album only in the library is rated as a library album.
+  private albumRatings = new Map<string, Promise<string>>();
+  private albumRatingPath(item: Media): Promise<string> {
+    if (item.catalogId) return Promise.resolve(`v1/me/ratings/albums/${encodeURIComponent(item.catalogId)}`);
+    const library = `v1/me/ratings/library-albums/${encodeURIComponent(item.id)}`;
+    let path = this.albumRatings.get(item.id);
+    if (!path) {
+      path = this.request(`v1/me/library/albums/${encodeURIComponent(item.id)}/catalog`)
+        .then(response => { const id = response.data?.[0]?.id; return id ? `v1/me/ratings/albums/${encodeURIComponent(String(id))}` : library; });
+      // A failed lookup must be retried next time.
+      this.albumRatings.set(item.id, path.catch(error => { this.albumRatings.delete(item.id); throw error; }));
+    }
+    return path;
+  }
+
+  // Asked by id, Apple lists only rated albums, so an unrated album is an empty list.
+  async albumFavourite(item: Media): Promise<boolean> {
+    const path = await this.albumRatingPath(item), at = path.lastIndexOf("/");
+    const response = await this.request(`${path.slice(0, at)}?ids=${path.slice(at + 1)}`);
+    return response.data?.[0]?.attributes?.value === 1;
+  }
+
+  async favouriteAlbum(item: Media, value: boolean) {
+    const path = await this.albumRatingPath(item);
+    await this.request(path, value ? { method: "PUT", body: JSON.stringify({ type: "rating", attributes: { value: 1 } }) } : { method: "DELETE" });
   }
 
   // Library artists carry their catalog artist, which has the photo and the artist page.
