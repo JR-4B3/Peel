@@ -477,6 +477,7 @@ static ssize_t out_write(struct audio_stream_out *stream, const void* buffer,
         size_t bytes)
 {
     int ret;
+    bool failed = false;
     struct alsa_stream_out *out = (struct alsa_stream_out *)stream;
     struct alsa_audio_device *adev = out->dev;
     size_t frame_size = audio_stream_out_frame_size(stream);
@@ -499,19 +500,27 @@ static ssize_t out_write(struct audio_stream_out *stream, const void* buffer,
 
     pthread_mutex_unlock(&adev->lock);
 
-    /* Peel: write every frame. A short write used to drop the rest of the buffer silently. */
+    /* Peel: write every frame. A short write used to drop the rest of the buffer silently.
+     * A device that accepts nothing for about a second, or fails in a way snd_pcm_recover
+     * cannot fix, counts as failed. A failed wait is an error like a failed write. */
     {
         const char *data = buffer;
         snd_pcm_uframes_t left = out_frames;
-        int recoveries = 0;
+        int recoveries = 0, stalls = 0;
         ret = 0;
         while (left > 0) {
             snd_pcm_sframes_t written = snd_pcm_writei(out->pcm, data, left);
-            if (written == -EAGAIN) { snd_pcm_wait(out->pcm, 100); continue; }
+            if (written == -EAGAIN || written == 0) {
+                int ready = snd_pcm_wait(out->pcm, 100);
+                if (ready < 0) written = ready;
+                else if (++stalls > 10) { ret = -ETIMEDOUT; failed = true; break; }
+                else continue;
+            }
             if (written < 0) {
-                if (++recoveries > 3 || snd_pcm_recover(out->pcm, (int)written, 1) < 0) { ret = (int)written; break; }
+                if (++recoveries > 3 || snd_pcm_recover(out->pcm, (int)written, 1) < 0) { ret = (int)written; failed = true; break; }
                 continue;
             }
+            stalls = 0;
             out->written += written;
             left -= written;
             data += written * frame_size;
@@ -519,6 +528,13 @@ static ssize_t out_write(struct audio_stream_out *stream, const void* buffer,
     }
 exit:
     pthread_mutex_unlock(&out->lock);
+
+    /* A failed stream is closed, so the next write opens the device again instead of retrying
+     * a dead one. out_standby takes the device lock before the stream lock, like every caller. */
+    if (failed) {
+        ALOGE("out_write: closing the output after error %d", ret);
+        out_standby(&out->stream.common);
+    }
 
     if (ret < 0) {
         usleep((int64_t)bytes * 1000000 / audio_stream_out_frame_size(stream) /

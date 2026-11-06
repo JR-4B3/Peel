@@ -57,10 +57,12 @@ The helper doesn't update itself. After changing it, run `sudo install.sh "$USER
 | properties | Release build tags are set and only the 64-bit zygote runs |
 | bit-perfect-android | A random 24-bit signal played at 192 kHz through Android arrives in PipeWire sample-for-sample identical |
 | audio-driver-rate | The audio driver opened a 192 kHz float stream |
-| apple-music-app | Apple Music is installed, signed in, set to Hi-Res Lossless, and not blocking a "rooted" device |
+| apple-music-app | Apple Music is installed, signed in, set to Hi-Res Lossless, opens, its screen can be read, and it is not blocking a "rooted" device |
 | apple-music-hires-playback | Apple Music decodes ALAC at 192 kHz and every sample reaching PipeWire is an exact 24-bit value |
 
 The audio tests play into a temporary silent sink and put Waydroid's streams back on their own sinks afterwards. The test signal starts with silence, and the default output is muted for the moment Apple Music starts, so nothing is heard. The last test uses the Apple account's single stream, so it is skipped while music is playing. It shows that Apple's audio reaches PipeWire at 192 kHz with full 24-bit samples; only the test signal is compared sample by sample, because Apple's decoded audio has no reference to compare against.
+
+`hires/tests/offline/run.sh` tests parts of the pipeline without Waydroid, Android or audio hardware: the audio driver's write function against a simulated ALSA device, and the health checks against a simulated adb that fails in different ways. It needs bash, python3 and a C compiler, and `bun test` runs it too.
 
 ## Updates
 

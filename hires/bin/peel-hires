@@ -295,6 +295,8 @@ cmd_signin() {
 # --- Tests -----------------------------------------------------------------------------------
 
 TESTS=()
+# check runs each test as the left side of ||, where bash ignores set -e inside the test. A
+# test must therefore check every command it depends on itself, or a failure passes silently.
 check() {  # check <name> <command...>: runs a test and records pass/fail with its output
   local name=$1; shift; local out rc=0
   out=$("$@" 2>&1) || rc=$?
@@ -308,6 +310,8 @@ t_props() {
   local p; p=$(root probe)
   grep -q '^build_tags=release-keys$' <<<"$p" || { echo "build tags: $(grep build_tags <<<"$p")"; return 1; }
   grep -q '^zygote=zygote64$' <<<"$p" || { echo "zygote: $(grep zygote <<<"$p")"; return 1; }
+  # pidof fails both when no 32-bit zygote runs and when adb fails, so adb is checked first.
+  A shell true >/dev/null 2>&1 || { echo "adb does not reach Android"; return 1; }
   ! A shell pidof zygote >/dev/null 2>&1 || { echo "the 32-bit zygote is running"; return 1; }
 }
 t_driver() {
@@ -322,7 +326,8 @@ t_bitperfect() {
     "$CACHE/hal-work/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --target=x86_64-linux-android33 -O2 \
       "$HIRES/tests/aaplay.c" -laaudio -o "$bin" || return 1
   fi
-  A push "$bin" /data/local/tmp/aaplay >/dev/null && A push "$sig" /data/local/tmp/signal.f32 >/dev/null
+  A push "$bin" /data/local/tmp/aaplay >/dev/null && A push "$sig" /data/local/tmp/signal.f32 >/dev/null ||
+    { echo "could not copy the test player and signal into Android"; return 1; }
   python3 "$HIRES/tests/capture.py" --rate "$TEST_RATE" --adb "$(adb_target)" --signal "$sig"
 }
 t_apple_app() {
@@ -331,9 +336,14 @@ t_apple_app() {
   grep -q '^apple_subscription=1$' <<<"$p" || { echo "Apple Music is not signed in (run: peel-hires signin)"; return 1; }
   grep -q '^apple_quality_wifi=HIGH_RES_LOSSLESS$' <<<"$p" || { echo "Hi-Res Lossless is not selected in Apple Music"; return 1; }
   grep -q "^fake_wifi=$APPLE\$" <<<"$p" || { echo "fake Wi-Fi is not set for Apple Music"; return 1; }
-  A shell am start -W -n "$APPLE/.activity.MainActivity" >/dev/null 2>&1 || A shell monkey -p "$APPLE" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+  A shell am start -W -n "$APPLE/.activity.MainActivity" >/dev/null 2>&1 || A shell monkey -p "$APPLE" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 ||
+    { echo "could not open Apple Music"; return 1; }
   sleep 6
-  A shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; local ui; ui=$(A shell cat /sdcard/ui.xml 2>/dev/null)
+  # The rooted-device block is found by its text on screen, so a screen that could not be read
+  # fails the test rather than passing it.
+  A shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1 || { echo "could not capture Apple Music's screen"; return 1; }
+  local ui; ui=$(A shell cat /sdcard/ui.xml 2>/dev/null) || { echo "could not read Apple Music's screen"; return 1; }
+  grep -q '<hierarchy' <<<"$ui" || { echo "Apple Music's screen capture is empty"; return 1; }
   ! grep -q "Unrooted Devices" <<<"$ui" || { echo "Apple Music shows its rooted-device block"; return 1; }
 }
 t_apple_play() {
