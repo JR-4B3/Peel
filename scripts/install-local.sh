@@ -51,8 +51,10 @@ launcher=$(cat "$(dirname "$0")/../Resources/peel-launcher")
 if [[ -d /Applications/Ghostty.app || -d "$HOME/Applications/Ghostty.app" ]]; then
   # With -e, Ghostty asks for confirmation each time another app passes it a command. --command does not.
   # Ghostty runs --command through a shell, so the path is single-quoted for it. A quote in the
-  # path becomes '\'' and spaces stay part of the path.
-  quoted="'${launcher//\'/\'\\\'\'}'"
+  # path becomes '\'' and spaces stay part of the path. sed does the replacement, because macOS's
+  # bash 3.2 keeps quotes in a ${var//...} replacement and would break the command.
+  escaped=$(printf '%s' "$launcher" | sed "s/'/'\\\\''/g")
+  quoted="'$escaped'"
   exec open -na Ghostty --args --title=Peel --command="exec $quoted"
 fi
 exec osascript - "$launcher" <<'SCRIPT'

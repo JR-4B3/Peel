@@ -76,7 +76,8 @@ export async function unzip(archive: Uint8Array<ArrayBuffer>, target: string) {
     await folders(target, parts.slice(0, -1), name);
     if ((mode & 0o170000) === 0o120000) {
       const link = new TextDecoder().decode(data);
-      if (!link || link.startsWith("/") || link.split("/").includes("..")) throw unsafe(`${name} -> ${link}`);
+      // A Windows path such as C:\ or \\server counts as absolute too.
+      if (!link || /^([\\/]|[A-Za-z]:)/.test(link) || link.split(/[\\/]/).includes("..")) throw unsafe(`${name} -> ${link}`);
       await symlink(link, path);
     }
     else await writeFile(path, data, { mode: mode & 0o777 || 0o644, flag: "wx" });
@@ -88,7 +89,9 @@ export async function unzip(archive: Uint8Array<ArrayBuffer>, target: string) {
 async function extract(archive: Uint8Array<ArrayBuffer>, file: string, target: string) {
   if (process.platform === "linux") return unzip(archive, target);
   await writeFile(file, archive);
-  const result = await command(process.platform === "win32" ? ["tar", "-xf", file, "-C", target] : ["ditto", "-x", "-k", file, target]);
+  // The system's tar is named in full: Git's GNU tar, often first on PATH, cannot read zip files.
+  const tar = join(process.env.SystemRoot ?? "C:\\Windows", "System32", "tar.exe");
+  const result = await command(process.platform === "win32" ? [tar, "-xf", file, "-C", target] : ["ditto", "-x", "-k", file, target]);
   await rm(file, { force: true });
   if (result.code) throw new Error(`Could not unpack the playback engine: ${result.error.trim()}`);
 }

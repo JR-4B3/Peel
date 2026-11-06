@@ -45,6 +45,8 @@ test("#5 a symlink that points out of the engine folder is refused, and nothing 
   await mkdir(target); await mkdir(outside);
   await expect(unzip(zip([{ name: "escape", link: "../outside" }, { name: "escape/result.txt", data: "marker" }]), target)).rejects.toThrow("unsafe");
   await expect(unzip(zip([{ name: "absolute", link: outside }]), join(dir, "second"))).rejects.toThrow("unsafe");
+  await expect(unzip(zip([{ name: "drive", link: "C:\\Users" }]), join(dir, "third"))).rejects.toThrow("unsafe");
+  await expect(unzip(zip([{ name: "back", link: "..\\outside" }]), join(dir, "fourth"))).rejects.toThrow("unsafe");
   expect(existsSync(join(outside, "result.txt"))).toBe(false);
 });
 
@@ -171,10 +173,11 @@ test("#12 a damaged checksum list or a running publication stops the upload", as
   expect(busy.manifest()).toBe(mac);
 });
 
-test("#14 the Mac launcher's Ghostty command keeps a home path with spaces and quotes whole", async () => {
+// The launcher is for macOS. Windows has no /bin/sh to run it.
+test.skipIf(process.platform === "win32")("#14 the Mac launcher's Ghostty command keeps a home path with spaces and quotes whole", async () => {
   const script = await readFile(new URL("../scripts/install-local.sh", import.meta.url), "utf8");
-  const quoting = script.match(/^\s*(quoted=.*)$/m)?.[1];
-  expect(quoting).toBeDefined();
+  const quoting = [...script.matchAll(/^\s*((?:escaped|quoted)=.*)$/gm)].map(match => match[1]).join("\n");
+  expect(quoting).toContain("quoted=");
   const dir = await temporary(), home = join(dir, "Example User's Mac", "bin");
   await mkdir(home, { recursive: true });
   const launcher = join(home, "peel");
