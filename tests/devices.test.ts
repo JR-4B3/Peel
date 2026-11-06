@@ -412,3 +412,16 @@ test("paired devices learn each other's addresses, and a device is tried at each
   for (let count = 0; count < 150 && !laptop.network.online(main.network.id); count++) await Bun.sleep(100);
   expect(laptop.network.online(main.network.id)).toBe(true);
 }, 20000);
+
+test("a device found on this network replaces a connection made another way", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  const sessions = () => [...((mac.network as any).sessions.get(main.network.id) ?? [])].filter((session: any) => !session.closed);
+  expect(sessions().map((session: any) => session.peer.address)).toEqual(["127.0.0.1"]);
+  // main announces itself on this network at another address, as it would after Tailscale.
+  (mac.network as any).connecting.clear();
+  (mac.network as any).connect(main.network.id, "localhost", main.network.port, true);
+  await waitFor(() => sessions().length === 1 && sessions()[0].peer.address === "localhost", "the switch");
+  expect(mac.network.online(main.network.id)).toBe(true);
+  await mac.network.request(main.network.id, "/call", { method: "pause", args: [] });
+});

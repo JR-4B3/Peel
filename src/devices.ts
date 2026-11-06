@@ -385,8 +385,10 @@ export class DeviceNetwork extends EventEmitter {
       // Answering a new device directly lets it list this one at once.
       if (first) { socket.send(this.announcement(), port, from.address, () => {}); this.changed(); }
       const shared = keys.some((id: string) => this.groupKeys.some(key => key.id === id));
-      // A device is remembered only once its session proves it holds a shared key.
-      if (shared) this.connect(value.id, from.address, value.port);
+      // A device is remembered only once its session proves it holds a shared key. A device
+      // reached another way, such as over Tailscale, is reached on this network instead, which
+      // is usually faster and does not depend on another service.
+      if (shared) this.connect(value.id, from.address, value.port, true);
     });
     socket.bind(port, () => { bound = true; try { socket.setBroadcast(true); } catch {} this.announce(); });
   }
@@ -565,8 +567,10 @@ export class DeviceNetwork extends EventEmitter {
   }
 
   // The connecting side of a session, to a paired device.
-  private connect(id: string, address: string, port: number) {
-    if (this.stopped || id === this.id || this.online(id) || Date.now() - (this.connecting.get(id) ?? 0) < 5000) return;
+  private connect(id: string, address: string, port: number, local = false) {
+    const sessions = [...this.sessions.get(id) ?? []].filter(session => !session.closed);
+    if (this.stopped || id === this.id || Date.now() - (this.connecting.get(id) ?? 0) < 5000) return;
+    if (sessions.length && (!local || sessions.some(session => session.peer.address === address))) return;
     // Few connections are on their way at once, however many devices announce themselves.
     if (this.clients.size >= 8) return;
     this.attempts.set(id, Date.now());
@@ -598,6 +602,8 @@ export class DeviceNetwork extends EventEmitter {
       this.connecting.delete(id);
       this.remember({ id, name: server.name, address, port });
       this.register(opened);
+      // The connection on this network replaces one made another way.
+      if (local) for (const other of sessions) if (!other.closed && other.peer.address !== address) other.end();
       void this.sync(opened).catch(() => {});
     };
     socket.onclose = () => { clearTimeout(timer); this.clients.delete(socket); session?.end(); };

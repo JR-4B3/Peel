@@ -27,7 +27,9 @@ Announcements are not authenticated. Peel remembers a device only after its sess
 
 ## Sessions
 
-Paired devices connect over a WebSocket on TCP port 10770. The handshake mixes a shared group key with a fresh X25519 exchange. Each side proves it holds the key, and a device without it learns nothing. Every message after that is AES-256-GCM, numbered in each direction, so a changed, replayed, or reordered message ends the session. Each Peel connects to every paired device it hears. Paired devices also tell each other their IPv4 addresses on every network, Tailscale's included, when they connect and every two seconds after. A paired device that is not connected is tried at each of its addresses in turn, every few seconds, so devices away from home reconnect over Tailscale.
+Paired devices connect over a WebSocket on TCP port 10770. The handshake mixes a shared group key with a fresh X25519 exchange. Each side proves it holds the key, and a device without it learns nothing. Every message after that is AES-256-GCM, numbered in each direction, so a changed, replayed, or reordered message ends the session. Each Peel connects to every paired device it hears. Paired devices also tell each other their IPv4 addresses on every network, Tailscale's included, when they connect and every two seconds after. A paired device that is not connected is tried at each of its addresses in turn, every few seconds, so devices away from home reconnect over Tailscale. When a device connected another way announces itself on the same network, Peel connects to it there and closes the other connection. You never choose how a device is reached.
+
+The popups blank the cells under them without painting a background, so the terminal's background and translucency show through them as in the rest of Peel.
 
 Another device can read this computer's engine state and send it playback commands: play, pause, skip, seek, volume, shuffle, repeat, queue edits, ratings, and moving a queue. It cannot read the Apple sign-in, change the stream quality, or stop the engine. Engine requests from another device start this computer's engine when it is not running, as a song chosen here would.
 
@@ -59,6 +61,6 @@ These limits apply:
 
 `peel --remote <ssh-host>` still controls an SSH host's player without moving the music. Install the same Peel version on both computers, and check that `ssh <host>` works with a key. The host needs a running desktop session for Electron.
 
-The host's music keeps playing while a controller or a Peel on the host is open. Once the last of them closes, the host's engine quits and the music stops, as it does for devices. Settings shows "Control over SSH" once a host is added, and the devices popup lists SSH hosts below the devices. Choosing a device in the popup ends SSH control. `peel --local` returns to this computer. `peel --stop-host` on the host stops its engine at once.
+The host's music keeps playing while a controller or a Peel on the host is open. Once the last of them closes, the host's engine quits and the music stops, as it does for devices. Settings shows "Control over SSH" once a host is added. The devices popup does not list SSH hosts, so each computer appears there once. Choosing a device in the popup ends SSH control. `peel --local` returns to this computer. `peel --stop-host` on the host stops its engine at once.
 
 The SSH helper starts through `~/.local/bin/peel`, which the Linux and macOS installers create. Windows can control a host through its OpenSSH client. Hosting on Windows needs a compatible remote launcher and is not tested.

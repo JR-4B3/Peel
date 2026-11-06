@@ -1,4 +1,4 @@
-import { BoxRenderable, TextRenderable, InputRenderable, ImageRenderable, StyledText, t, fg, bold, type CliRenderer, type KeyEvent, type MouseEvent, type RenderContext } from "@opentui/core";
+import { BoxRenderable, TextRenderable, InputRenderable, ImageRenderable, RGBA, StyledText, t, fg, bold, type CliRenderer, type KeyEvent, type MouseEvent, type OptimizedBuffer, type RenderContext } from "@opentui/core";
 import { shortVersion } from "./update";
 import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
@@ -52,6 +52,18 @@ class Cover extends BoxRenderable {
   setSize(width: number, height: number) {
     this.width = width; this.height = height;
     if (this.image) { this.image.width = width; this.image.height = height; }
+  }
+}
+
+// A box over other content that blanks what is under it without painting a background, so the
+// terminal's own background and translucency show through, as everywhere else in Peel.
+const unpainted = RGBA.fromValues(0, 0, 0, 0);
+class ClearBox extends BoxRenderable {
+  protected renderSelf(buffer: OptimizedBuffer) {
+    const ink = RGBA.fromHex(colour.text);
+    for (let y = Math.max(0, this.y); y < Math.min(buffer.height, this.y + this.height); y++)
+      for (let x = Math.max(0, this.x); x < Math.min(buffer.width, this.x + this.width); x++) buffer.setCell(x, y, " ", ink, unpainted);
+    super.renderSelf(buffer);
   }
 }
 
@@ -989,8 +1001,7 @@ export class PeelUI {
     this.focusBefore = ctx.currentFocusedRenderable;
     this.devicesBackdrop = new BoxRenderable(ctx, { id: "devices-backdrop", position: "absolute", left: 0, top: 0, width: "100%", height: "100%", zIndex: 90,
       onMouseDown: event => { event.stopPropagation(); this.closeDevices(); } });
-    this.devicesView = new BoxRenderable(ctx, { id: "devices-view", position: "absolute", right: 2, bottom: 7, zIndex: 95, border: true, borderStyle: "rounded", borderColor: colour.accent,
-      backgroundColor: colour.surface, title: ` ${icon.devices} Play on `, titleColor: colour.text, bottomTitle: " ↑↓ choose  ⏎ play here  Esc close ", flexDirection: "column",
+    this.devicesView = new ClearBox(ctx, { id: "devices-view", position: "absolute", right: 2, bottom: 7, zIndex: 95, border: true, borderStyle: "rounded", borderColor: colour.accent, title: ` ${icon.devices} Play on `, titleColor: colour.text, bottomTitle: " ↑↓ choose  ⏎ play here  Esc close ", flexDirection: "column",
       onMouseDown: (event: MouseEvent) => event.stopPropagation() } as any);
     this.devicesList = new ClickList(ctx, "devices-list", 2);
     this.devicesList.onSelection = () => this.drawHints();
@@ -1037,11 +1048,7 @@ export class PeelUI {
         },
       });
     }
-    for (const host of model.outputTargets) rows.push({
-      id: `ssh:${host}`, lead: icon.console, leadColour: ssh === host ? colour.accent : colour.faint, name: `${host}  (SSH)`, active: ssh === host,
-      right: ssh === host ? "Controlling" : "", description: "Controls its player over SSH. The music stays there.",
-      activate: () => { this.closeDevices(); if (ssh !== host) void model.selectOutput(host); },
-    });
+    // SSH hosts stay in Settings. Each device appears once, and Peel chooses how to reach it.
     return rows;
   }
 
@@ -1066,8 +1073,8 @@ export class PeelUI {
     this.pairingKey = key;
     this.closePairing(false);
     const ctx = this.renderer, width = Math.min(52, ctx.terminalWidth - 4);
-    const view = this.pairingView = new BoxRenderable(ctx, { id: "pairing-view", position: "absolute", left: Math.max(0, Math.floor((ctx.terminalWidth - width) / 2)), top: Math.max(0, Math.floor(ctx.terminalHeight / 2) - 5),
-      width, height: 9, zIndex: 110, border: true, borderStyle: "rounded", borderColor: colour.accent, backgroundColor: colour.surface,
+    const view = this.pairingView = new ClearBox(ctx, { id: "pairing-view", position: "absolute", left: Math.max(0, Math.floor((ctx.terminalWidth - width) / 2)), top: Math.max(0, Math.floor(ctx.terminalHeight / 2) - 5),
+      width, height: 9, zIndex: 110, border: true, borderStyle: "rounded", borderColor: colour.accent,
       title: ` ${icon.link} Pair with ${pairing.name} `, titleColor: colour.text, flexDirection: "column", alignItems: "center", paddingX: 2, paddingY: 1,
       bottomTitle: pairing.state === "confirm" ? " ⏎ pair  Esc cancel " : pairing.state === "done" || pairing.state === "failed" ? " Esc close " : " Esc cancel " } as any);
     const line = (content: string | StyledText, colourName = colour.muted, height = 1) => view.add(new TextRenderable(ctx, { content, fg: colourName, width: "100%", textAlign: "center", height, wrapMode: "word", flexShrink: 0, selectable: false } as any));
