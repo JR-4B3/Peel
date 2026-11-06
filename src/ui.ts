@@ -1,4 +1,5 @@
 import { BoxRenderable, TextRenderable, InputRenderable, ImageRenderable, StyledText, t, fg, bold, type CliRenderer, type KeyEvent, type MouseEvent, type RenderContext } from "@opentui/core";
+import { shortVersion } from "./update";
 import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
 import { cover, largeCover, largeCoverSize } from "./artwork";
@@ -1014,12 +1015,12 @@ export class PeelUI {
           stable ? "Updates: Nightly. Peel checks for the newest nightly build now." : "Updates: Stable. Peel checks for the newest stable release now."),
       },
       update.ready ? {
-        id: "update", lead: icon.update, name: "Restart to update", right: update.ready,
-        description: update.newEngine ? "The music stops and the queue clears, because the playback engine restarts too."
+        id: "update", lead: icon.update, name: update.older ? "Restart to switch" : "Restart to update", right: shortVersion(update.ready),
+        description: update.newEngine && model.playsLocally() ? "The music stops and the queue clears, because the playback engine restarts too."
           : "Restarts Peel in this window. The music keeps playing and the queue stays.",
         activate: () => model.onRestart(),
       } : {
-        id: "update", lead: icon.update, name: "Check for updates", right: update.checking ? "Checking..." : update.version ?? "",
+        id: "update", lead: icon.update, name: "Check for updates", right: update.checking ? "Checking..." : update.version ? shortVersion(update.version) : "",
         description: update.message || "Peel checks every six hours and installs updates in the background.",
         activate: () => { if (!update.checking) model.onCheckUpdate(); },
       },

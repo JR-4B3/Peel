@@ -7,7 +7,7 @@ import { DevicePlayer, validHost } from "./remote";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { ensureCider } from "./startup";
-import { checkForUpdate, currentBuild, restartCommand } from "./update";
+import { checkForUpdate, currentBuild, readyVersion, restartCommand } from "./update";
 
 // Peel plays through its own engine. PEEL_PLAYER=cider uses Cider instead.
 const useCider = process.env.PEEL_PLAYER === "cider";
@@ -97,11 +97,14 @@ try {
       const channel = model.preferences.channel;
       model.update = { ...model.update, checking: true }; model.changed();
       void checkForUpdate(channel, force).then(result => {
-      if (channel !== model.preferences.channel) return;
-      const announce = result.ready && result.ready !== model.update.ready;
-      model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message, ready: result.ready, newEngine: result.newEngine };
-      if (announce) model.status = `Peel ${result.ready} is ready. Restart Peel from Settings to start it.`;
-      model.changed();
+        if (channel !== model.preferences.channel) return;
+        const announce = result.ready && !result.older && result.ready !== model.update.ready;
+        model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message, ready: result.ready, older: result.older, newEngine: result.newEngine };
+        if (announce) model.status = `Peel ${result.ready} is ready. Restart Peel from Settings to start it.`;
+        model.changed();
+      }, error => {
+        model.update = { ...model.update, checking: false, message: `Could not check for updates: ${error instanceof Error ? error.message : String(error)}` };
+        model.changed();
       });
     };
     model.onChannel = () => { model.update = { ...model.update, message: "Checking for updates..." }; model.changed(); updates(true); };
@@ -109,13 +112,20 @@ try {
     // A restart keeps this computer's engine, so the new Peel finds the music still playing. This
     // process waits for the new one, which keeps the engine owned until the new Peel closes.
     let restartInto: string | undefined;
-    model.onRestart = () => { if (model.update.ready) { restartInto = model.update.ready; renderer.destroy(); } };
+    model.playsLocally = () => !useCider && player instanceof DevicePlayer && !player.host;
+    // The version to start is read again, since another Peel window may have changed it.
+    model.onRestart = () => void readyVersion().then(({ ready }) => {
+      if (!ready) { model.update = { ...model.update, ready: undefined }; model.status = "The update is no longer installed. Check for updates again."; model.changed(); return; }
+      restartInto = ready; renderer.destroy();
+    });
     const restart = async (version: string) => {
       if (player instanceof DevicePlayer) player.detach();
-      if (process.stdin.isTTY) process.stdin.setRawMode(false);
-      process.stdin.pause();
+      // OpenTUI restores the terminal right after its destroy event, so the new Peel starts after that.
+      await new Promise(resolve => setTimeout(resolve, 0));
       const { cmd, cwd } = restartCommand(version);
       const child = Bun.spawn(cmd, { cwd, stdio: ["inherit", "inherit", "inherit"], env: process.env });
+      // A signal meant for this Peel reaches the new one, which owns the terminal now.
+      for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => child.kill(signal));
       process.exit(await child.exited);
     };
     updates(false);

@@ -1,8 +1,9 @@
 import { EventEmitter } from "node:events";
 import type { Preferences } from "./config";
 // What the settings page says about updates. index.ts fills it from src/update.ts.
-// ready names an installed version that a restart starts. newEngine says the restart stops the music.
-export interface UpdateState { version?: string; channel?: string; installed: boolean; message: string; ready?: string; newEngine?: boolean; checking?: boolean }
+// ready names an installed version that a restart starts, older says it is older, and newEngine
+// says its engine differs, which stops the music if this computer plays it.
+export interface UpdateState { version?: string; channel?: string; installed: boolean; message: string; ready?: string; older?: boolean; newEngine?: boolean; checking?: boolean }
 import { defaults } from "./config";
 import { stopped, type ArtistShelf, type Home, type Library, type Media, type Page, type Playback, type Player } from "./types";
 
@@ -751,6 +752,8 @@ export class Model extends EventEmitter {
   onCheckUpdate: () => void = () => {};
   // Closes this Peel and starts the ready version in the same terminal.
   onRestart: () => void = () => {};
+  // Whether this computer's engine plays, so restarting into a new engine stops the music.
+  playsLocally: () => boolean = () => false;
 
   // Changes one setting on the settings page and saves it with the layout.
   async setPreference(change: Partial<Preferences>, message: string) {

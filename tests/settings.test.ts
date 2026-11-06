@@ -180,7 +180,11 @@ test("the update row checks now, and offers a restart once a newer Peel is ready
   app.model.changed(); await app.flush();
   let frame = app.captureCharFrame();
   for (const text of ["Restart to update", "0.3.0", "The music keeps playing"]) expect(frame).toContain(text);
+  // A new engine stops the music only when this computer plays it.
   app.model.update = { ...app.model.update, newEngine: true };
+  app.model.changed(); await app.flush();
+  expect(app.captureCharFrame()).toContain("The music keeps playing");
+  app.model.playsLocally = () => true;
   app.model.changed(); await app.flush();
   frame = app.captureCharFrame();
   expect(frame).toContain("The music stops and the queue clears");
@@ -196,7 +200,7 @@ test("an installed update is ready for a restart, which says whether the engine 
   await update.installRelease(await update.latestRelease("stable"), root);
   expect(await update.readyVersion(running)).toEqual({});
   const result = await update.checkForUpdate("nightly", true, Date.now(), running);
-  expect({ ready: result.ready, newEngine: result.newEngine }).toEqual({ ready: "0.3.0-nightly.test", newEngine: false });
+  expect({ ready: result.ready, older: result.older, newEngine: result.newEngine }).toEqual({ ready: "0.3.0-nightly.test", older: false, newEngine: false });
   expect(update.restartCommand("0.3.0-nightly.test", running).cwd).toBe(join(root, "versions", "0.3.0-nightly.test"));
   // A cached check still reports it.
   expect((await update.checkForUpdate("nightly", false, Date.now(), running)).ready).toBe("0.3.0-nightly.test");
@@ -205,4 +209,34 @@ test("an installed update is ready for a restart, which says whether the engine 
   expect(await update.checkForUpdate("nightly", true, Date.now(), running)).toMatchObject({ ready: "0.4.0-nightly.test", newEngine: true });
   // Switching back to the running release leaves nothing to restart into.
   expect((await update.checkForUpdate("stable", true, Date.now(), running)).ready).toBeUndefined();
+});
+
+test("switching to an older release offers a switch, not an update", async () => {
+  const { dir, build, update } = await releases();
+  await build("stable", "0.2.0"); await build("nightly", "0.3.0-nightly.20261106.2d4205c");
+  const root = join(dir, "install"), running = join(root, "versions", "0.3.0-nightly.20261106.2d4205c");
+  await update.installRelease(await update.latestRelease("nightly"), root);
+  const result = await update.checkForUpdate("stable", true, Date.now(), running);
+  expect({ ready: result.ready, older: result.older }).toEqual({ ready: "0.2.0", older: true });
+});
+
+test("a later nightly from the same day is newer, whatever its commit hash", async () => {
+  const { dir, build, update } = await releases();
+  await build("nightly", "0.1.0-nightly.20261106.2d4205c");
+  const root = join(dir, "install"), running = join(root, "versions", "0.1.0-nightly.20261106.2d4205c");
+  await update.installRelease(await update.latestRelease("nightly"), root);
+  // A numeric hash sorts before a lettered one in semver, which must not make it older.
+  await build("nightly", "0.1.0-nightly.20261106.4417365");
+  const result = await update.checkForUpdate("nightly", true, Date.now(), running);
+  expect({ ready: result.ready, older: result.older }).toEqual({ ready: "0.1.0-nightly.20261106.4417365", older: false });
+});
+
+test("a restart keeps its arguments but not the saved output choice, and versions show short", async () => {
+  const { dir, update } = await releases();
+  const running = join(dir, "install", "versions", "0.2.0");
+  expect(update.restartCommand("0.3.0", running, ["--remote", "main", "--debug"]).cmd.slice(1)).toEqual(["src/index.ts", "--debug"]);
+  expect(update.restartCommand("0.3.0", running, ["--local"]).cmd.slice(1)).toEqual(["src/index.ts"]);
+  expect(() => update.restartCommand("0.3.0", join(dir, "checkout"))).toThrow("source folder");
+  expect(update.shortVersion("0.1.0-nightly.20261106.4417365")).toBe("0.1.0 nightly 4417365");
+  expect(update.shortVersion("0.2.0")).toBe("0.2.0");
 });

@@ -98,12 +98,14 @@ export async function installRelease(release: Release, root: string, status: (te
 }
 
 // Keep installed versions for rollback and for other Peel windows still using them.
-// ready names an installed version other than the running one, which a restart starts.
-// newEngine says that version's playback engine differs, so restarting it stops the music.
-export interface UpdateResult { build?: Build; message: string; ready?: string; newEngine?: boolean }
+// ready names an installed version other than the running one, which a restart starts. older
+// says it is older, after a switch to the stable channel. newEngine says its playback engine
+// differs, so restarting into it stops this computer's music.
+export interface Ready { ready?: string; older?: boolean; newEngine?: boolean }
+export interface UpdateResult extends Ready { build?: Build; message: string }
 
 // The version <root>/current names when it is not this one. Another Peel window may have installed it.
-export async function readyVersion(dir = appDir): Promise<{ ready?: string; newEngine?: boolean }> {
+export async function readyVersion(dir = appDir): Promise<Ready> {
   const build = await currentBuild(dir), root = installRoot(dir);
   if (!build || !root) return {};
   const ready = (await readFile(join(root, "current"), "utf8").catch(() => "")).trim();
@@ -113,15 +115,25 @@ export async function readyVersion(dir = appDir): Promise<{ ready?: string; newE
     for (const name of ["engine.js", "main.js"]) hasher.update(await readFile(join(folder, "engine", name)).catch(() => new Uint8Array()));
     return hasher.digest("hex");
   };
-  return { ready, newEngine: await engine(dir) !== await engine(join(root, "versions", ready)) };
+  // Nightly versions end in a commit hash, which semver would compare as text. The release
+  // number decides first, then the build date.
+  const next = await currentBuild(join(root, "versions", ready));
+  const release = Bun.semver.order(ready.split("-")[0]!, build.version.split("-")[0]!);
+  const older = release < 0 || release === 0 && !!next?.date && next.date < build.date;
+  return { ready, older, newEngine: await engine(dir) !== await engine(join(root, "versions", ready)) };
 }
 
-// The command that starts the ready version in this terminal, with the same arguments.
-export function restartCommand(version: string, dir = appDir) {
+// The command that starts the ready version in this terminal. --remote and --local are already
+// saved, and passing them again would undo a switch made in Settings since.
+export function restartCommand(version: string, dir = appDir, args = process.argv.slice(2)) {
   const root = installRoot(dir);
   if (!root) throw new Error("A source folder has no other version to start.");
-  return { cmd: [process.execPath, "src/index.ts", ...process.argv.slice(2)], cwd: join(root, "versions", version) };
+  const kept = args.filter((arg, index) => arg !== "--local" && arg !== "--remote" && args[index - 1] !== "--remote");
+  return { cmd: [process.execPath, "src/index.ts", ...kept], cwd: join(root, "versions", version) };
 }
+
+// A version short enough for the settings page: nightly builds keep their commit, not their date.
+export function shortVersion(version: string) { return version.replace(/-nightly\.\d{8}\./, " nightly "); }
 
 // Checks the channel and installs a newer build in the background. A source checkout only reports
 // its version. force skips the six-hour wait, for a channel the listener just chose.
