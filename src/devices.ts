@@ -33,7 +33,9 @@ export interface Pairing {
 // summary and pause leave an engine that is not running alone.
 export interface LocalPlayer { send: EngineTransport; summary(): Promise<Summary | undefined>; pause(): Promise<void> }
 
-interface Known { id: string; name: string; address?: string; port?: number }
+// A paired device and where it was reached: the address that worked last, and the addresses it
+// reports for itself, such as its Tailscale address.
+interface Known { id: string; name: string; address?: string; port?: number; addresses?: string[] }
 interface Stored { id: string; keys: GroupKey[]; known: Known[]; output?: Claim }
 interface Nearby { id: string; name: string; address: string; port: number; keys: string[]; seen: number }
 
@@ -46,6 +48,19 @@ export function allowedRequest(path: unknown, body: any) {
 
 const text = (value: unknown, max = 200) => typeof value === "string" && value.length > 0 && value.length <= max;
 const validId = (value: unknown): value is string => typeof value === "string" && /^[\w-]{8,64}$/.test(value);
+const validAddress = (value: unknown): value is string => typeof value === "string" && /^\d{1,3}(\.\d{1,3}){3}$/.test(value);
+const validPort = (value: unknown): value is number => Number.isInteger(value) && (value as number) > 0 && (value as number) < 65536;
+function readKnown(device: any): Known | undefined {
+  if (!validId(device?.id) || !text(device.name, 100)) return undefined;
+  const addresses = Array.isArray(device.addresses) ? [...new Set(device.addresses.filter(validAddress) as string[])].slice(0, 8) : [];
+  return { id: device.id, name: device.name, ...(validAddress(device.address) ? { address: device.address } : {}), ...(validPort(device.port) ? { port: device.port } : {}), ...(addresses.length ? { addresses } : {}) };
+}
+// This computer's IPv4 addresses on every network, Tailscale's included.
+export function ownAddresses() {
+  const addresses: string[] = [];
+  for (const list of Object.values(networkInterfaces())) for (const address of list ?? []) if (address.family === "IPv4" && !address.internal) addresses.push(address.address);
+  return addresses.slice(0, 8);
+}
 const validClaim = (value: any): value is Claim => validId(value?.device) && Number.isSafeInteger(value?.generation) && value.generation >= 0;
 export const newer = (a: Claim, b: Claim) => a.generation > b.generation || a.generation === b.generation && a.device > b.device;
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -158,7 +173,7 @@ class PairingFlow implements Pairing {
     if (this.epoch !== this.network.keyEpoch) return this.fail("The paired devices were forgotten. Pair again.");
     if (this.accepted && this.otherAccepted && !this.sentKeys && this.cipher) {
       this.sentKeys = true;
-      this.send(this.cipher.seal({ t: "keys", keys: this.network.groupKeys, known: this.network.knownList(), port: this.network.port }));
+      this.send(this.cipher.seal({ t: "keys", keys: this.network.groupKeys, known: this.network.shareList(), port: this.network.port }));
     }
     if (this.sentKeys && this.gotKeys) {
       clearTimeout(this.timer);
@@ -212,6 +227,7 @@ export class DeviceNetwork extends EventEmitter {
   get keyEpoch() { return this.epoch; }
   // When this device last tried to reach each device, so retries take turns.
   private attempts = new Map<string, number>();
+  private turns = new Map<string, number>();
   private sockets = new Set<ServerWebSocket<SocketData>>();
   private clients = new Set<WebSocket>();
   private server?: Server<SocketData>;
@@ -232,7 +248,7 @@ export class DeviceNetwork extends EventEmitter {
     this.id = validId(stored?.id) ? stored.id : randomUUID();
     this.groupKeys = Array.isArray(stored?.keys) ? stored.keys.filter(key => validId(key?.id) && typeof key.key === "string" && keyId(Buffer.from(key.key, "base64url")) === key.id) : [];
     if (!this.groupKeys.length) this.groupKeys = [newGroupKey()];
-    for (const device of Array.isArray(stored?.known) ? stored.known : []) if (validId(device?.id) && text(device.name)) this.known.set(device.id, { id: device.id, name: device.name, address: typeof device.address === "string" ? device.address : undefined, port: Number.isInteger(device.port) ? device.port : undefined });
+    for (const value of Array.isArray(stored?.known) ? stored.known : []) { const device = readKnown(value); if (device && device.id !== this.id) this.known.set(device.id, device); }
     this.claim = validClaim(stored?.output) ? stored.output : { device: this.id, generation: 0 };
     if (!stored || stored.id !== this.id) await this.persist();
     this.listen();
@@ -253,6 +269,8 @@ export class DeviceNetwork extends EventEmitter {
   pairingChanged() { this.changed(); }
 
   knownList() { return [...this.known.values()]; }
+  // What this device tells paired devices: the devices it knows, and itself with its addresses.
+  shareList(): Known[] { return [...this.knownList(), { id: this.id, name: this.name, port: this.port, addresses: ownAddresses() }]; }
   online(id: string) { return [...this.sessions.get(id) ?? []].some(session => !session.closed); }
   private session(id: string) { return [...this.sessions.get(id) ?? []].reverse().find(session => !session.closed); }
   nameOf(id: string) { return id === this.id ? this.name : this.known.get(id)?.name ?? this.nearby.get(id)?.name ?? "the other device"; }
@@ -306,9 +324,11 @@ export class DeviceNetwork extends EventEmitter {
       if (bytes.length !== 32 || keyId(bytes) !== key.id) continue;
       this.groupKeys.push({ id: key.id, key: key.key }); changed = true;
     }
-    for (const device of Array.isArray(known) ? known : []) {
-      if (!validId(device?.id) || !text(device.name) || device.id === this.id || this.known.has(device.id)) continue;
-      this.known.set(device.id, { id: device.id, name: device.name, address: typeof device.address === "string" ? device.address : undefined, port: Number.isInteger(device.port) ? device.port : undefined });
+    for (const value of Array.isArray(known) ? known.slice(0, 256) : []) {
+      const device = readKnown(value);
+      if (!device || device.id === this.id) continue;
+      if (this.known.has(device.id)) { this.remember({ id: device.id, name: this.known.get(device.id)!.name, port: device.port, addresses: [...device.addresses ?? [], ...device.address ? [device.address] : []] }); continue; }
+      this.known.set(device.id, device);
       changed = true;
     }
     if (changed) { void this.persist(); this.changed(); }
@@ -317,7 +337,8 @@ export class DeviceNetwork extends EventEmitter {
   remember(device: Known) {
     if (device.id === this.id) return;
     const previous = this.known.get(device.id);
-    const next = { id: device.id, name: device.name, address: device.address ?? previous?.address, port: device.port ?? previous?.port };
+    const addresses = [...new Set([...device.addresses ?? [], ...previous?.addresses ?? []].filter(validAddress))].slice(0, 8);
+    const next: Known = { id: device.id, name: device.name, address: device.address ?? previous?.address, port: device.port ?? previous?.port, ...(addresses.length ? { addresses } : {}) };
     if (JSON.stringify(previous) === JSON.stringify(next)) return;
     this.known.set(device.id, next);
     void this.persist();
@@ -389,9 +410,17 @@ export class DeviceNetwork extends EventEmitter {
     if (!this.server) this.listen();
     // Paired devices are also tried at their last address, which reaches them across networks
     // that do not pass broadcasts, such as Tailscale.
-    const waiting = [...this.known.values()].filter(device => device.address && device.port && !this.online(device.id))
+    // Each try uses the next of the device's addresses, so one that works on another network,
+    // such as its Tailscale address, is reached in turn.
+    const waiting = [...this.known.values()].filter(device => device.port && (device.address || device.addresses?.length) && !this.online(device.id))
       .sort((a, b) => (this.attempts.get(a.id) ?? 0) - (this.attempts.get(b.id) ?? 0));
-    for (const device of waiting) this.connect(device.id, device.address!, device.port!);
+    for (const device of waiting) {
+      const candidates = [...new Set([...device.address ? [device.address] : [], ...device.addresses ?? []])];
+      const turn = this.turns.get(device.id) ?? 0;
+      if (Date.now() - (this.connecting.get(device.id) ?? 0) < 5000) continue;
+      this.turns.set(device.id, turn + 1);
+      this.connect(device.id, candidates[turn % candidates.length]!, device.port!);
+    }
     const now = Date.now();
     let changed = false;
     for (const [id, device] of this.nearby) if (now - device.seen > 12000) { this.nearby.delete(id); changed = true; }
@@ -409,7 +438,7 @@ export class DeviceNetwork extends EventEmitter {
       try {
         const status = await session.request("status", { claim: this.claim, keys: this.groupKeys.map(key => key.id) }, 5000);
         this.adopt(status?.claim);
-        if (text(status?.name, 100) && this.known.get(id)?.name !== status.name) this.remember({ id, name: status.name });
+        if (text(status?.name, 100)) this.remember({ id, name: status.name, port: validPort(status.port) ? status.port : undefined, addresses: Array.isArray(status.addresses) ? status.addresses.filter(validAddress).slice(0, 8) : undefined });
         if (Array.isArray(status?.keys) && (status.keys.some((key: string) => !this.groupKeys.some(own => own.id === key)) || this.groupKeys.some(own => !status.keys.includes(own.id)))) await this.sync(session);
         const summary = status?.summary && typeof status.summary.state === "string" ? { state: status.summary.state, song: typeof status.summary.song === "string" ? status.summary.song : undefined, artist: typeof status.summary.artist === "string" ? status.summary.artist : undefined } : undefined;
         if (JSON.stringify(summary) !== JSON.stringify(this.summaries.get(id))) { this.summaries.set(id, summary); this.changed(); }
@@ -418,7 +447,7 @@ export class DeviceNetwork extends EventEmitter {
   }
 
   private async sync(session: Session) {
-    const reply = await session.request("keys", { keys: this.groupKeys, known: this.knownList() });
+    const reply = await session.request("keys", { keys: this.groupKeys, known: this.shareList() });
     this.merge(reply?.keys, reply?.known);
   }
 
@@ -426,10 +455,10 @@ export class DeviceNetwork extends EventEmitter {
   private async handle(session: Session, op: string, body: any): Promise<unknown> {
     if (op === "status") {
       this.adopt(body?.claim);
-      return { name: this.name, summary: await this.options.local.summary().catch(() => undefined), claim: this.claim, keys: this.groupKeys.map(key => key.id) };
+      return { name: this.name, summary: await this.options.local.summary().catch(() => undefined), claim: this.claim, keys: this.groupKeys.map(key => key.id), port: this.port, addresses: ownAddresses() };
     }
     if (op === "claim") { this.adopt(body?.claim); return this.claim; }
-    if (op === "keys") { this.merge(body?.keys, body?.known); return { keys: this.groupKeys, known: this.knownList() }; }
+    if (op === "keys") { this.merge(body?.keys, body?.known); return { keys: this.groupKeys, known: this.shareList() }; }
     if (op === "engine") {
       if (!allowedRequest(body?.path, body?.body)) throw new Error("This request is not allowed from another device.");
       return this.options.local.send(body.path, body.body);

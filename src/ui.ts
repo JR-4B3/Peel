@@ -570,7 +570,7 @@ export class PeelUI {
     deck.add(this.subtitle);
     this.progress = new TextRenderable(ctx, { id: "seek", content: "", fg: colour.accent, height: 1, width: "100%", selectable: false, onMouseDown: event => this.seekClick(event) });
     deck.add(this.progress);
-    this.controls = new BoxRenderable(ctx, { id: "controls", height: 1, flexDirection: "row", gap: 2 });
+    this.controls = new BoxRenderable(ctx, { id: "controls", height: 1, flexDirection: "row", gap: 2, width: "100%" });
     this.controls.add(this.button("previous", icon.previous, "p", () => void model.skip(-1)));
     this.playButton = this.button("play-pause", icon.play, "space", () => void model.act("/playback/toggle"));
     this.controls.add(this.playButton);
@@ -587,7 +587,10 @@ export class PeelUI {
     this.controls.add(new TextRenderable(ctx, { content: " ", width: 1, height: 1 }));
     this.lyricsButton = this.button("lyrics-toggle", icon.lyrics, "y", () => this.toggleLyrics(), colour.faint);
     this.controls.add(this.lyricsButton);
+    // The devices button sits at the right end, under the popup it opens.
+    this.controls.add(new BoxRenderable(ctx, { flexGrow: 1, height: 1 }));
     this.devicesButton = this.button("devices", icon.devices, "d", () => this.toggleDevices(), colour.faint);
+    this.devicesButton.flexShrink = 0;
     this.controls.add(this.devicesButton);
     deck.add(this.controls);
     this.playerPanel.add(deck); this.root.add(this.playerPanel);
@@ -1073,7 +1076,8 @@ export class PeelUI {
     if (pairing.state === "connecting") line(`Connecting to ${pairing.name}...`);
     else if (pairing.state === "confirm") {
       line(t`${bold(fg(colour.accent)(code))}`, colour.accent); line("");
-      line(pairing.incoming ? `${pairing.name} wants to control this computer. Pair only if it shows the same code.` : `Check that ${pairing.name} shows the same code, then press Enter on both.`, colour.muted, 2);
+      line(pairing.incoming ? `${pairing.name} wants to pair. You do not type this code. If ${pairing.name} shows the same one, press Enter.`
+        : `You do not type this code. If ${pairing.name} shows the same one, press Enter here and there.`, colour.muted, 3);
     } else if (pairing.state === "waiting") {
       line(t`${bold(fg(colour.accent)(code))}`, colour.accent); line("");
       line(`Waiting for ${pairing.name} to accept...`, colour.muted, 2);

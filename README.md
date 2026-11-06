@@ -144,12 +144,21 @@ Filtering, sorting, or narrowing to favourites first loads the rest of the list,
 
 Every Peel on the same network is a device. Press `d`, or click the devices button beside the lyrics button, to open a popup above the player. It lists this computer, your paired devices with what each one plays, and nearby Peels you have not paired yet.
 
-- **Pairing.** Choose a nearby device. Both screens show the same six-digit code. Check that they match and press Enter on both. You pair once. Pairing a device with any device in your group adds it to the whole group, so three computers need two pairings, not three.
+- **Pairing.** Choose a nearby device. Both screens show the same six-digit code. You do not type it anywhere. It is there so you can check that you pair with your own device: if both screens show the same code, press Enter on both. You pair once. Pairing a device with any device in your group adds it to the whole group, so three computers need two pairings, not three.
 - **Moving the music.** Choose a paired device. Peel moves the queue, the playing song, and its position there, and the device that played pauses. If the new device cannot start, the music keeps playing where it was.
 - **Controlling.** Every Peel controls whichever device plays. Play, pause, skip, seek, volume, favourites, and queue edits all go to that device, and every open Peel shows its song, queue, and hearts. When another Peel moves the music, this one follows.
 - **No device is in charge.** The device that plays holds the queue only because it plays it. Each device keeps working without the others.
 
-A device appears while Peel is open on it. Closing Peel there stops its music, and the other Peels control their own computer again. Devices find each other by UDP broadcast on port 10771 and connect on TCP port 10770. `PEEL_DEVICE_PORT` and `PEEL_DISCOVERY_PORT` change them, and `PEEL_DEVICES=off` keeps a Peel off the network. A paired device is also tried at its last address, which reaches it over Tailscale. The first time, macOS may ask whether your terminal may find devices on the local network. Allow it.
+A device appears while Peel is open on it. Closing Peel there stops its music, and the other Peels control their own computer again. Devices find each other by UDP broadcast on port 10771 and connect on TCP port 10770. `PEEL_DEVICE_PORT` and `PEEL_DISCOVERY_PORT` change them, and `PEEL_DEVICES=off` keeps a Peel off the network. The first time, macOS may ask whether your terminal may find devices on the local network. Allow it.
+
+### Away from home
+
+Devices find each other only on the same network. To control a device from elsewhere, install [Tailscale](https://tailscale.com) on both computers and sign in to the same account. Then:
+
+1. Pair the devices once while both are on the same network.
+2. Paired devices tell each other all their addresses, their Tailscale addresses too. Away from home, Peel tries each one, so the devices reconnect over Tailscale within a few seconds.
+
+Peel needs nothing else from Tailscale. The connection between the devices stays encrypted by Peel as well.
 
 [docs/remote-play.md](docs/remote-play.md) describes how it works and its limits.
 

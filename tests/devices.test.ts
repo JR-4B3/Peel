@@ -3,7 +3,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestRenderer } from "@opentui/core/testing";
-import { DeviceNetwork, allowedRequest, newer } from "../src/devices";
+import { DeviceNetwork, allowedRequest, newer, ownAddresses } from "../src/devices";
 import { Engine } from "../src/engine";
 import { Cipher, Ephemeral, clientFinish, clientHello, commitment, newGroupKey, pairingKeys, type PairOffer } from "../src/link";
 import { Model } from "../src/model";
@@ -48,7 +48,7 @@ function fakeEngine() {
 
 // One computer: its engine, its player, and its place on the network. Devices find each other
 // directly in tests rather than by broadcast.
-async function computer(name: string) {
+async function computer(name: string, announceEvery = 60000) {
   const dir = await mkdtemp(join(tmpdir(), "peel-devices-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const fake = fakeEngine();
   let failImport = false;
@@ -58,7 +58,7 @@ async function computer(name: string) {
     return inner(path, body);
   };
   const player = new DevicePlayer(undefined, () => {}, fake.engine, async () => { fake.state.started++; });
-  const network = new DeviceNetwork({ local: player.localPlayer(), dir, name, port: 0, discovery: false, announceEvery: 60000 });
+  const network = new DeviceNetwork({ local: player.localPlayer(), dir, name, port: 0, discovery: false, announceEvery });
   player.attach(network);
   await network.start();
   cleanup.push(() => network.close());
@@ -397,3 +397,15 @@ test("a handshake still on its way when Peel closes does not open a session", as
   expect(main.network.online(mac.network.id)).toBe(false);
   expect(mac.network.online(main.network.id)).toBe(false);
 });
+
+test("paired devices learn each other's addresses, and a device is tried at each of them", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  await waitFor(() => JSON.stringify(mac.network.knownList().find(device => device.id === main.network.id)?.addresses ?? []) === JSON.stringify(ownAddresses()), "main's addresses");
+  // A laptop away from home knows main by an address that no longer answers and by one that
+  // does, as its Tailscale address would.
+  const laptop = await computer("laptop", 200);
+  laptop.network.merge(main.network.groupKeys, [{ id: main.network.id, name: "main", address: "192.0.2.1", port: main.network.port, addresses: ["127.0.0.1"] }]);
+  for (let count = 0; count < 150 && !laptop.network.online(main.network.id); count++) await Bun.sleep(100);
+  expect(laptop.network.online(main.network.id)).toBe(true);
+}, 20000);

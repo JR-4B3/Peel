@@ -27,7 +27,7 @@ Announcements are not authenticated. Peel remembers a device only after its sess
 
 ## Sessions
 
-Paired devices connect over a WebSocket on TCP port 10770. The handshake mixes a shared group key with a fresh X25519 exchange. Each side proves it holds the key, and a device without it learns nothing. Every message after that is AES-256-GCM, numbered in each direction, so a changed, replayed, or reordered message ends the session. Each Peel connects to every paired device it hears, and to every paired device at its last address, which also reaches devices over Tailscale.
+Paired devices connect over a WebSocket on TCP port 10770. The handshake mixes a shared group key with a fresh X25519 exchange. Each side proves it holds the key, and a device without it learns nothing. Every message after that is AES-256-GCM, numbered in each direction, so a changed, replayed, or reordered message ends the session. Each Peel connects to every paired device it hears. Paired devices also tell each other their IPv4 addresses on every network, Tailscale's included, when they connect and every two seconds after. A paired device that is not connected is tried at each of its addresses in turn, every few seconds, so devices away from home reconnect over Tailscale.
 
 Another device can read this computer's engine state and send it playback commands: play, pause, skip, seek, volume, shuffle, repeat, queue edits, ratings, and moving a queue. It cannot read the Apple sign-in, change the stream quality, or stop the engine. Engine requests from another device start this computer's engine when it is not running, as a song chosen here would.
 
@@ -51,7 +51,7 @@ These limits apply:
 - Library songs play only on devices signed in to the same Apple account.
 - Apple may allow one stream per account at a time, which fits moving the music. Two devices that play different music at once may stop each other.
 - A device appears only while Peel is open on it. Closing Peel there stops its music.
-- Devices on different networks reach each other only through an address they can both reach, such as Tailscale. Peel does not relay through the internet yet.
+- Devices on different networks reach each other only through an address they can both reach, such as Tailscale. Pair them once on the same network first. Peel does not relay through the internet itself.
 
 ## SSH
 
