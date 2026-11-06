@@ -47,4 +47,9 @@ export const icon = {
   settings: "\u{F0493}",
   quality: "\u{F062E}",
   update: "\u{F06B0}",
+  devices: "\u{F0FB0}",
+  speaker: "\u{F04C3}",
+  laptop: "\u{F0322}",
+  link: "\u{F0337}",
+  console: "\u{F018D}",
 };

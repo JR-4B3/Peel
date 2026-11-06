@@ -4,6 +4,7 @@ import { Cider } from "./cider";
 import { cacheDir, readAppleSignIn, readCache, readPreferences, readToken, saveJson } from "./config";
 import { Engine, ensureEngine, stopEngine } from "./engine";
 import { DevicePlayer, validHost } from "./remote";
+import { DeviceNetwork } from "./devices";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { ensureCider } from "./startup";
@@ -21,7 +22,7 @@ try {
     const build = await currentBuild();
     console.log(build ? `Peel ${build.version} (${build.channel}, ${build.commit.slice(0, 7)}, built ${build.date})` : "Peel from a source folder");
   } else if (process.argv.includes("--help")) {
-    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop a retained engine on this computer\n\nSet PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
+    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\n\nSet PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
   } else if (process.argv.includes("--connect") && useCider) {
     await ensureCider(new Cider().base, "", false, console.log);
     console.log("Approve Peel's access request in Cider. Waiting up to two minutes...");
@@ -89,7 +90,20 @@ try {
     if (player instanceof DevicePlayer) {
       const devices = player;
       model.outputTargets = preferences.remotes ?? [];
-      model.onOutput = host => devices.select(host);
+      model.onOutput = async host => { await devices.select(host); model.target = devices.target; model.targetId = devices.peer; };
+      // Every Peel on the network is a device. PEEL_DEVICES=off keeps this one off the network.
+      if (process.env.PEEL_DEVICES !== "off") {
+        const network = new DeviceNetwork({ local: devices.localPlayer() });
+        devices.attach(network);
+        const show = () => { model.devices = network.views(); model.pairing = network.pairing; model.target = devices.target; model.targetId = devices.peer; model.changed(); };
+        network.on("change", show);
+        network.on("pairing", (pairing: { name: string }) => { model.status = `${pairing.name} wants to pair. Check the code on both screens.`; show(); });
+        model.onPlayOn = id => devices.playOn(id);
+        model.onPair = id => { try { network.pair(id); show(); } catch (error) { model.fail(error); } };
+        model.onForgetDevices = () => network.forget();
+        devices.onRetarget = () => void model.retarget(() => { const text = devices.applyTarget(); model.target = devices.target; model.targetId = devices.peer; return text; });
+        void network.start().catch(error => model.fail(new Error(`Devices on the network are unavailable: ${error instanceof Error ? error.message : String(error)}`)));
+      }
     }
     // Updates install in the background and start the next time Peel opens. The settings page
     // shows the result, and choosing another channel checks it at once.
@@ -112,7 +126,7 @@ try {
     // A restart keeps this computer's engine, so the new Peel finds the music still playing. This
     // process waits for the new one, which keeps the engine owned until the new Peel closes.
     let restartInto: string | undefined;
-    model.playsLocally = () => !useCider && player instanceof DevicePlayer && !player.host;
+    model.playsLocally = () => !useCider && player instanceof DevicePlayer && !player.host && !player.peer;
     // The version to start is read again, since another Peel window may have changed it. A change
     // updates the row, so the listener sees what the restart would do before choosing it again.
     model.onRestart = () => void readyVersion().then(next => {

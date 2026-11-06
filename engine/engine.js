@@ -52,6 +52,15 @@
     attributes: { name: item.title, artistName: item.artistName, albumName: item.albumName, durationInMillis: (item.playbackDuration ?? 0) },
   });
 
+  // A queued entry as a Peel song again, for moving the queue to another device. Added songs keep
+  // the song Peel queued. The collection's entries are read back from MusicKit.
+  const song = item => added.get(item) ?? {
+    id: item.id, type: item.type ?? "songs",
+    name: item.attributes?.name ?? item.title ?? "", artist: item.attributes?.artistName ?? item.artistName ?? "", album: item.attributes?.albumName ?? item.albumName ?? "",
+    duration: (item.attributes?.durationInMillis ?? item.playbackDuration ?? 0) / 1000,
+    ...(item.attributes?.artwork?.url ?? item.artwork?.url ? { artwork: item.attributes?.artwork?.url ?? item.artwork?.url } : {}),
+    ...(catalogId(item) && catalogId(item) !== item.id ? { catalogId: catalogId(item) } : {}),
+  };
   const pending = () => music.queue.items.slice(music.queue.position + 1).filter(item => added.has(item));
   async function insert(items, at) {
     await music.playAt(at, { items: items.map(resource) });
@@ -62,8 +71,9 @@
     state() {
       if (!music) return { ready: false, signIn };
       const item = music.nowPlayingItem;
-      // An unknown rating is asked again every few seconds.
-      if (item && (rated.id !== item.id || rated.value === undefined) && Date.now() - rated.checked > 3000) void checkRating();
+      // An unknown rating is asked again every few seconds, and a known one every half minute, so
+      // a favourite changed in another app or on another device shows here too.
+      if (item && Date.now() - rated.checked > (rated.id !== item.id || rated.value === undefined ? 3000 : 30000)) void checkRating();
       return {
         ready: music.isAuthorized, signIn,
         playback: {
@@ -134,6 +144,40 @@
       await music.changeToMediaAtIndex(index);
     },
     queue: () => ({ position: music.queue.position, items: music.queue.items.map(item => ({ ...describe(item), added: pending().includes(item) })) }),
+    // The whole queue, the playing place, and the position, so another device can continue it.
+    exportPlayback: () => {
+      const items = music.queue.items, position = music.queue.position;
+      return {
+        items: items.map(song), position,
+        added: items.map((item, index) => index > position && added.has(item) ? index : -1).filter(index => index >= 0),
+        time: music.currentPlaybackTime ?? 0, playing: music.playbackState === 2,
+        repeatMode: repeats[music.repeatMode] ?? "none", shuffleMode: music.shuffleMode === 1,
+      };
+    },
+    // Replaces this device's queue with one exported from another device. The volume stays this
+    // device's own. A paused queue starts muted to reach its position, then pauses.
+    importPlayback: async ({ items = [], position = 0, added: marks = [], time = 0, playing = false, repeatMode = "none", shuffleMode = false } = {}) => {
+      added = new WeakMap();
+      if (!items.length) { await music.stop?.(); return; }
+      const start = Math.min(Math.max(0, position), items.length - 1);
+      music.shuffleMode = 0;
+      await music.setQueue({ items: items.map(resource), startWith: start, startPlaying: false });
+      music.queue.items.forEach((item, index) => { if (marks.includes(index) && items[index]) added.set(item, items[index]); });
+      music.repeatMode = Math.max(0, repeats.indexOf(repeatMode));
+      const volume = music.volume;
+      if (!playing) music.volume = 0;
+      try {
+        await music.play();
+        if (time > 1) await music.seekToTime(time);
+        if (!playing) await music.pause();
+      } catch (error) {
+        // A failed import stays silent, so the device that played can continue.
+        await Promise.resolve(music.pause()).catch(() => {});
+        throw error;
+      } finally { music.volume = volume; }
+      // Turning shuffle on mixes the songs after the playing one again.
+      if (shuffleMode) music.shuffleMode = 1;
+    },
     rating: async () => await readRating(music.nowPlayingItem) ?? -1,
     // Peel names the song it means. A song that changed since then is not rated.
     rate: async (value, expected) => {

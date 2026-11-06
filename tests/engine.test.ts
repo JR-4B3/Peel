@@ -190,3 +190,45 @@ test("a stale queue click refuses to jump to a different song", async () => {
   await engine.jump(1, "a2");
   expect(music.items[music.position].id).toBe("a2");
 });
+
+test("a queue exported on one engine plays on another at the same song and position", async () => {
+  const source = await musicKit(), target = await musicKit();
+  await source.engine.play([song("c1"), song("c2"), song("c3")], 1);
+  await source.engine.enqueue([song("a1")], true);
+  source.music.currentPlaybackTime = 73; source.music.playbackState = 2; source.music.repeatMode = 2;
+  const exported = source.engine.exportPlayback();
+  expect(exported).toMatchObject({ position: 1, added: [2], time: 73, playing: true, repeatMode: "all" });
+  expect(exported.items.map((item: any) => item.id)).toEqual(["c1", "c2", "a1", "c3"]);
+  // The target had its own queue and added songs. They do not survive the move.
+  await target.engine.play([song("x1")], 0);
+  await target.engine.enqueue([song("x2")], false);
+  const calls: string[] = [];
+  Object.assign(target.music, {
+    volume: 0.8, repeatMode: 0, shuffleMode: 0,
+    play: async () => { calls.push(`play ${target.music.volume}`); target.music.playbackState = 2; },
+    pause: async () => { calls.push("pause"); target.music.playbackState = 3; },
+    seekToTime: async (time: number) => { calls.push(`seek ${time}`); },
+  });
+  await target.engine.importPlayback(JSON.parse(JSON.stringify(exported)));
+  expect(target.music.items.map((item: any) => item.id)).toEqual(["c1", "c2", "a1", "c3"]);
+  expect(target.music.position).toBe(1);
+  expect(target.queued()).toEqual(["a1"]);
+  expect(target.music.repeatMode).toBe(2);
+  expect(calls).toEqual(["play 0.8", "seek 73"]);
+  // A paused queue reaches its position muted and stays paused, at this engine's own volume.
+  calls.length = 0;
+  await target.engine.importPlayback({ ...exported, playing: false });
+  expect(calls).toEqual(["play 0", "seek 73", "pause"]);
+  expect(target.music.volume).toBe(0.8);
+});
+
+test("an import that fails partway leaves the engine paused at its own volume", async () => {
+  const { engine, music } = await musicKit();
+  let playing = false;
+  Object.assign(music, { volume: 0.7, play: async () => { playing = true; }, pause: async () => { playing = false; }, seekToTime: async () => { throw new Error("seek failed"); } });
+  await expect(engine.importPlayback({ items: [song("c1")], position: 0, time: 30, playing: true })).rejects.toThrow("seek failed");
+  expect(playing).toBe(false);
+  await expect(engine.importPlayback({ items: [song("c1")], position: 0, time: 30, playing: false })).rejects.toThrow("seek failed");
+  expect(playing).toBe(false);
+  expect(music.volume).toBe(0.7);
+});

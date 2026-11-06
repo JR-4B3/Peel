@@ -39,7 +39,7 @@ function host() {
   return { ...api, local, client, commands, retained: () => retained, releases: () => releases, ready: () => ready };
 }
 
-test("remote controllers share host playback and disconnect without quitting it", async () => {
+test("remote controllers share host playback, and each one releases its helper's hold when it disconnects", async () => {
   const app = host(), first = app.client(), second = app.client();
   await first.command("/playback/toggle");
   expect((await second.snapshot()).state).toBe("playing");
@@ -47,7 +47,7 @@ test("remote controllers share host playback and disconnect without quitting it"
   expect((await first.snapshot()).time.currentTime).toBe(47);
   await first.command("/playback/toggle");
   expect((await second.snapshot()).state).toBe("paused");
-  expect(app.retained()).toBe(true);
+  expect(app.retained()).toBe(false);
   expect(app.releases()).toBe(6);
   expect(app.commands).not.toContain("quit");
 });
@@ -91,7 +91,7 @@ test("settings switch controllers, show the host, and keep the previous target a
   await model.start(); await model.open("settings");
   await model.selectOutput("main"); await app.flush();
   expect(model.preferences.remote).toBe("main");
-  expect(app.captureCharFrame()).toContain("Control playback on");
+  expect(app.captureCharFrame()).toContain("Control over SSH");
   expect(app.captureCharFrame()).toContain("On main");
   await model.selectOutput("offline");
   expect(model.preferences.remote).toBe("main");
