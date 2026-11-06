@@ -432,7 +432,7 @@ export class Model extends EventEmitter {
     this.activation = activation;
     activation.promise = (async () => {
       try {
-        if (item.queueIndex !== undefined) await this.act("/queue/jump", { index: item.queueIndex });
+        if (item.queueIndex !== undefined) await this.act("/queue/jump", { index: item.queueIndex, id: item.id });
         else if (collection && index >= 0) await this.execute(() => this.player.playCollectionTrack(collection, list, index));
         else await this.execute(() => this.player.playItem(item));
       } finally { activation.pending = false; }

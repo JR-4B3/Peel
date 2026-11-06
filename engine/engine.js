@@ -80,6 +80,8 @@
       };
     },
     tokens: () => ({ userToken: music.musicUserToken, storefront: music.storefrontId }),
+    pause: () => music.pause(),
+    resume: () => music.play(),
     toggle: () => music.playbackState === 2 ? music.pause() : music.play(),
     next: () => music.skipToNextItem(),
     previous: () => music.skipToPreviousItem(),
@@ -127,7 +129,10 @@
       if (expected && music.queue.items[index]?.id !== expected) throw new Error("The queue changed on another controller. Try again.");
       if (index > music.queue.position) music.queue.spliceQueueItems(index, 1);
     },
-    jump: index => music.changeToMediaAtIndex(index),
+    jump: async (index, expected) => {
+      if (expected && music.queue.items[index]?.id !== expected) throw new Error("The queue changed on another controller. Try again.");
+      await music.changeToMediaAtIndex(index);
+    },
     queue: () => ({ position: music.queue.position, items: music.queue.items.map(item => ({ ...describe(item), added: pending().includes(item) })) }),
     rating: async () => await readRating(music.nowPlayingItem) ?? -1,
     // Peel names the song it means. A song that changed since then is not rated.

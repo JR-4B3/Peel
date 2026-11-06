@@ -74,7 +74,10 @@ export class DevicePlayer extends Engine {
   async select(host?: string) {
     const next = host ? new RemoteConnection(host, this.status) : undefined;
     try {
-      if (next) await next.request("/state");
+      if (next) {
+        await next.request("/state");
+        if (!this.remote && (await this.local.snapshot().catch(() => undefined))?.state === "playing") await this.local.command("/playback/pause");
+      }
       else { this.localUsed = true; await ensureEngine(this.local, this.status); }
     } catch (error) { next?.close(); throw error; }
     this.remote?.close(); this.remote = next; this.host = host;

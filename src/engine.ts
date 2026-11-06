@@ -328,6 +328,8 @@ export class Engine implements Player {
   // Peel's controls use Cider's command paths. The engine has a method for each.
   async command(path: string, body: any = {}, method = "POST") {
     const commands: Record<string, () => Promise<unknown>> = {
+      "/playback/pause": () => this.call("pause"),
+      "/playback/play": () => this.call("resume"),
       "/playback/toggle": () => this.call("toggle"),
       "/playback/next": () => this.call("next"),
       "/playback/previous": () => this.call("previous"),
@@ -336,7 +338,7 @@ export class Engine implements Player {
       "/playback/shuffle": () => this.call("shuffle", body.enabled),
       "/playback/shuffle/toggle": () => this.call("toggleShuffle"),
       "/playback/repeat/toggle": () => this.call("toggleRepeat"),
-      "/queue/jump": () => this.call("jump", body.index),
+      "/queue/jump": () => this.call("jump", body.index, ...(body.id ? [body.id] : [])),
       "/queue/move": () => this.call("move", body.from, body.to, ...(body.id ? [body.id, body.targetId] : [])),
       "/library/now-playing/rating": () => this.call("rate", method === "DELETE" ? 0 : body.rating, ...(body.id ? [body.id] : [])),
     };

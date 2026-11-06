@@ -12,7 +12,7 @@ In Settings, click "Control playback on" to cycle through this computer and save
 
 Closing a controller leaves the remote engine playing. Reopening Peel reads its queue again. Run `peel --stop-host` on the host to shut down a retained engine. Rebooting or upgrading the host engine clears its in-memory queue.
 
-Use `peel --local` to return to this computer's engine. This changes which computer you control. It does not move music or a queue between engines. A failed remote connection never starts the local player as a fallback. Commands with a lost response are not replayed.
+Use `peel --local` to return to this computer's engine. This changes which computer you control. It does not move music or a queue between engines. Selecting a remote host pauses local playback. Leaving a remote host keeps its music playing for other controllers. A failed remote connection never starts the local player as a fallback. Commands with a lost response are not replayed.
 
 The SSH helper starts through `~/.local/bin/peel`, which the Linux and macOS installers create. Windows can control a host through its OpenSSH client. Hosting on Windows needs a compatible remote launcher and is not tested.
 

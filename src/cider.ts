@@ -66,7 +66,7 @@ export class Cider implements Player {
   async command(path: string, body: unknown = {}, method = "POST") {
     if (path === "/playback/play-item" || path === "/playback/play-collection" || path === "/queue/jump") this.starts++;
     // Cider cannot check the expected song IDs used by Peel's engine.
-    if ((path === "/library/now-playing/rating" || path === "/queue/move" || path.startsWith("/queue/items/")) && body && typeof body === "object") { const { id: _, targetId: _target, ...rest } = body as Record<string, unknown>; body = rest; }
+    if ((path === "/library/now-playing/rating" || path === "/queue/move" || path === "/queue/jump" || path.startsWith("/queue/items/")) && body && typeof body === "object") { const { id: _, targetId: _target, ...rest } = body as Record<string, unknown>; body = rest; }
     await this.request(path, body, method);
   }
 

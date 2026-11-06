@@ -71,7 +71,9 @@ function serve(window, key) {
   let calling = Promise.resolve();
   const call = (method, args = []) => {
     if (!/^\w+$/.test(method)) throw new Error("Invalid method");
-    const result = calling.catch(() => {}).then(() => window.webContents.executeJavaScript(`window.peelEngine ? Promise.resolve(window.peelEngine.${method}(...${JSON.stringify(args)})) : { ready: false }`));
+    const run = () => window.webContents.executeJavaScript(`Promise.resolve().then(() => window.peelEngine ? window.peelEngine.${method}(...${JSON.stringify(args)}) : { ready: false })`);
+    if (method === "state") return run();
+    const result = calling.catch(() => {}).then(run);
     calling = result;
     return result;
   };

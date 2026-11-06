@@ -179,3 +179,14 @@ test("a stale queue removal or move cannot edit another controller's song", asyn
   expect(() => engine.move(1, 2, "a1", "c2")).toThrow("queue changed");
   expect(music.items.map((item: any) => item.id)).toEqual(["c1", "a2", "c2"]);
 });
+
+test("a stale queue click refuses to jump to a different song", async () => {
+  const { engine, music } = await musicKit();
+  await engine.play([song("c1"), song("c2")], 0);
+  await engine.enqueue([song("a1"), song("a2")], false);
+  engine.remove(1, "a1");
+  await expect(engine.jump(2, "a2")).rejects.toThrow("queue changed");
+  expect(music.position).toBe(0);
+  await engine.jump(1, "a2");
+  expect(music.items[music.position].id).toBe("a2");
+});

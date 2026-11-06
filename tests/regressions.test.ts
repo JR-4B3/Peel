@@ -260,3 +260,21 @@ test("commands from different controllers finish in order on the host", async ()
   await Promise.all([first, second]);
   expect(completed).toEqual(["enqueue", "remove"]);
 });
+
+test("status polling stays responsive while a host command is waiting", async () => {
+  const { context, server } = engineMain({});
+  let unblock!: () => void;
+  const held = new Promise<void>(resolve => { unblock = resolve; });
+  context.serve({ webContents: { executeJavaScript: async (source: string) => {
+    if (source.includes(".enqueue(")) { await held; return null; }
+    return { ready: true };
+  } } }, "test-key");
+  await once(server(), "listening"); cleanup.push(() => server().close());
+  const port = (server().address() as net.AddressInfo).port;
+  const command = fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method: "enqueue", args: [] }) });
+  await Bun.sleep(5);
+  try {
+    const state = await fetch(`http://127.0.0.1:${port}/state`, { headers: { "x-peel-key": "test-key" }, signal: AbortSignal.timeout(1000) });
+    expect((await state.json()).ready).toBe(true);
+  } finally { unblock(); await command; }
+});
