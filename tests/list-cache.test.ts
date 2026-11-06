@@ -35,35 +35,76 @@ test("a list opened before shows its songs while Apple is asked again", async ()
   expect({ items: ids(model), loading: model.loading }).toEqual({ items: ["1", "2", "3"], loading: false });
 });
 
-test("an unchanged answer keeps the list and its favourite marks", async () => {
+test("a refreshed list shows earlier hearts until Apple answers again", async () => {
   const { model, library } = setup();
-  let ratings = 0;
   library.songs = async () => ({ items: [song("1"), song("2")], more: false });
-  library.ratings = async () => { ratings++; return new Set(["2"]); };
-  await model.open("songs"); await Bun.sleep(0);
-  const first = model.items;
-  expect(first.map(item => item.loved)).toEqual([false, true]);
-
-  await model.open("albums");
-  await model.open("songs"); await Bun.sleep(0);
-  expect(model.items).toBe(first);
-  expect(ratings).toBe(1);
-});
-
-test("a refreshed list keeps the marks of songs it still has", async () => {
-  const { model, library } = setup();
-  library.songs = async () => ({ items: [song("1")], more: false });
   library.ratings = async () => new Set(["1"]);
   await model.open("songs"); await Bun.sleep(0);
   await model.open("albums");
 
   const asked: string[][] = [];
-  library.songs = async () => ({ items: [song("1"), song("2")], more: false });
-  library.ratings = async songs => { asked.push(songs.map(item => item.id)); return new Set(); };
-  await model.open("songs"); await Bun.sleep(0);
-  expect(model.items.map(item => [item.id, item.loved])).toEqual([["1", true], ["2", false]]);
-  // Only the new song needed asking.
-  expect(asked).toEqual([["2"]]);
+  let answer!: (loved: Set<string>) => void;
+  library.songs = async () => ({ items: [song("1"), song("2"), song("3")], more: false });
+  library.ratings = songs => { asked.push(songs.map(item => item.id)); return new Promise(resolve => { answer = resolve; }); };
+  await model.open("songs");
+  const marks = () => model.items.map(item => [item.id, item.loved]);
+  expect(marks()).toEqual([["1", true], ["2", false], ["3", undefined]]);
+  // Every song is asked again, since a favourite can change on another device.
+  expect(asked).toEqual([["1", "2", "3"]]);
+  answer(new Set(["2"])); await Bun.sleep(0);
+  expect(marks()).toEqual([["1", false], ["2", true], ["3", false]]);
+});
+
+test("a song listed twice stays two entries after a refresh", async () => {
+  const { model, library } = setup();
+  library.songs = async () => ({ items: [song("1"), song("2"), song("1")], more: false });
+  await model.open("songs");
+  await model.open("albums");
+  await model.open("songs");
+  expect(model.items[0]).not.toBe(model.items[2]);
+  expect(model.items.indexOf(model.items[2]!)).toBe(2);
+});
+
+test("an emptied list does not show its old songs on the next visit", async () => {
+  const { model, library } = setup();
+  library.songs = async () => ({ items: [song("1")], more: false });
+  await model.open("songs");
+  await model.open("albums");
+  library.songs = async () => ({ items: [], more: false });
+  await model.open("songs");
+  await model.open("albums");
+  library.songs = () => new Promise(() => {});
+  void model.open("songs");
+  expect(model.items).toEqual([]);
+});
+
+test("going back to a list whose refresh was interrupted asks Apple again", async () => {
+  const { model, library } = setup();
+  library.songs = async () => ({ items: [song("1")], more: false });
+  await model.open("songs");
+  await model.open("albums");
+
+  let asked = 0;
+  library.songs = async () => { asked++; return asked === 1 ? new Promise(() => {}) : { items: [song("1"), song("2")], more: false }; };
+  void model.open("songs");
+  await model.openCollection({ ...song("a"), type: "library-albums" });
+  await model.back(); await Bun.sleep(0);
+  expect({ asked, items: ids(model), loading: model.loading }).toEqual({ asked: 2, items: ["1", "2"], loading: false });
+});
+
+test("a long list keeps only its first songs for the next visit", async () => {
+  const { model, library } = setup();
+  const page = (offset: number): Page => ({ items: Array.from({ length: 100 }, (_, index) => song(String(offset + index))), more: offset < 900 });
+  library.songs = async (_id, offset = 0) => page(offset);
+  await model.open("songs");
+  await model.load(true, Infinity);
+  expect(model.items.length).toBe(1000);
+  await model.open("albums");
+
+  const offsets: number[] = [];
+  library.songs = async (_id, offset = 0) => { offsets.push(offset); return page(offset); };
+  await model.open("songs");
+  expect({ count: model.items.length, more: model.more, offsets }).toEqual({ count: 500, more: true, offsets: [0, 100, 200, 300, 400] });
 });
 
 test("a list left halfway through loading continues from the songs it had", async () => {
@@ -111,13 +152,17 @@ test("the sidebar's lists are read ahead, so even a first visit shows songs at o
   const { model, library } = setup();
   const asked: string[] = [];
   const favourite = { ...song("p.fav"), type: "library-playlists", favourite: true };
-  library.playlists = async () => [favourite];
+  // Many playlists come before the library's own lists in the sidebar.
+  library.playlists = async () => [favourite, ...Array.from({ length: 20 }, (_, index) => ({ ...song(`p.${index}`), type: "library-playlists" }))];
   library.songs = async (id, offset = 0) => { asked.push(`${id ?? "all"}@${offset}`); return { items: [song(id ?? "all")], more: false }; };
   library.albums = async () => ({ items: [{ ...song("album"), type: "library-albums" }], more: false });
   await (model as unknown as { loadNavigation(): Promise<void> }).loadNavigation();
   await Bun.sleep(10);
-  // Only first pages, and nothing for the queue or settings.
-  expect(asked.sort()).toEqual(["all@0", "p.fav@0"]);
+  // Only first pages, of at most twelve lists, the library's own first. Nothing for the queue or settings.
+  expect(asked).toContain("all@0");
+  expect(asked).toContain("p.fav@0");
+  expect(asked.every(call => call.endsWith("@0"))).toBe(true);
+  expect(asked.length).toBe(12 - 2);
 
   library.songs = () => new Promise(() => {});
   void model.open("favourites");
@@ -139,9 +184,10 @@ test("a read ahead list grows page by page once the new answer covers it", async
   const opening = model.open("songs");
   expect(model.items).toBe(first);
   answers.get(0)!(page(0)); await Bun.sleep(0);
-  // The first page matches, so the shown songs stay the same objects and the next pages follow.
-  expect(model.items).toBe(first);
+  // The new first page covers the read ahead one, so it shows and the next pages follow.
+  expect({ count: model.items.length, loading: model.loading }).toEqual({ count: 100, loading: true });
+  expect(model.items).not.toBe(first);
   for (const offset of [100, 200, 300, 400]) answers.get(offset)!(page(offset));
   await opening;
-  expect({ count: model.items.length, first: model.items[0], loading: model.loading }).toEqual({ count: 500, first: first[0], loading: false });
+  expect({ count: model.items.length, loading: model.loading }).toEqual({ count: 500, loading: false });
 });

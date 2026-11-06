@@ -217,9 +217,11 @@ export class Model extends EventEmitter {
   }
 
   // Reads the first page of the sidebar's lists once the sidebar has loaded, so even the first
-  // visit to one shows songs at once. Two requests run at a time, so Apple is not flooded.
+  // visit to one shows songs at once. The library's own lists come first, then playlists in
+  // sidebar order. Two requests run at a time, so Apple is not flooded.
   private async prefetch() {
-    const ids = this.entries().map(item => item.id).filter(id => !["queue", "settings"].includes(id)).slice(0, prefetchedLists);
+    const visible = this.entries().map(item => item.id).filter(id => !["queue", "settings"].includes(id));
+    const ids = [...visible.filter(id => !id.startsWith("playlist:")), ...visible.filter(id => id.startsWith("playlist:"))].slice(0, prefetchedLists);
     const next = async (): Promise<void> => {
       const id = ids.shift();
       if (!id) return;
@@ -322,9 +324,9 @@ export class Model extends EventEmitter {
     this.generation++; this.loading = false;
     ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter } = previous);
     this.changed();
-    // Opening the page stopped this list's loading. A list left before its first page arrived
-    // loads again. Otherwise the background loading continues where it was.
-    if (previous.loading && !this.items.length && this.loader) void this.load(false);
+    // Opening the page stopped this list's loading, so the list loads again. The songs it had
+    // stay on screen meanwhile. A finished list continues its background loading.
+    if (previous.loading && this.loader) void this.load(false);
     else if (this.more && this.items.length < backgroundLimit) void this.load(true, backgroundLimit);
     return closed;
   }
@@ -382,13 +384,11 @@ export class Model extends EventEmitter {
           }
           if (cached && !live && (!more || items.length >= cached.items.length)) {
             live = true;
-            // Songs Apple still lists keep their objects and favourite marks, so hearts do not blink.
-            const old = new Map(cached.items.map(item => [item.id, item]));
-            items = items.map(item => old.get(item.id) ?? item);
-            const same = more === cached.more && items.length === cached.items.length && items.every((item, index) => item === cached.items[index]);
-            if (same) items = cached.items;
-            // Read ahead lists have no favourite marks yet.
-            void this.markLoved(items);
+            // Songs still in the list show their earlier favourite marks until Apple answers, so
+            // hearts do not blink. A song favourited elsewhere meanwhile gets its heart then.
+            const loved = new Map(cached.items.map(item => [item.id, item.loved]));
+            for (const item of items) item.loved ??= loved.get(item.id);
+            void this.markLoved(items, true);
           }
           if (live) { this.items = items; this.more = more; this.keep(); this.changed(); }
         } while (more && items.length < target);
@@ -402,10 +402,14 @@ export class Model extends EventEmitter {
   // the player and is always read again.
   private lists = new Map<string, { items: Media[]; more: boolean }>();
   private listKey() { return this.view === "queue" || this.view === "settings" || this.view === "home" ? undefined : this.view; }
+  // Only the first backgroundLimit songs are kept, so going back to a long list does not read
+  // all of it again. Filtering the list loads the rest, as on a first visit.
   private keep(key = this.listKey(), items = this.items, more = this.more) {
-    if (!key || !items.length) return;
+    if (!key) return;
     this.lists.delete(key);
-    this.lists.set(key, { items, more });
+    // An emptied list must not show its old songs on the next visit.
+    if (!items.length) return;
+    this.lists.set(key, items.length > backgroundLimit ? { items: items.slice(0, backgroundLimit), more: true } : { items, more });
     // The oldest lists go first once there are many.
     while (this.lists.size > keptLists) this.lists.delete(this.lists.keys().next().value!);
   }
@@ -463,8 +467,9 @@ export class Model extends EventEmitter {
   }
 
   // Marks which songs are favourites, so their rows show a heart. Every song in Favourite Songs is one.
-  private async markLoved(items: Media[]) {
-    const songs = items.filter(item => /songs/.test(item.type) && item.loved === undefined);
+  // Marks shown from an earlier answer are asked again when recheck is set.
+  private async markLoved(items: Media[], recheck = false) {
+    const songs = items.filter(item => /songs/.test(item.type) && (recheck || item.loved === undefined));
     if (!songs.length) return;
     if (this.view === "favourites") { for (const item of songs) item.loved = true; this.lovedRevision++; this.changed(); return; }
     try {
