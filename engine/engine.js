@@ -64,6 +64,16 @@
     ...(catalogId(item) && catalogId(item) !== item.id ? { catalogId: catalogId(item) } : {}),
   };
   const pending = () => music.queue.items.slice(music.queue.position + 1).filter(item => added.has(item));
+  // A short fingerprint of the queue: the playing place and every entry with its added mark. Peel
+  // reads the state every second, often over the network, so it carries 8 characters instead of
+  // every song's ID. FNV-1a, which is enough to notice a change.
+  function revision() {
+    let hash = 0x811c9dc5;
+    const add = text => { for (let i = 0; i < text.length; i++) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 0x01000193); } };
+    add(String(music.queue.position));
+    for (const item of music.queue.items) add(`|${item.id}${added.has(item) ? "+" : ""}`);
+    return (hash >>> 0).toString(16).padStart(8, "0");
+  }
   async function insert(items, at) {
     await music.playAt(at, { items: items.map(resource) });
     music.queue.items.slice(at, at + items.length).forEach((item, index) => added.set(item, items[index]));
@@ -86,7 +96,7 @@
             playParams: { id: item.id, catalogId: catalogId(item) },
           } : null,
           time: { currentTime: music.currentPlaybackTime ?? 0, duration: music.currentPlaybackDuration ?? 0 },
-          queueRevision: JSON.stringify([music.queue.position, music.queue.items.map(item => [item.id, added.has(item)])]),
+          queueRevision: revision(),
           volume: music.volume, repeatMode: repeats[music.repeatMode] ?? "none", shuffleMode: music.shuffleMode === 1,
         },
       };
@@ -148,6 +158,13 @@
       await music.changeToMediaAtIndex(index);
     },
     queue: () => ({ position: music.queue.position, items: music.queue.items.map(item => ({ ...describe(item), added: pending().includes(item) })) }),
+    // Only the songs the listener added and has not heard, with their places in the queue. The
+    // Queue view shows nothing else, so the rest of the collection does not cross the network.
+    added: (offset = 0, limit = 100) => {
+      const position = music.queue.position, entries = music.queue.items.map((item, index) => ({ item, index })).filter(({ item, index }) => index > position && added.has(item));
+      return { more: offset + limit < entries.length, items: entries.slice(offset, offset + limit).map(({ item, index }) => ({ ...describe(item), queueIndex: index })) };
+    },
+    position: () => ({ position: music.queue.position, total: music.queue.items.length }),
     // The whole queue, the playing place, and the position, so another device can continue it.
     exportPlayback: () => {
       const items = music.queue.items, position = music.queue.position;

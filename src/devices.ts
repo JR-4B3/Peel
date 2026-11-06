@@ -40,7 +40,7 @@ interface Stored { id: string; keys: GroupKey[]; known: Known[]; output?: Claim 
 interface Nearby { id: string; name: string; address: string; port: number; keys: string[]; seen: number }
 
 // The engine methods another device may call. Tokens and stream quality stay on this computer.
-const methods = new Set(["state", "pause", "stop", "resume", "toggle", "next", "previous", "seek", "volume", "shuffle", "toggleShuffle", "toggleRepeat", "play", "enqueue", "move", "remove", "jump", "queue", "rating", "rate", "exportPlayback", "importPlayback"]);
+const methods = new Set(["state", "pause", "stop", "resume", "toggle", "next", "previous", "seek", "volume", "shuffle", "toggleShuffle", "toggleRepeat", "play", "enqueue", "move", "remove", "jump", "queue", "added", "position", "rating", "rate", "exportPlayback", "importPlayback"]);
 export function allowedRequest(path: unknown, body: any) {
   if (path === "/state") return body === undefined;
   return path === "/call" && typeof body?.method === "string" && methods.has(body.method) && (body.args === undefined || Array.isArray(body.args));
@@ -83,6 +83,8 @@ export function onLocalNetwork(address: string) {
 // Generations stay far below the largest safe integer, so a claim can always be raised by one.
 const validClaim = (value: any): value is Claim => validId(value?.device) && Number.isSafeInteger(value?.generation) && value.generation >= 0 && value.generation < 2 ** 40;
 export const newer = (a: Claim, b: Claim) => a.generation > b.generation || a.generation === b.generation && a.device > b.device;
+const carriesKeys = (value: any) => Array.isArray(value?.body?.keys) && value.body.keys.some((key: unknown) => typeof key === "object")
+  || Array.isArray(value?.value?.keys) && value.value.keys.some((key: unknown) => typeof key === "object");
 // A request that got no answer may still have run on the other device.
 export const unanswered = (text: string) => Object.assign(new Error(text), { unanswered: true });
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
@@ -139,7 +141,8 @@ class Session {
     });
   }
 
-  private post(value: unknown) { if (!this.closed) { try { this.send(this.cipher.seal(value)); } catch { this.end(); } } }
+  // Group keys are never compressed. Everything else that is large is: queues, exports, and imports.
+  private post(value: unknown) { if (!this.closed) { try { this.send(this.cipher.seal(value, !carriesKeys(value))); } catch { this.end(); } } }
 
   end() {
     if (this.closed) return;

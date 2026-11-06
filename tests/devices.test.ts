@@ -642,3 +642,27 @@ test("a device list never makes Peel connect to this computer itself", async () 
   await Bun.sleep(600);
   expect(reached).toBe(false);
 });
+
+test("large messages are compressed, keys never are, and a small message cannot unpack into a huge one", async () => {
+  const { deflateRawSync } = await import("node:zlib");
+  const key = Buffer.alloc(32, 3);
+  const queue = { items: Array.from({ length: 300 }, (_, index) => ({ id: `i.${index}`, name: `Song ${index}`, artwork: "https://is1-ssl.mzstatic.com/image/thumb/Music/v4/{w}x{h}bb.jpg" })) };
+  const compressed = new Cipher(key, key).seal(queue, true), plain = new Cipher(key, key).seal(queue, false);
+  expect(compressed.length * 5).toBeLessThan(plain.length);
+  expect(new Cipher(key, key).open(compressed)).toEqual(queue);
+  // A session never compresses a message that carries group keys.
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  const sent: string[] = [];
+  const session = [...(mac.network as any).sessions.get(main.network.id)][0];
+  const seal = session.cipher.seal.bind(session.cipher);
+  session.cipher.seal = (value: unknown, compress?: boolean) => { if (compress) sent.push(JSON.stringify(value)); return seal(value, compress); };
+  await (mac.network as any).sync(session);
+  expect(sent.some(text => text.includes('"key":'))).toBe(false);
+  // A compressed bomb is refused.
+  const bomb = Buffer.concat([Buffer.from("z"), deflateRawSync(Buffer.alloc(64 * 1024 * 1024, 32))]);
+  const { createCipheriv } = await import("node:crypto");
+  const cipher = createCipheriv("aes-256-gcm", key, Buffer.alloc(12));
+  const sealed = Buffer.concat([cipher.update(bomb), cipher.final(), cipher.getAuthTag()]).toString("base64url");
+  expect(() => new Cipher(key, key).open(sealed)).toThrow();
+});

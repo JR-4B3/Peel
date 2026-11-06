@@ -250,3 +250,25 @@ test("a moved queue keeps library songs as library songs, and survives a song Mu
   expect(target.music.items[target.music.position].id).toBe("i.three");
   expect(target.queued()).toEqual(["i.added"]);
 });
+
+test("the state names the queue with a short fingerprint that changes with the queue", async () => {
+  const { engine } = await musicKit();
+  await engine.play([song("c1"), song("c2"), song("c3")], 0);
+  const first = engine.state().playback.queueRevision;
+  expect(first).toMatch(/^[0-9a-f]{8}$/);
+  expect(engine.state().playback.queueRevision).toBe(first);
+  await engine.enqueue([song("a1")], false);
+  const added = engine.state().playback.queueRevision;
+  expect(added).not.toBe(first);
+  await engine.jump(1);
+  expect(engine.state().playback.queueRevision).not.toBe(added);
+});
+
+test("the engine lists only the added songs and the queue's place for the network", async () => {
+  const { engine } = await musicKit();
+  await engine.play([song("c1"), song("c2"), song("c3")], 0);
+  await engine.enqueue([song("a1"), song("a2")], false);
+  expect(engine.added(0, 100)).toEqual({ more: false, items: [expect.objectContaining({ id: "a1", queueIndex: 1 }), expect.objectContaining({ id: "a2", queueIndex: 2 })] });
+  expect(engine.added(1, 1)).toEqual({ more: false, items: [expect.objectContaining({ id: "a2", queueIndex: 2 })] });
+  expect(engine.position()).toEqual({ position: 0, total: 5 });
+});

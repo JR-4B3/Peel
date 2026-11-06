@@ -33,6 +33,20 @@ The popups blank the cells under them without painting a background, so the term
 
 Another device can read this computer's engine state and send it playback commands: play, pause, skip, seek, volume, shuffle, repeat, queue edits, ratings, and moving a queue. It cannot read the Apple sign-in, change the stream quality, or stop the engine. Engine requests from another device start this computer's engine when it is not running, as a song chosen here would.
 
+## Network use
+
+Only the device that plays streams music, straight from Apple, at 256 or 64 kbps. A Peel that controls another device sends no audio. Measured with a queue of 500 library songs:
+
+| What | When | Size |
+| --- | --- | --- |
+| Playback state | Every second, while a Peel controls another device | 0.6 KB |
+| Status check | Every two seconds, between connected devices | about 0.3 KB each way |
+| Added songs | When the Queue view is open and the queue changes | 0.1 KB plus about 0.2 KB per added song |
+| Moving the music | Each move | about 13 KB |
+| Announcement | Every three seconds, on the local network only | about 0.2 KB |
+
+Controlling a device needs about 1 KB/s, so it works over a weak mobile connection or a Tailscale relay. The state names the queue by an 8-character fingerprint instead of every song's ID, the Queue view asks only for the added songs, and messages larger than 2 KB are compressed before they are encrypted. Messages that carry group keys are never compressed, since compressed sizes can reveal parts of a secret.
+
 ## Which device plays
 
 Each device keeps a claim: the device it thinks plays, with a generation number. A device that moves the music raises the generation by one and tells every device it is connected to. Devices also exchange claims every two seconds. A higher generation wins, and the larger device ID breaks a tie, so all devices end up agreeing, even when two moved the music at the same moment. A device that loses the music to another pauses its own engine.

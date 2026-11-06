@@ -1,3 +1,4 @@
+import { deflateRawSync, inflateRawSync } from "node:zlib";
 import { createCipheriv, createDecipheriv, createHash, createHmac, createPublicKey, diffieHellman, generateKeyPairSync, hkdfSync, randomBytes, timingSafeEqual, type KeyObject } from "node:crypto";
 
 // Paired Peels share group keys: random 32-byte secrets that never cross the network unencrypted.
@@ -39,9 +40,15 @@ export class Cipher {
   private received = 0n;
   constructor(private sendKey: Buffer, private receiveKey: Buffer) {}
   private static nonce(count: bigint) { const nonce = Buffer.alloc(12); nonce.writeBigUInt64BE(count, 4); return nonce; }
-  seal(value: unknown) {
+  // Large messages, such as a queue of a few hundred songs, are compressed before they are
+  // encrypted, which makes them about fifteen times smaller. compress is false for anything that
+  // carries a secret, since compressed sizes can reveal parts of it. A compressed message starts
+  // with "z", which JSON never does.
+  seal(value: unknown, compress = false) {
+    const json = JSON.stringify(value);
+    const plain = compress && json.length > 2048 ? Buffer.concat([Buffer.from("z"), deflateRawSync(json)]) : Buffer.from(json);
     const cipher = createCipheriv("aes-256-gcm", this.sendKey, Cipher.nonce(this.sent++));
-    const body = Buffer.concat([cipher.update(JSON.stringify(value)), cipher.final()]);
+    const body = Buffer.concat([cipher.update(plain), cipher.final()]);
     return Buffer.concat([body, cipher.getAuthTag()]).toString("base64url");
   }
   open(text: string): any {
@@ -49,7 +56,9 @@ export class Cipher {
     if (data.length < 16) throw new Error("Invalid message");
     const decipher = createDecipheriv("aes-256-gcm", this.receiveKey, Cipher.nonce(this.received++));
     decipher.setAuthTag(data.subarray(data.length - 16));
-    return JSON.parse(Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]).toString());
+    const plain = Buffer.concat([decipher.update(data.subarray(0, data.length - 16)), decipher.final()]);
+    // A small message cannot unpack into more than a paired device may send anyway.
+    return JSON.parse((plain[0] === 0x7a ? inflateRawSync(plain.subarray(1), { maxOutputLength: 16 * 1024 * 1024 }) : plain).toString());
   }
 }
 
