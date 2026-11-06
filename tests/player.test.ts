@@ -440,7 +440,8 @@ describe("home, albums, and favourites", () => {
     const app = await setup(120, 36, undefined, cached);
     expect(app.captureCharFrame()).toContain("Cached");
     expect(app.model.home.releases.map(item => item.id)).toEqual(["a.cached"]);
-    expect(app.calls.some(call => call.path === "/v1/me/library/artists")).toBe(false);
+    // The sidebar's Artists list is read ahead, so the scan shows as its catalog request.
+    expect(app.calls.some(call => call.path === "/v1/catalog/de/artists")).toBe(false);
     expect(app.model.home.recent.map(item => item.id)).toEqual(["a.soma", "pl.mix"]);
   });
 

@@ -45,6 +45,8 @@ const navigationRetry = 10000;
 // Apple returns a hundred items per request. Lists load backgroundLimit items without scrolling.
 const pageSize = 100;
 export const backgroundLimit = 500;
+const keptLists = 40;
+const prefetchedLists = 12;
 const memoryStore: HomeStore = { read: async () => undefined, write: async () => {} };
 
 export class Model extends EventEmitter {
@@ -86,6 +88,7 @@ export class Model extends EventEmitter {
   // Albums' favourite marks by album id, once Apple has answered.
   private albumsLoved = new Map<string, boolean>();
   private homeRead = false;
+  private prefetched = false;
   releases: Promise<void> = Promise.resolve();
 
   // Starts Cider when it is not running. Tests and custom API addresses need nothing started.
@@ -126,6 +129,7 @@ export class Model extends EventEmitter {
         this.playlists = await this.library.playlists();
         this.browsingReady = true;
         this.changed();
+        if (!this.prefetched) { this.prefetched = true; void this.prefetch(); }
       } catch (error) { this.fail(error); }
       finally { this.navigating = undefined; }
     })();
@@ -197,14 +201,39 @@ export class Model extends EventEmitter {
         this.generation++; this.items = []; this.more = false; this.loading = false;
         this.status = "No Favourite Songs playlist returned by Apple Music."; this.changed(); return;
       }
-      this.loader = offset => this.library.songs(navigation.media!.id, offset);
       this.collection = { id: navigation.media.id, type: navigation.media.type };
-    } else if (id === "albums") this.loader = offset => this.library.albums(offset);
-    else if (id === "artists") this.loader = offset => this.library.artists(offset);
-    // The queue lives in Cider. Before Cider runs there is nothing queued.
-    else if (id === "queue") this.loader = offset => this.connected ? this.player.queue(offset) : Promise.resolve({ items: [], more: false });
-    else this.loader = offset => this.library.songs(undefined, offset);
+    }
+    this.loader = this.loaderFor(id, navigation);
     await this.load(false);
+  }
+
+  private loaderFor(id: string, navigation?: Navigation): (offset: number) => Promise<Page> {
+    if (navigation?.media) return offset => this.library.songs(navigation.media!.id, offset);
+    if (id === "albums") return offset => this.library.albums(offset);
+    if (id === "artists") return offset => this.library.artists(offset);
+    // The queue lives in Cider. Before Cider runs there is nothing queued.
+    if (id === "queue") return offset => this.connected ? this.player.queue(offset) : Promise.resolve({ items: [], more: false });
+    return offset => this.library.songs(undefined, offset);
+  }
+
+  // Reads the first page of the sidebar's lists once the sidebar has loaded, so even the first
+  // visit to one shows songs at once. Two requests run at a time, so Apple is not flooded.
+  private async prefetch() {
+    const ids = this.entries().map(item => item.id).filter(id => !["queue", "settings"].includes(id)).slice(0, prefetchedLists);
+    const next = async (): Promise<void> => {
+      const id = ids.shift();
+      if (!id) return;
+      const navigation = this.navigation().find(item => item.id === id);
+      if (!this.lists.has(id) && (id !== "favourites" && !id.startsWith("playlist:") || navigation?.media)) {
+        try {
+          const page = await this.loaderFor(id, navigation)(0);
+          // A visit that started meanwhile has newer songs.
+          if (!this.lists.has(id) && page.items.length) this.keep(id, page.items, page.more);
+        } catch {}
+      }
+      return next();
+    };
+    await Promise.all([next(), next()]);
   }
 
   async loadHome(force = false) {
@@ -324,31 +353,61 @@ export class Model extends EventEmitter {
 
   // A list opens with its first page, then keeps loading pages in the background up to
   // backgroundLimit items. Past that, scrolling near the end loads one more page each time.
+  // A list opened before shows its last songs at once while Apple is asked again. The answer
+  // replaces them in one step, and only if something changed.
   load(append: boolean, until = append ? 0 : backgroundLimit) {
     if (!this.loader || append && this.loading) return this.loads ?? Promise.resolve();
-    const generation = ++this.generation, loader = this.loader;
-    if (!append) { this.items = []; this.more = false; }
+    const generation = ++this.generation, loader = this.loader, key = this.listKey();
+    const cached = append || !key ? undefined : this.lists.get(key);
+    if (!append) { this.items = cached?.items ?? []; this.more = cached?.more ?? false; }
+    const target = Math.max(until, cached?.items.length ?? 0);
     this.loading = true; this.changed();
     const loads = this.loads = (async () => {
+      // A list shown from the cache stays until the new answer has as many songs. From then on
+      // the new songs show as they arrive, as in a list opened for the first time.
+      let items = cached ? [] : this.items, more = cached ? false : this.more, live = !cached;
       try {
         do {
-          // The first page comes alone so the list shows at once. Later pages arrive four at a time.
-          const count = this.items.length ? Math.max(1, Math.min(4, Math.ceil((until - this.items.length) / pageSize))) : 1;
-          const results = await Promise.all(Array.from({ length: count }, (_, index) => loader(this.items.length + index * pageSize)));
+          // The first page of a new list comes alone so the list shows at once. A list already on
+          // screen first asks for as many pages as it shows. Later pages arrive four at a time.
+          const count = Math.max(1, Math.min(4, Math.ceil((items.length ? target - items.length : cached?.items.length ?? 0) / pageSize)));
+          const results = await Promise.all(Array.from({ length: count }, (_, index) => loader(items.length + index * pageSize)));
           if (generation !== this.generation) return;
           for (const result of results) {
-            this.items = [...this.items, ...result.items];
-            void this.markLoved(result.items);
-            this.more = result.more;
+            items = [...items, ...result.items];
+            more = result.more;
+            if (live) void this.markLoved(result.items);
             // A short page means the offsets after it are off. The next round starts from here.
             if (!result.more || result.items.length < pageSize) break;
           }
-          this.changed();
-        } while (this.more && this.items.length < until);
-      } catch (error) { if (generation === this.generation) { this.more = false; this.fail(error); } }
+          if (cached && !live && (!more || items.length >= cached.items.length)) {
+            live = true;
+            // Songs Apple still lists keep their objects and favourite marks, so hearts do not blink.
+            const old = new Map(cached.items.map(item => [item.id, item]));
+            items = items.map(item => old.get(item.id) ?? item);
+            const same = more === cached.more && items.length === cached.items.length && items.every((item, index) => item === cached.items[index]);
+            if (same) items = cached.items;
+            // Read ahead lists have no favourite marks yet.
+            void this.markLoved(items);
+          }
+          if (live) { this.items = items; this.more = more; this.keep(); this.changed(); }
+        } while (more && items.length < target);
+      } catch (error) { if (generation === this.generation) { if (live) this.more = false; this.fail(error); } }
       finally { if (generation === this.generation) { this.loading = false; this.changed(); } }
     })();
     return loads;
+  }
+
+  // Lists shown before, by view, so switching back to one shows it at once. The queue follows
+  // the player and is always read again.
+  private lists = new Map<string, { items: Media[]; more: boolean }>();
+  private listKey() { return this.view === "queue" || this.view === "settings" || this.view === "home" ? undefined : this.view; }
+  private keep(key = this.listKey(), items = this.items, more = this.more) {
+    if (!key || !items.length) return;
+    this.lists.delete(key);
+    this.lists.set(key, { items, more });
+    // The oldest lists go first once there are many.
+    while (this.lists.size > keptLists) this.lists.delete(this.lists.keys().next().value!);
   }
 
   filter: Filter = unfiltered;
