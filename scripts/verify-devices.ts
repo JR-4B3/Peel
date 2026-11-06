@@ -36,6 +36,7 @@ const until = async (predicate: () => boolean, what: string, seconds = 30) => {
 try {
   await network.start();
   log(`device ${network.id.slice(0, 8)} listening on ${network.port}`);
+  network.openForPairing();
   network.on("pairing", (pairing: any) => { log(`pairing request from ${pairing.name}, code ${pairing.code}`); pairing.accept(); });
   await until(() => network.views().some(device => !device.self && device.name.endsWith(" check")), "the other computer");
   const other = network.views().find(device => !device.self && device.name.endsWith(" check"))!;

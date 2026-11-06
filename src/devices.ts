@@ -61,7 +61,19 @@ export function ownAddresses() {
   for (const list of Object.values(networkInterfaces())) for (const address of list ?? []) if (address.family === "IPv4" && !address.internal) addresses.push(address.address);
   return addresses.slice(0, 8);
 }
-const validClaim = (value: any): value is Claim => validId(value?.device) && Number.isSafeInteger(value?.generation) && value.generation >= 0;
+// Whether an address is on one of this computer's own networks, as a device on the same Wi-Fi is.
+export function onLocalNetwork(address: string) {
+  if (!validAddress(address)) return false;
+  const number = (text: string) => text.split(".").reduce((sum, part) => ((sum << 8) | Number(part)) >>> 0, 0);
+  for (const list of Object.values(networkInterfaces())) for (const own of list ?? []) {
+    if (own.family !== "IPv4" || own.internal || own.netmask === "255.255.255.255") continue;
+    const mask = number(own.netmask);
+    if (((number(own.address) & mask) >>> 0) === ((number(address) & mask) >>> 0)) return true;
+  }
+  return false;
+}
+// Generations stay far below the largest safe integer, so a claim can always be raised by one.
+const validClaim = (value: any): value is Claim => validId(value?.device) && Number.isSafeInteger(value?.generation) && value.generation >= 0 && value.generation < 2 ** 40;
 export const newer = (a: Claim, b: Claim) => a.generation > b.generation || a.generation === b.generation && a.device > b.device;
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
@@ -197,6 +209,9 @@ class PairingFlow implements Pairing {
 const maxMessage = 16 * 1024 * 1024;
 class Line {
   data: SocketData = { stage: "start" };
+  // A connection that has not proven it is paired may send only small messages. A paired device
+  // sends a queue of a few hundred songs at most.
+  limit = 16 * 1024;
   onopen = () => {};
   onmessage = (_text: string) => {};
   onclose = () => {};
@@ -218,7 +233,7 @@ class Line {
     socket.on("data", (chunk: string) => {
       if (this.ended) return;
       this.buffer += chunk;
-      if (this.buffer.length > maxMessage) return this.close();
+      if (this.buffer.length > this.limit) return this.close();
       // Messages are handled on the next turn of the event loop, not inside the socket's read
       // callback. On Windows, Bun stopped reading a socket that sent a request from inside its
       // read callback and got the reply back at once.
@@ -374,6 +389,7 @@ export class DeviceNetwork extends EventEmitter {
     for (const value of Array.isArray(known) ? known.slice(0, 256) : []) {
       const device = readKnown(value);
       if (!device || device.id === this.id) continue;
+      if (!this.known.has(device.id) && this.known.size >= 64) continue;
       if (this.known.has(device.id)) { this.remember({ id: device.id, name: this.known.get(device.id)!.name, port: device.port, addresses: [...device.addresses ?? [], ...device.address ? [device.address] : []] }); continue; }
       this.known.set(device.id, device);
       changed = true;
@@ -558,8 +574,11 @@ export class DeviceNetwork extends EventEmitter {
         socket.data.session?.end(); socket.data.pairing?.closed();
       };
     });
+    // A port another Peel on this computer already uses, or a later error, closes this server.
+    // tick() tries to listen again.
+    server.on("error", () => { try { server.close(); } catch {} if (this.server === server) this.server = undefined; });
     return new Promise<void>(resolve => {
-      server.once("error", () => { server.close(); if (this.server === server) this.server = undefined; resolve(); });
+      server.once("error", () => resolve());
       server.listen(this.port, "0.0.0.0", () => {
         const address = server.address();
         if (address && typeof address === "object") this.port = address.port;
@@ -587,16 +606,17 @@ export class DeviceNetwork extends EventEmitter {
       if (this.stopped || state.epoch !== this.epoch || !checkAuth(value, state.expect!)) return socket.close();
       const client = state.client!;
       const session = new Session({ id: client.id, name: client.name, address: socket.remoteAddress }, state.cipher!, text => socket.send(text), () => socket.close(), (session, op, body) => this.handle(session, op, body));
-      state.stage = "session"; state.session = session;
+      state.stage = "session"; state.session = session; socket.limit = maxMessage;
       const end = session.end.bind(session);
       session.end = () => { if (session.closed) return; end(); this.unregister(session); };
       this.register(session);
       return;
     }
     if (state.stage === "start" && value?.t === "pair" && value.v === 1 && validId(value.id) && text(value.name, 100) && typeof value.commit === "string") {
-      const refused = this.pairingSocket || this.pairing && this.pairing.state !== "done" && this.pairing.state !== "failed" ? "is pairing with another device"
-        : Date.now() - this.declined < 30000 ? "declined a moment ago" : value.id === this.id ? "is this device" : "";
-      if (refused) { socket.send(JSON.stringify({ t: "error", error: `${this.name} ${refused}. Try again later.` })); return socket.close(); }
+      const refused = this.pairingSocket || this.pairing && this.pairing.state !== "done" && this.pairing.state !== "failed" ? `${this.name} is pairing with another device. Try again later.`
+        : Date.now() - this.declined < 30000 ? `${this.name} declined a moment ago. Try again later.` : value.id === this.id ? `${this.name} is this device.`
+        : Date.now() > this.pairable ? `${this.name} is not open for pairing. Press d in Peel on ${this.name}, then try again.` : "";
+      if (refused) { socket.send(JSON.stringify({ t: "error", error: refused })); return socket.close(); }
       const ephemeral = new Ephemeral();
       const offer: PairOffer = { t: "pair", v: 1, id: this.id, name: this.name, e: ephemeral.public, n: ephemeral.nonce };
       Object.assign(state, { stage: "pair-reveal", ephemeral, offer, client: value });
@@ -610,7 +630,7 @@ export class DeviceNetwork extends EventEmitter {
       let derived: ReturnType<typeof pairingKeys>;
       try { derived = pairingKeys(state.ephemeral!, initiator, state.offer!, value); } catch { return socket.close(); }
       const flow = new PairingFlow(initiator.id, initiator.name, true, text => socket.send(text), () => socket.close(), this, socket.remoteAddress);
-      state.stage = "pair"; state.pairing = flow;
+      state.stage = "pair"; state.pairing = flow; socket.limit = maxMessage;
       this.pairing = flow;
       flow.ready(derived.code, derived.cipher("responder"));
       this.emit("pairing", flow);
@@ -623,7 +643,9 @@ export class DeviceNetwork extends EventEmitter {
   private connect(id: string, address: string, port: number, local = false) {
     const sessions = [...this.sessions.get(id) ?? []].filter(session => !session.closed);
     if (this.stopped || id === this.id || Date.now() - (this.connecting.get(id) ?? 0) < 5000) return;
-    if (sessions.length && (!local || sessions.some(session => session.peer.address === address))) return;
+    // A device already reached on this network keeps that connection. A computer with two network
+    // cards on one network announces itself from either address, which must not swap connections.
+    if (sessions.length && (!local || sessions.some(session => session.peer.address === address || onLocalNetwork(session.peer.address ?? "")))) return;
     // Few connections are on their way at once, however many devices announce themselves.
     if (this.clients.size >= 8) return;
     this.attempts.set(id, Date.now());
@@ -646,6 +668,7 @@ export class DeviceNetwork extends EventEmitter {
       let finished: ReturnType<typeof clientFinish>;
       try { finished = clientFinish(ephemeral, groups, hello, server); } catch { return socket.close(); }
       this.clients.delete(socket);
+      socket.limit = maxMessage;
       socket.send(JSON.stringify(finished.auth));
       clearTimeout(timer);
       const opened: Session = session = new Session({ id, name: server.name, address }, finished.cipher, text => socket.send(text), () => socket.close(), (session, op, body) => this.handle(session, op, body));
@@ -681,7 +704,7 @@ export class DeviceNetwork extends EventEmitter {
       let derived: ReturnType<typeof pairingKeys>;
       try { derived = pairingKeys(ephemeral, offer, value, { e: ephemeral.public, n: ephemeral.nonce }); } catch { return flow.fail("The other Peel sent an invalid key."); }
       socket.send(JSON.stringify({ t: "reveal", e: ephemeral.public, n: ephemeral.nonce }));
-      stage = "pair";
+      stage = "pair"; socket.limit = maxMessage;
       flow.ready(derived.code, derived.cipher("initiator"));
     };
     socket.onclose = () => reached ? flow.closed() : flow.fail(`Could not reach ${device.name}.`);
@@ -702,6 +725,10 @@ export class DeviceNetwork extends EventEmitter {
     this.changed();
   }
   refuse() { this.declined = Date.now(); }
+  // A device accepts pairing requests only for two minutes after someone opened its devices popup,
+  // so another device on the network cannot put a pairing prompt on screen at any time.
+  private pairable = 0;
+  openForPairing() { this.pairable = Date.now() + 120000; }
 
   // Tests and other callers outside discovery connect to a device directly.
   connectTo(id: string, address: string, port: number) { this.connecting.delete(id); this.connect(id, address, port); }

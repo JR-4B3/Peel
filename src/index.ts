@@ -101,6 +101,7 @@ try {
         model.onPlayOn = id => devices.playOn(id);
         model.onPair = id => { try { network.pair(id); show(); } catch (error) { model.fail(error); } };
         model.onForgetDevices = () => network.forget();
+        model.onDevicesOpened = () => network.openForPairing();
         devices.onRetarget = () => void model.retarget(() => { const text = devices.applyTarget(); model.target = devices.target; model.targetId = devices.peer; return text; });
         void network.start().catch(error => model.fail(new Error(`Devices on the network are unavailable: ${error instanceof Error ? error.message : String(error)}`)));
       }

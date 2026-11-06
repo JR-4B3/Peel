@@ -176,15 +176,18 @@
         if (index < items.length) next = index + 1;
         sources.push(index < items.length ? index : -1);
       }
-      music.queue.items.forEach((item, index) => { if (marks.includes(sources[index])) added.set(item, items[sources[index]]); });
-      const target = sources.findIndex(index => index >= start);
+
+      // If MusicKit gave its entries other IDs, nothing matches, and the queue is taken as it is.
+      const matched = sources.some(index => index >= 0);
+      const target = matched ? sources.findIndex(index => index >= start) : music.queue.position;
+      music.queue.items.forEach((item, index) => { const source = matched ? sources[index] : index; if (marks.includes(source) && items[source]) added.set(item, items[source]); });
       music.repeatMode = Math.max(0, repeats.indexOf(repeatMode));
       const volume = music.volume;
       if (!playing) music.volume = 0;
       try {
         if (target >= 0 && target !== music.queue.position) await music.changeToMediaAtIndex(target);
         // The song to start with was left out, so its position does not apply to the next one.
-        if (sources[target] !== start) time = 0;
+        if (matched && sources[target] !== start) time = 0;
         await music.play();
         if (time > 1) await music.seekToTime(time);
         if (!playing) await music.pause();

@@ -21,7 +21,7 @@ Pairing is a numeric comparison, like Bluetooth's.
 
 A device between the two would have to commit to its key before it sees the other's key, so it cannot choose keys that make both codes match. It succeeds by chance once in a million attempts. After both people accept, each device sends its group keys and the devices it knows, encrypted with the pairing keys. Paired devices also exchange keys whenever they connect, so a device paired with any member of a group reaches all of them.
 
-Only one pairing request is open at a time. After you decline one, Peel refuses every pairing request for 30 seconds. "Forget paired devices" in Settings replaces this computer's keys with a new key and closes every connection, including handshakes still in progress, so the old group can no longer reach it.
+A device accepts pairing requests only for two minutes after someone opened its devices popup. Only one pairing request is open at a time. After you decline one, Peel refuses every pairing request for 30 seconds. "Forget paired devices" in Settings replaces this computer's keys with a new key and closes every connection, including handshakes still in progress, so the old group can no longer reach it.
 
 Announcements are not authenticated. Peel remembers a device only after its session proves it holds a shared key, lists at most 64 nearby devices, opens at most eight connections at a time, and closes a connection that has not finished its handshake within ten seconds.
 

@@ -108,6 +108,7 @@ test("pairing shows the same code on both devices, and joins their groups once b
   const mac = await computer("Mac"), main = await computer("main"), laptop = await computer("laptop");
   // main and laptop were paired before. Pairing the Mac with main joins it to both.
   await link(main, laptop);
+  main.network.openForPairing();
   const outgoing = mac.network.pairWith({ id: main.network.id, name: "main", address: "127.0.0.1", port: main.network.port, keys: [], seen: Date.now() });
   await waitFor(() => outgoing.state === "confirm" && main.network.pairing?.state === "confirm", "codes");
   const incoming = main.network.pairing!;
@@ -129,6 +130,7 @@ test("pairing shows the same code on both devices, and joins their groups once b
 
 test("declining a pairing gives neither device the other's keys", async () => {
   const mac = await computer("Mac"), main = await computer("main");
+  main.network.openForPairing();
   const outgoing = mac.network.pairWith({ id: main.network.id, name: "main", address: "127.0.0.1", port: main.network.port, keys: [], seen: Date.now() });
   await waitFor(() => main.network.pairing?.state === "confirm", "the request");
   main.network.pairing!.decline();
@@ -367,6 +369,7 @@ test("forgetting devices also refuses a handshake that started before", async ()
 test("only one pairing request reaches the screen, and a decline refuses the next", async () => {
   const main = await computer("main"), first = await computer("first"), second = await computer("second");
   const target = { id: main.network.id, name: "main", address: "127.0.0.1", port: main.network.port, keys: [], seen: Date.now() };
+  main.network.openForPairing();
   const one = first.network.pairWith(target);
   await waitFor(() => main.network.pairing?.state === "confirm", "the first request");
   const two = second.network.pairWith(target);
@@ -382,6 +385,7 @@ test("only one pairing request reaches the screen, and a decline refuses the nex
 
 test("forgetting devices cancels a pairing that this device already accepted", async () => {
   const mac = await computer("Mac"), main = await computer("main");
+  main.network.openForPairing();
   const outgoing = mac.network.pairWith({ id: main.network.id, name: "main", address: "127.0.0.1", port: main.network.port, keys: [], seen: Date.now() });
   await waitFor(() => outgoing.state === "confirm" && main.network.pairing?.state === "confirm", "codes");
   outgoing.accept();
@@ -442,3 +446,35 @@ test("a device that stops answering, as one that went to sleep, counts as offlin
   expect(mac.network.online(main.network.id)).toBe(false);
   await waitFor(() => mac.player.peer === undefined, "the Mac controlling itself");
 }, 30000);
+
+test("a device asks for pairing only while the other one has its devices popup open", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  const refused = mac.network.pairWith({ id: main.network.id, name: "main", address: "127.0.0.1", port: main.network.port, keys: [], seen: Date.now() });
+  await waitFor(() => refused.state === "failed", "the refusal");
+  expect(refused.message).toContain("not open for pairing");
+  expect(main.network.pairing).toBeUndefined();
+});
+
+test("moving the music to the same engine reached another way leaves it playing", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  // The Mac controls main's engine already, as it would over SSH, and main's engine is also its device.
+  const inner = (main.fake.engine as any).transport;
+  (main.fake.engine as any).transport = async (path: string, body?: any) => path === "/state" ? { ...await inner(path, body), instance: "main-engine" } : inner(path, body);
+  Object.assign(main.fake.state, { items: [song("c1")], position: 0, playing: true });
+  const { moveMusic } = await import("../src/remote");
+  const viaSsh = (path: string, body?: any) => mac.network.request(main.network.id, path, body);
+  await moveMusic(viaSsh, viaSsh, "main over SSH", "main");
+  expect(main.fake.state.playing).toBe(true);
+  expect(main.fake.state.calls).not.toContain("stop");
+  expect(main.fake.state.calls).not.toContain("importPlayback");
+});
+
+test("a connection that has not proven it is paired cannot send large messages", async () => {
+  const mac = await computer("Mac");
+  let closed = false;
+  const socket = connect({ host: "127.0.0.1", port: mac.network.port }, () => socket.write("x".repeat(64 * 1024)));
+  socket.on("close", () => { closed = true; });
+  socket.on("error", () => {});
+  await waitFor(() => closed, "the connection closing");
+});

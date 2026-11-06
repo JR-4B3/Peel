@@ -750,6 +750,8 @@ export class Model extends EventEmitter {
   onPlayOn?: (id: string) => Promise<void>;
   onPair?: (id: string) => void;
   onForgetDevices?: () => Promise<void>;
+  // Opening the devices popup lets nearby devices ask to pair for a while.
+  onDevicesOpened?: () => void;
 
   // Moves the music to a device, or makes this computer the one that plays.
   playOn(id: string) {

@@ -202,6 +202,9 @@ export async function moveMusic(source: EngineTransport, destination: EngineTran
   const state = await source("/state").catch(() => undefined);
   const playback = state?.playback;
   if (!playback?.nowPlaying) return;
+  // The same engine reached two ways, such as over SSH and over the network, already plays.
+  const target = await destination("/state").catch(() => undefined);
+  if (state?.instance && state.instance === target?.instance) return;
   const playing = playback.state === "playing";
   if (playing) await call(source, "pause");
   let exported: any;

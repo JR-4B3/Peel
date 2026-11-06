@@ -17,6 +17,9 @@ const page = "https://music.apple.com/robots.txt";
 // Peel compares this with the files on disk and restarts an engine that runs older code.
 const version = crypto.createHash("sha256").update(fs.readFileSync(path.join(__dirname, "engine.js"))).update(fs.readFileSync(__filename)).digest("hex");
 const log = text => console.log(`${new Date().toISOString()} ${text}`);
+// Tells engines apart, so Peel does not move a queue from an engine into the same engine reached
+// another way, such as over SSH and over the network.
+const instance = crypto.randomUUID();
 
 app.setPath("userData", home);
 app.disableHardwareAcceleration();
@@ -106,7 +109,7 @@ function serve(window, key) {
         body += chunk;
         if (body.length > maxBody) return reply(413, { error: "Request too large" });
       }
-      if (request.method === "GET" && request.url === "/state") return reply(200, { ...await call("state"), version });
+      if (request.method === "GET" && request.url === "/state") return reply(200, { ...await call("state"), version, instance });
       if (request.method === "POST" && request.url === "/quit") { reply(200, null); return app.quit(); }
       if (request.method === "POST" && request.url === "/call") {
         const { method, args } = JSON.parse(body || "{}");
