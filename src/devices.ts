@@ -193,8 +193,7 @@ class PairingFlow implements Pairing {
 }
 
 // A TCP connection that carries one message per line. Messages are JSON or base64url, which never
-// contain a line break. Peel used WebSockets first, but Bun's WebSocket client on Windows stopped
-// delivering messages partway through a session.
+// contain a line break.
 const maxMessage = 16 * 1024 * 1024;
 class Line {
   data: SocketData = { stage: "start" };
@@ -203,6 +202,15 @@ class Line {
   onclose = () => {};
   private buffer = "";
   private ended = false;
+  private draining = false;
+  private drain() {
+    this.draining = false;
+    for (let end = this.buffer.indexOf("\n"); end >= 0 && !this.ended; end = this.buffer.indexOf("\n")) {
+      const line = this.buffer.slice(0, end);
+      this.buffer = this.buffer.slice(end + 1);
+      this.onmessage(line);
+    }
+  }
   constructor(private socket: TcpSocket) {
     socket.setEncoding("utf8");
     socket.setNoDelay(true);
@@ -210,12 +218,11 @@ class Line {
     socket.on("data", (chunk: string) => {
       if (this.ended) return;
       this.buffer += chunk;
-      for (let end = this.buffer.indexOf("\n"); end >= 0 && !this.ended; end = this.buffer.indexOf("\n")) {
-        const line = this.buffer.slice(0, end);
-        this.buffer = this.buffer.slice(end + 1);
-        this.onmessage(line);
-      }
-      if (this.buffer.length > maxMessage) this.close();
+      if (this.buffer.length > maxMessage) return this.close();
+      // Messages are handled on the next turn of the event loop, not inside the socket's read
+      // callback. On Windows, Bun stopped reading a socket that sent a request from inside its
+      // read callback and got the reply back at once.
+      if (!this.draining) { this.draining = true; setImmediate(() => this.drain()); }
     });
     socket.on("error", () => this.close());
     socket.on("close", () => { this.ended = true; this.onclose(); });
