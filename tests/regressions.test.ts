@@ -8,6 +8,7 @@ import { createRequire } from "node:module";
 import net from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { fileURLToPath } from "node:url";
 import vm from "node:vm";
 import { saveJson } from "../src/config";
 import { stopEngine, type Engine } from "../src/engine";
@@ -114,7 +115,7 @@ test("#9 a list left before its first page arrived loads again on Back", async (
 // Runs engine/main.js up to its startup with a stand-in for Electron, as the review did.
 function engineMain(env: Record<string, string>) {
   const require = createRequire(import.meta.url);
-  const engineDir = new URL("../engine/", import.meta.url).pathname;
+  const engineDir = fileURLToPath(new URL("../engine/", import.meta.url));
   const source = readFileSync(join(engineDir, "main.js"), "utf8");
   let server: http.Server | undefined;
   const quits: number[] = [];

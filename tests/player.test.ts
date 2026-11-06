@@ -407,7 +407,8 @@ test("layout preferences survive a restart and use private file permissions", as
   const value = { order: ["queue", "favourites"], hidden: ["albums"], heartsInFavourites: true };
   await saveJson("layout.json", value, dir);
   expect(await readPreferences(dir)).toEqual(value);
-  expect((await stat(join(dir, "layout.json"))).mode & 0o777).toBe(0o600);
+  // Windows has no Unix file modes. Its user profile folders are private already.
+  if (process.platform !== "win32") expect((await stat(join(dir, "layout.json"))).mode & 0o777).toBe(0o600);
 });
 
 test("a slow earlier search cannot overwrite a later search", async () => {
