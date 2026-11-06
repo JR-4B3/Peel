@@ -51,6 +51,10 @@ export const backgroundLimit = 500;
 const keptLists = 40;
 const prefetchedLists = 12;
 const memoryStore: HomeStore = { read: async () => undefined, write: async () => {} };
+// Playback gestures expire after one second in a queue. Queue edits do not expire.
+const controlLifetime = 1000;
+const controls = new Set(["/playback/pause", "/playback/play", "/playback/toggle", "/playback/next", "/playback/previous", "/audio/volume", "/playback/shuffle", "/playback/shuffle/toggle", "/playback/repeat/toggle"]);
+interface SeekIntent { position: number; song: string; revision: number; expires: number; pending: boolean; promise: Promise<boolean> }
 
 export class Model extends EventEmitter {
   playback: Playback = structuredClone(stopped);
@@ -83,6 +87,9 @@ export class Model extends EventEmitter {
   private loads?: Promise<void>;
   private collection?: { id: string; type: string };
   private commands: Promise<unknown> = Promise.resolve();
+  private controlGeneration = 0;
+  private seekRevision = 0;
+  private seekIntent?: SeekIntent;
   private queueEdits = 0;
   // Counts queue reads and edits. A read shows its answer only if nothing newer started meanwhile.
   private queueRevision = 0;
@@ -507,6 +514,7 @@ export class Model extends EventEmitter {
     const list = this.shown;
     const index = list === this.items || this.player.queuesItems ? list.indexOf(item) : -1;
     const activation = { key, started: Date.now(), pending: true, promise: Promise.resolve() };
+    this.invalidateSeeks();
     this.activation = activation;
     activation.promise = (async () => {
       try {
@@ -584,28 +592,64 @@ export class Model extends EventEmitter {
   }
 
   act(path: string, body: unknown = {}, method = "POST") {
-    return this.execute(() => this.player.command(path, typeof body === "function" ? body() : body, method));
+    if (path === "/playback/seek") return this.seekTo((typeof body === "function" ? body() : body).position);
+    if (["/playback/next", "/playback/previous", "/queue/jump"].includes(path)) this.invalidateSeeks();
+    // Only adjacent seek gestures combine. Other commands keep their place between them.
+    if (this.seekIntent) this.seekIntent.pending = false;
+    const valid = controls.has(path) ? this.freshControl() : undefined;
+    return this.execute(() => this.player.command(path, typeof body === "function" ? body() : body, method), valid);
   }
 
-  private async execute(command: () => Promise<void>) {
+  private freshControl() {
+    const generation = this.controlGeneration, expires = Date.now() + controlLifetime;
+    return (started = false) => generation === this.controlGeneration && (started || Date.now() <= expires);
+  }
+
+  private invalidateSeeks() { this.seekRevision++; this.seekIntent = undefined; }
+
+  private async execute(command: () => Promise<void>, valid?: (started?: boolean) => boolean) {
     let success = false;
     // Keep rapid clicks ordered, start Cider for the first one, and always read Cider's state after a command.
     this.commands = this.commands.then(async () => {
       try {
+        if (valid && !valid()) return;
         await this.ensurePlayback();
+        // Startup belongs to this operation. Only the time waiting behind earlier commands expires.
+        if (valid && !valid(true)) return;
         await command();
         success = true;
         await this.refresh();
-      } catch (error) { this.fail(error); }
+      } catch (error) { this.controlGeneration++; this.invalidateSeeks(); this.fail(error); }
     });
     await this.commands;
     return success;
   }
 
   seek(delta: number) {
+    const intent = this.seekIntent;
+    const position = intent && intent.song === this.songKey() && Date.now() <= intent.expires ? intent.position : this.playback.time.currentTime;
+    return this.seekTo(position + delta);
+  }
+
+  seekTo(position: number): Promise<boolean> {
     const maximum = this.playback.time.duration;
-    if (!(maximum > 0)) return Promise.resolve();
-    return this.act("/playback/seek", () => ({ position: Math.min(maximum, Math.max(0, this.playback.time.currentTime + delta)) }));
+    if (!(maximum > 0) || !Number.isFinite(position)) return Promise.resolve(false);
+    position = Math.min(maximum, Math.max(0, position));
+    const song = this.songKey(), revision = this.seekRevision, expires = Date.now() + controlLifetime;
+    const pending = this.seekIntent;
+    if (pending?.pending && pending.song === song && pending.revision === revision) {
+      pending.position = position; pending.expires = expires;
+      return pending.promise;
+    }
+    const generation = this.controlGeneration;
+    const intent: SeekIntent = { position, song, revision, expires, pending: true, promise: Promise.resolve(false) };
+    this.seekIntent = intent;
+    intent.promise = this.execute(async () => {
+      intent.pending = false;
+      await this.player.command("/playback/seek", { position: intent.position });
+    }, (started = false) => generation === this.controlGeneration && revision === this.seekRevision && song === this.songKey() && (started || Date.now() <= intent.expires))
+      .finally(() => { if (this.seekIntent === intent) this.seekIntent = undefined; });
+    return intent.promise;
   }
   volume(delta: number) { return this.act("/audio/volume", () => ({ volume: Math.min(1, Math.max(0, this.playback.volume + delta)) }), "PATCH"); }
 
@@ -613,6 +657,8 @@ export class Model extends EventEmitter {
     if (this.playback.repeatMode !== "one") {
       return this.act(direction === 1 ? "/playback/next" : "/playback/previous", direction === -1 ? { force: true } : {});
     }
+    this.invalidateSeeks();
+    const valid = this.freshControl();
     // Cider's ordinary Next can repeat the current song in repeat-one mode.
     // An explicit queue jump skips without changing the user's repeat setting.
     // The position is read in the same queued command as the jump, so rapid presses each move
@@ -620,10 +666,10 @@ export class Model extends EventEmitter {
     let jumped = false;
     const done = await this.execute(async () => {
       const queue = await this.player.queuePosition();
-      if (queue.total < 2) return;
+      if (queue.total < 2 || !valid()) return;
       await this.player.command("/queue/jump", { index: (queue.position + direction + queue.total) % queue.total });
       jumped = true;
-    });
+    }, valid);
     return done && jumped;
   }
 
@@ -770,6 +816,7 @@ export class Model extends EventEmitter {
   retarget(apply: () => string | undefined) { return this.switchTarget(async () => apply()); }
 
   private switchTarget(change: () => Promise<string | undefined>) {
+    this.controlGeneration++; this.invalidateSeeks();
     this.commands = this.commands.then(async () => {
       this.switchingOutput = true; this.changed();
       try {
@@ -793,6 +840,7 @@ export class Model extends EventEmitter {
   private switchingOutput = false;
 
   selectOutput(host?: string) {
+    this.controlGeneration++; this.invalidateSeeks();
     this.commands = this.commands.then(async () => {
       this.switchingOutput = true; this.changed();
       try {

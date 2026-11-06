@@ -33,6 +33,8 @@ The popups blank the cells under them without painting a background, so the term
 
 Another device can read this computer's engine state and send it playback commands: play, pause, skip, seek, volume, shuffle, repeat, queue edits, ratings, and moving a queue. It cannot read the Apple sign-in, change the stream quality, or stop the engine. Engine requests from another device start this computer's engine when it is not running, as a song chosen here would.
 
+Rapid seek inputs combine into the latest requested position while a seek waits to run. Skipping or choosing another song discards pending seeks for the old song. Playback gestures that wait more than one second behind another command are discarded, so a slow player does not replay old key presses for minutes. The first gesture can still wait for its own engine startup. A running operation finishes before another starts. Queue edits and the pause and resume operations used to coordinate device moves keep their order and do not expire on the host.
+
 ## Network use
 
 Only the device that plays streams music, straight from Apple, at 256 or 64 kbps. A Peel that controls another device sends no audio. Measured with a queue of 500 library songs:

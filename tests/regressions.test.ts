@@ -277,3 +277,36 @@ test("status polling stays responsive while a host command is waiting", async ()
     expect((await state.json()).ready).toBe(true);
   } finally { unblock(); await command; }
 });
+
+test("a slow host discards old gestures but still runs queue edits and device coordination pauses", async () => {
+  const { context, server } = engineMain({});
+  context.clock = Date.now();
+  vm.runInContext("Date.now = () => clock", context);
+  let release!: () => void, started!: () => void;
+  const held = new Promise<void>(resolve => { release = resolve; });
+  const firstStarted = new Promise<void>(resolve => { started = resolve; });
+  const invoked: string[] = [];
+  context.serve({ webContents: { executeJavaScript: async (source: string) => {
+    const method = source.match(/peelEngine\.(\w+)\(/)![1]!;
+    invoked.push(method);
+    if (method === "enqueue") { started(); await held; }
+    return null;
+  } } }, "test-key");
+  await once(server(), "listening"); cleanup.push(() => server().close());
+  const port = (server().address() as net.AddressInfo).port;
+  const send = (method: string) => fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method, args: [] }) });
+  const first = send("enqueue");
+  await firstStarted;
+  const methods = ["seek", "previous", "next", "jump", "toggle", "pause", "resume", "remove"];
+  let received = 0;
+  const arrived = new Promise<void>(resolve => server().on("request", request => request.on("end", () => { if (++received === methods.length) resolve(); })));
+  const pending = methods.map(send);
+  try {
+    await arrived;
+    await Bun.sleep(0);
+    context.clock += 2000;
+  } finally { release(); }
+  const replies = await Promise.all([first, ...pending]);
+  expect(invoked).toEqual(["enqueue", "pause", "resume", "remove"]);
+  expect(replies.map(reply => reply.status)).toEqual([200, 500, 500, 500, 500, 500, 200, 200, 200]);
+});
