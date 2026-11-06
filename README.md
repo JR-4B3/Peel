@@ -49,6 +49,19 @@ The engine runs on glibc distributions, such as Ubuntu, Debian, Fedora, Nobara, 
 
 Each launcher runs this checkout. Then use `peel --connect` and `peel`, or open Peel from the menu.
 
+### Release installs and updates
+
+`bun src/update.ts install` installs the newest stable release and the same launcher and menu entry, but the launcher runs the release rather than this checkout. Add `--channel nightly` for the nightly build. Releases go to `~/.local/share/peel` on Linux, `~/Library/Application Support/Peel` on macOS, and `%LOCALAPPDATA%\Peel` on Windows. Every version there shares one engine download.
+
+A release install checks its channel when Peel opens, at most every six hours. A newer build downloads, is checked against its published checksum, and installs beside the running one. It starts the next time you open Peel, and the version before it stays until the following update. The Settings page shows the result. `peel --version` prints the running build.
+
+| Channel | What it gets |
+| --- | --- |
+| Stable | Releases tagged `v<version>`, which pass the tests on Linux, macOS, and Windows. |
+| Nightly | `main` as of each night it changed, after the same tests. It has the newest features and can break. |
+
+A source checkout like this one updates through git and does not update itself.
+
 ### Where Peel keeps its files
 
 | System | Settings and sign-in | Cache | Engine profile |
@@ -124,7 +137,13 @@ Filtering, sorting, or narrowing to favourites first loads the rest of the list,
 
 ## Settings
 
-Every song in Favourite Songs is a favourite, so its rows show no heart. Set `"heartsInFavourites": true` in `layout.json` in Peel's settings folder to show them, then restart Peel.
+Settings, at the end of the sidebar, lists these. Enter switches the highlighted one, and Peel saves it in `layout.json` in its settings folder.
+
+| Setting | Choices |
+| --- | --- |
+| Audio quality | High, AAC at 256 kbps, or Standard, AAC at 64 kbps, which uses a quarter of the data. With Cider, Cider's own settings choose. Hi-Res Lossless is not available in Peel yet. |
+| Updates | Stable or Nightly. Choosing one checks it at once. |
+| Hearts in Favourite Songs | Every song in Favourite Songs is a favourite, so its rows show no heart unless this is on. |
 
 Sidebar changes save to `layout.json` in Peel's settings folder. Home is always first and cannot be moved or hidden. `CIDER_API_BASE` defaults to `http://127.0.0.1:10767`.
 
@@ -147,6 +166,17 @@ On main's Niri desktop, Peel installs a startup rule before launching Cider. The
 Initial sign-in and `peel --connect` keep Cider visible so you can approve access. The tray icon must be enabled for automatic hiding. If hiding fails, Peel reports the problem and still connects to playback. You can also use **Hide** in Cider's tray menu. Closing Cider with **Close to Tray** disabled quits its engine. The hidden window still contains the playback engine; this setup is not a separate headless audio service.
 
 The main PC's desktop has a saved notification rule that mutes Cider popups. Other applications keep their existing notification settings.
+
+## Releases and CI
+
+GitHub Actions runs the type check and tests on Linux, macOS, and Windows for every pull request and every push to `main` (`.github/workflows/ci.yml`). GitHub's standard runners cost nothing for a public repository.
+
+- Nightly (`nightly.yml`) runs at 02:17 UTC. When `main` has new commits, it runs the tests and publishes `main` as the `nightly` prerelease. Start it from the Actions tab to build at once.
+- Release (`release.yml`) runs when you push a tag such as `v0.2.0`. It runs the tests and publishes the stable release. The tag must match the version in `package.json`.
+
+Both publish the same three files: `peel.tar.gz`, `SHASUMS256.txt`, and `version.json`. `bun scripts/package.ts --channel nightly` builds them locally. One archive serves every system, because Peel runs on Bun and each machine installs its own native packages after unpacking. A feature written in `src/` therefore works on every system without a separate build. Only the playback engine differs per system, and Peel downloads the right one itself.
+
+GitHub turns off scheduled workflows in a repository without activity for 60 days. A push or a manual run turns the nightly back on.
 
 ## Verification
 
