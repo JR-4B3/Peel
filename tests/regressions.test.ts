@@ -1,8 +1,8 @@
 // Regression tests for the bugs found in the review of 6 November 2026 (GitHub issues #6 to #11).
 import { afterEach, expect, test } from "bun:test";
 import { once } from "node:events";
-import { readFileSync } from "node:fs";
-import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
+import { existsSync, readFileSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import http from "node:http";
 import { createRequire } from "node:module";
 import net from "node:net";
@@ -10,6 +10,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import vm from "node:vm";
 import { saveJson } from "../src/config";
+import { stopEngine, type Engine } from "../src/engine";
 import { Model } from "../src/model";
 import { stopped, type Library, type Media, type Page, type Playback } from "../src/types";
 
@@ -116,7 +117,8 @@ function engineMain(env: Record<string, string>) {
   const engineDir = new URL("../engine/", import.meta.url).pathname;
   const source = readFileSync(join(engineDir, "main.js"), "utf8");
   let server: http.Server | undefined;
-  const app = { setPath() {}, disableHardwareAcceleration() {}, requestSingleInstanceLock: () => true, exit() {} };
+  const quits: number[] = [];
+  const app = { setPath() {}, disableHardwareAcceleration() {}, requestSingleInstanceLock: () => true, exit() {}, quit: () => { quits.push(Date.now()); } };
   const context = vm.createContext({
     require(name: string) {
       if (name === "electron") return { app };
@@ -131,7 +133,7 @@ function engineMain(env: Record<string, string>) {
     setInterval: () => ({ unref() {} }),
   });
   vm.runInContext(source.slice(0, source.indexOf("app.whenReady()")), context);
-  return { context, server: () => server! };
+  return { context, server: () => server!, quits };
 }
 
 test("#11 the engine uses the profile and cache folders Peel passes", () => {
@@ -163,4 +165,67 @@ test("#10 a request cut off mid-body does not crash the engine, and the next req
   const large = await fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: "x".repeat(9 * 1024 * 1024) }).catch(() => undefined);
   if (large) expect(large.status).toBe(413);
   expect(unhandled).toBeUndefined();
+});
+
+test("#18 a queue read that started before a removal does not bring removed songs back", async () => {
+  const track = (id: string, queueIndex: number): Media => ({ ...song(id), queueIndex });
+  let player = ["A", "B", "C"], held: ((page: Page) => void) | undefined;
+  const deleted: string[] = [];
+  const model = new Model(library(), {
+    queuesItems: true, snapshot: async () => structuredClone(stopped),
+    queue: async () => {
+      if (!held) return new Promise<Page>(resolve => { held = resolve; });
+      return { items: player.map((id, index) => track(id, index + 1)), more: false };
+    },
+    command: async (path: string) => { const place = Number(path.split("/").at(-1)); deleted.push(player[place - 1]!); player.splice(place - 1, 1); },
+  } as any);
+  model.connected = true; model.view = "queue"; model.items = player.map((id, index) => track(id, index + 1));
+  // The read a song change starts, answered only after the removal.
+  const old = (model as any).requeue();
+  await model.removeQueued(0);
+  expect(model.items.map(item => item.id)).toEqual(["B", "C"]);
+  held!({ items: ["A", "B", "C"].map((id, index) => track(id, index + 1)), more: false });
+  await old;
+  expect(model.items.map(item => item.id)).toEqual(["B", "C"]);
+  await model.removeQueued(0);
+  expect(deleted).toEqual(["A", "B"]);
+});
+
+test("#19 a closing Peel releases the engine, which quits only when its last Peel has gone", async () => {
+  const released: string[] = [];
+  stopEngine({ release: async () => { released.push("release"); } } as unknown as Engine);
+  expect(released).toEqual(["release"]);
+  const { context, server, quits } = engineMain({ PEEL_OWNER: "101" });
+  context.serve({ webContents: { executeJavaScript: async () => ({ ready: true }) } }, "test-key");
+  await once(server(), "listening");
+  cleanup.push(() => server().close());
+  const port = (server().address() as net.AddressInfo).port;
+  const send = (path: string, owner: string) => fetch(`http://127.0.0.1:${port}${path}`, { method: path === "/state" ? "GET" : "POST", headers: { "x-peel-key": "test-key", "x-peel-owner": owner } });
+  await send("/state", "202");
+  await send("/release", "101");
+  expect(quits.length).toBe(0);
+  await send("/release", "202");
+  expect(quits.length).toBe(1);
+});
+
+// cross-platform installs the engine from TypeScript and has no run.sh.
+test.skipIf(!existsSync(new URL("../engine/run.sh", import.meta.url)))("#20 an engine download that stopped partway is replaced on the next start", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "peel-run-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const bin = join(dir, "bin"), engine = join(dir, "engine");
+  await mkdir(bin); await mkdir(engine);
+  await writeFile(join(engine, "run.sh"), await readFile(new URL("../engine/run.sh", import.meta.url)), { mode: 0o755 });
+  await writeFile(join(bin, "curl"), '#!/bin/sh\nwhile [ $# -gt 0 ]; do [ "$1" = -o ] && out=$2; shift; done\necho zip > "$out"\n', { mode: 0o755 });
+  // UNPACK=fail writes the engine's executable, then stops before the rest, like an interrupted unpack.
+  await writeFile(join(bin, "unzip"), '#!/bin/sh\nprintf \'#!/bin/sh\\necho ran\\n\' > electron; chmod +x electron\n[ "$UNPACK" = fail ] && exit 1\nprintf 44.5.1+wvcus > version\n', { mode: 0o755 });
+  const start = (unpack: string) => {
+    const run = Bun.spawnSync(["bash", join(engine, "run.sh")], { env: { PATH: `${bin}:${process.env.PATH}`, UNPACK: unpack } });
+    return { code: run.exitCode, output: run.stdout.toString().trim() };
+  };
+  expect(start("fail").code).not.toBe(0);
+  expect(existsSync(join(engine, ".electron"))).toBe(false);
+  expect(start("ok")).toEqual({ code: 0, output: "ran" });
+  // An install from the old run.sh that has the executable but no version file is replaced too.
+  await rm(join(engine, ".electron", "version"));
+  await writeFile(join(engine, ".electron", "electron"), "#!/bin/sh\necho incomplete\n", { mode: 0o755 });
+  expect(start("ok")).toEqual({ code: 0, output: "ran" });
 });

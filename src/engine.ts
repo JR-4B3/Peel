@@ -409,14 +409,12 @@ export async function ensureEngine(engine: Engine, status: (text: string) => voi
   if (!current?.ready) throw new Error(`The playback engine did not become ready. Run bun run engine in ${fileURLToPath(new URL("..", import.meta.url))} to see why.`);
 }
 
-// Stops the engine and its music when Peel closes. On systemd, --no-block queues the stop with
-// the user manager and returns at once, so it completes even when the terminal is already
-// closing. Elsewhere Peel releases the engine, which quits once no other Peel still uses it.
-// An engine also quits within a second once every Peel that used it has exited, which covers
-// a terminal closed before either runs.
+// Releases the engine when Peel closes. The engine quits, and the music stops, once no other
+// Peel still uses it. It also quits within a second once every Peel that used it has exited,
+// which covers a terminal closed before the release arrives. Stopping the systemd unit here
+// would stop the music for every other Peel too.
 export function stopEngine(engine: Engine) {
-  if (systemdSession()) Bun.spawnSync(["systemctl", "--user", "stop", "--no-block", "peel-engine.service"], { stdout: "ignore", stderr: "ignore" });
-  else void engine.release().catch(() => {});
+  void engine.release().catch(() => {});
 }
 
 // bun run engine installs the engine and runs it in this terminal, with its log visible.

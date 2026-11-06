@@ -77,6 +77,8 @@ export class Model extends EventEmitter {
   private collection?: { id: string; type: string };
   private commands: Promise<unknown> = Promise.resolve();
   private queueEdits = 0;
+  // Counts queue reads and edits. A read shows its answer only if nothing newer started meanwhile.
+  private queueRevision = 0;
   private activation?: { key: string; started: number; pending: boolean; promise: Promise<void> };
   private loved?: { key: string; value: boolean };
   // Albums' favourite marks by album id, once Apple has answered.
@@ -433,10 +435,12 @@ export class Model extends EventEmitter {
   // player would be undone on screen, so the last edit reads it.
   private async requeue() {
     if (this.queueEdits) return;
-    const generation = this.generation;
+    const generation = this.generation, revision = ++this.queueRevision;
     try {
       const page = await this.player.queue(0);
-      if (generation !== this.generation || this.view !== "queue") return;
+      // An edit or a newer read that started meanwhile makes this answer stale. Showing it would
+      // also give the rows queue places that no longer match the player's queue.
+      if (generation !== this.generation || this.view !== "queue" || revision !== this.queueRevision || this.queueEdits) return;
       this.items = page.items; this.more = page.more; this.changed();
     } catch {}
   }
@@ -487,7 +491,7 @@ export class Model extends EventEmitter {
   }
 
   private async editQueue(edit: () => Promise<unknown>) {
-    this.queueEdits++;
+    this.queueEdits++; this.queueRevision++;
     try { await edit(); } finally { this.queueEdits--; }
     await this.requeue();
   }
