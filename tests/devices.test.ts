@@ -666,3 +666,17 @@ test("large messages are compressed, keys never are, and a small message cannot 
   const sealed = Buffer.concat([cipher.update(bomb), cipher.final(), cipher.getAuthTag()]).toString("base64url");
   expect(() => new Cipher(key, key).open(sealed)).toThrow();
 });
+
+test("the player says when the device that plays cannot be reached", async () => {
+  const api = fixture(); cleanup.push(() => api.server.stop(true));
+  api.player.snapshot = async () => ({ state: "stopped", nowPlaying: null, time: { currentTime: 0, duration: 0 }, volume: 0.5, repeatMode: "none", shuffleMode: false });
+  const app = await createTestRenderer({ width: 120, height: 36 }); cleanup.push(() => app.renderer.destroy());
+  const model = new Model(api.library, api.player, structuredClone(defaults));
+  model.devices = [
+    { id: "self-id", name: "Mac", self: true, paired: true, online: true, output: false },
+    { id: "main-id", name: "main", self: false, paired: true, online: false, output: true },
+  ];
+  const ui = new PeelUI(app.renderer, model); cleanup.push(() => ui.dispose());
+  await model.start(); await app.flush();
+  expect(app.captureCharFrame()).toContain("main plays the music, but this Peel cannot reach it");
+});
