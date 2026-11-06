@@ -51,6 +51,8 @@ async function developerToken() {
 // quits, so music stops even when a terminal closes before Peel can stop it. The Peel that
 // started the engine counts from the start, so a Peel closed while the engine loads stops it too.
 const owners = new Set();
+// A remotely controlled host keeps its queue when the controller disconnects.
+let retained = false;
 const launcher = Number(process.env.PEEL_OWNER);
 if (Number.isInteger(launcher) && launcher > 0) owners.add(launcher);
 function alive(pid) {
@@ -59,16 +61,21 @@ function alive(pid) {
 setInterval(() => {
   if (!owners.size) return;
   for (const pid of owners) if (!alive(pid)) owners.delete(pid);
-  if (!owners.size) { log("every Peel has exited"); app.quit(); }
+  if (!owners.size && !retained) { log("every Peel has exited"); app.quit(); }
 }, 1000).unref();
 
 const maxBody = 8 * 1024 * 1024;
 
 // Only the page's player methods can be called, by name, with JSON arguments.
 function serve(window, key) {
+  let calling = Promise.resolve();
   const call = (method, args = []) => {
     if (!/^\w+$/.test(method)) throw new Error("Invalid method");
-    return window.webContents.executeJavaScript(`window.peelEngine ? Promise.resolve(window.peelEngine.${method}(...${JSON.stringify(args)})) : { ready: false }`);
+    const run = () => window.webContents.executeJavaScript(`Promise.resolve().then(() => window.peelEngine ? window.peelEngine.${method}(...${JSON.stringify(args)}) : { ready: false })`);
+    if (method === "state") return run();
+    const result = calling.catch(() => {}).then(run);
+    calling = result;
+    return result;
   };
   http.createServer((request, response) => {
     const reply = (status, value) => {
@@ -87,10 +94,11 @@ function serve(window, key) {
     if (request.method === "POST" && request.url === "/release") {
       if (known) owners.delete(owner);
       reply(200, null);
-      if (!owners.size) { log("the last Peel has closed"); app.quit(); }
+      if (!owners.size && !retained) { log("the last Peel has closed"); app.quit(); }
       return;
     }
     if (known) owners.add(owner);
+    if (request.method === "POST" && request.url === "/retain") { retained = true; return reply(200, null); }
     try {
       // Peel's largest request queues a few hundred songs. Anything far larger is refused.
       let body = "";

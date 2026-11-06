@@ -254,11 +254,13 @@ export async function engineVersion() {
 interface State { ready: boolean; signIn: boolean; playback?: Playback; version?: string }
 interface Queue { position: number; items: { id: string; type: string; added: boolean; attributes: { name?: string; artistName?: string; albumName?: string; durationInMillis?: number } }[] }
 
+export type EngineTransport = (path: string, body?: unknown) => Promise<any>;
+
 export class Engine implements Player {
   readonly queuesItems = true;
   private access?: { port: number; key: string };
 
-  constructor(private home = engineHome) {}
+  constructor(private home = engineHome, private transport?: EngineTransport) {}
 
   private async read() {
     try { this.access = JSON.parse(await readFile(join(this.home, "key.json"), "utf8")); } catch { this.access = undefined; }
@@ -266,7 +268,8 @@ export class Engine implements Player {
   }
 
   // A restarted engine has a new key, so a rejected key is read again once.
-  private async send(path: string, body?: unknown, retry = true): Promise<any> {
+  async send(path: string, body?: unknown, retry = true): Promise<any> {
+    if (this.transport) return this.transport(path, body);
     const access = this.access ?? await this.read();
     if (!access) throw new Error("Peel's playback engine is not running.");
     let response: Response;
@@ -325,6 +328,8 @@ export class Engine implements Player {
   // Peel's controls use Cider's command paths. The engine has a method for each.
   async command(path: string, body: any = {}, method = "POST") {
     const commands: Record<string, () => Promise<unknown>> = {
+      "/playback/pause": () => this.call("pause"),
+      "/playback/play": () => this.call("resume"),
       "/playback/toggle": () => this.call("toggle"),
       "/playback/next": () => this.call("next"),
       "/playback/previous": () => this.call("previous"),
@@ -333,12 +338,12 @@ export class Engine implements Player {
       "/playback/shuffle": () => this.call("shuffle", body.enabled),
       "/playback/shuffle/toggle": () => this.call("toggleShuffle"),
       "/playback/repeat/toggle": () => this.call("toggleRepeat"),
-      "/queue/jump": () => this.call("jump", body.index),
-      "/queue/move": () => this.call("move", body.from, body.to),
+      "/queue/jump": () => this.call("jump", body.index, ...(body.id ? [body.id] : [])),
+      "/queue/move": () => this.call("move", body.from, body.to, ...(body.id ? [body.id, body.targetId] : [])),
       "/library/now-playing/rating": () => this.call("rate", method === "DELETE" ? 0 : body.rating, ...(body.id ? [body.id] : [])),
     };
     const removed = method === "DELETE" && path.match(/^\/queue\/items\/(\d+)$/);
-    const run = removed ? () => this.call("remove", Number(removed[1])) : commands[path];
+    const run = removed ? () => this.call("remove", Number(removed[1]), ...(body.id ? [body.id] : [])) : commands[path];
     if (!run) throw new Error(`The playback engine has no command for ${path}.`);
     await run();
   }

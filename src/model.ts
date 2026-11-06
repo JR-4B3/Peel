@@ -135,14 +135,15 @@ export class Model extends EventEmitter {
 
   // Concurrent callers share one playback request and its result.
   refresh() {
+    if (this.switchingOutput) return Promise.resolve();
     if (!this.browsingReady && Date.now() - this.navigationTried > navigationRetry) void this.loadNavigation();
     return this.refreshing ??= (async () => {
       try {
-        const playing = this.playback.nowPlaying?.playParams?.id;
+        const playing = this.playback.nowPlaying?.playParams?.id, revision = this.playback.queueRevision;
         this.playback = await this.player.snapshot();
         this.playbackError = undefined;
         // A queued song leaves the queue when it starts playing.
-        if (this.view === "queue" && !this.loading && playing !== this.playback.nowPlaying?.playParams?.id) void this.requeue();
+        if (this.view === "queue" && !this.loading && (playing !== this.playback.nowPlaying?.playParams?.id || revision !== this.playback.queueRevision)) void this.requeue();
         void this.lookUpFavourite();
         const recovering = !this.connected;
         this.connected = true;
@@ -431,7 +432,7 @@ export class Model extends EventEmitter {
     this.activation = activation;
     activation.promise = (async () => {
       try {
-        if (item.queueIndex !== undefined) await this.act("/queue/jump", { index: item.queueIndex });
+        if (item.queueIndex !== undefined) await this.act("/queue/jump", { index: item.queueIndex, id: item.id });
         else if (collection && index >= 0) await this.execute(() => this.player.playCollectionTrack(collection, list, index));
         else await this.execute(() => this.player.playItem(item));
       } finally { activation.pending = false; }
@@ -486,7 +487,7 @@ export class Model extends EventEmitter {
     const places = this.items.map(entry => entry.queueIndex);
     this.items = this.items.toSpliced(from, 1).toSpliced(to, 0, item).map((entry, index) => ({ ...entry, queueIndex: places[index] }));
     this.changed();
-    await this.editQueue(() => this.act("/queue/move", { from: item.queueIndex, to: target.queueIndex }));
+    await this.editQueue(() => this.act("/queue/move", { from: item.queueIndex, to: target.queueIndex, id: item.id, targetId: target.id }));
   }
 
   async removeQueued(index: number) {
@@ -495,7 +496,7 @@ export class Model extends EventEmitter {
     this.items = this.items.toSpliced(index, 1).map(entry => entry.queueIndex! > place ? { ...entry, queueIndex: entry.queueIndex! - 1 } : entry);
     this.status = `Removed from the queue: ${item!.name}`;
     this.changed();
-    await this.editQueue(() => this.act(`/queue/items/${place}`, undefined, "DELETE"));
+    await this.editQueue(() => this.act(`/queue/items/${place}`, { id: item.id }, "DELETE"));
   }
 
   private async editQueue(edit: () => Promise<unknown>) {
@@ -644,6 +645,31 @@ export class Model extends EventEmitter {
     const hidden = this.preferences.hidden.includes(id) ? this.preferences.hidden.filter(value => value !== id) : [...this.preferences.hidden, id];
     await this.persist({ ...this.preferences, hidden });
   }
+  outputTargets: string[] = [];
+  onOutput?: (host?: string) => Promise<void>;
+  private switchingOutput = false;
+
+  selectOutput(host?: string) {
+    this.commands = this.commands.then(async () => {
+      this.switchingOutput = true; this.changed();
+      try {
+        await this.refreshing;
+        const previous = this.preferences.remote;
+        await this.onOutput?.(host);
+        if (!await this.persist({ ...this.preferences, remote: host }, `Controlling ${host ?? "this computer"}`)) {
+          await this.onOutput?.(previous);
+          return;
+        }
+        this.connected = false;
+        this.queueRevision++;
+      } catch (error) { this.fail(error); }
+      finally { this.switchingOutput = false; }
+      await this.refresh();
+      if (this.view === "queue") await this.requeue();
+    });
+    return this.commands;
+  }
+
   update: UpdateState = { installed: false, message: "" };
   // Called when the update channel changes, so the new channel is checked at once.
   onChannel: () => void = () => {};

@@ -3,6 +3,7 @@ import { AppleMusic, type AppleOptions } from "./apple";
 import { Cider } from "./cider";
 import { cacheDir, readAppleSignIn, readCache, readPreferences, readToken, saveJson } from "./config";
 import { Engine, ensureEngine, stopEngine } from "./engine";
+import { DevicePlayer, validHost } from "./remote";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { ensureCider } from "./startup";
@@ -12,11 +13,15 @@ import { checkForUpdate, currentBuild } from "./update";
 const useCider = process.env.PEEL_PLAYER === "cider";
 
 try {
-  if (process.argv.includes("--version")) {
+  if (process.argv.includes("--remote-host")) {
+    await (await import("./remote-host")).runRemoteHost();
+  } else if (process.argv.includes("--stop-host")) {
+    await new Engine().quit();
+  } else if (process.argv.includes("--version")) {
     const build = await currentBuild();
     console.log(build ? `Peel ${build.version} (${build.channel}, ${build.commit.slice(0, 7)}, built ${build.date})` : "Peel from a source folder");
   } else if (process.argv.includes("--help")) {
-    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nSet PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
+    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop a retained engine on this computer\n\nSet PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
   } else if (process.argv.includes("--connect") && useCider) {
     await ensureCider(new Cider().base, "", false, console.log);
     console.log("Approve Peel's access request in Cider. Waiting up to two minutes...");
@@ -33,6 +38,16 @@ try {
     console.log("Signed in to Apple Music. Run bun start.");
   } else {
     const preferences = await readPreferences();
+    const remoteOption = process.argv.indexOf("--remote");
+    if (remoteOption >= 0) {
+      const host = process.argv[remoteOption + 1];
+      if (!host || !validHost(host)) throw new Error("Use peel --remote <ssh-host>.");
+      if (useCider) throw new Error("Remote control uses Peel's engine. Unset PEEL_PLAYER=cider first.");
+      preferences.remote = host;
+      preferences.remotes = [...new Set([...(preferences.remotes ?? []), host])];
+      await saveJson("layout.json", preferences);
+    }
+    if (process.argv.includes("--local")) { delete preferences.remote; await saveJson("layout.json", preferences); }
     const signIn = await readAppleSignIn();
     const startup = new AbortController();
     const status = (text: string) => { model.status = text; model.changed(); };
@@ -51,10 +66,10 @@ try {
       };
       wake = () => ensureCider(cider.base, token, true, status, startup.signal);
     } else {
-      const engine = player = new Engine();
+      const engine = player = new DevicePlayer(preferences.remote, status);
       // Without a saved sign-in, Peel waits for the engine, which has one.
       options = {};
-      wake = () => ensureEngine(engine, status, startup.signal);
+      wake = () => engine.ensure(startup.signal);
     }
     // A rejected Apple sign-in is renewed from the player once it runs.
     const library = new AppleMusic(signIn.userToken, {
@@ -71,6 +86,11 @@ try {
       read: () => readCache("home.json"), write: value => saveJson("home.json", value, cacheDir),
     });
     model.wake = wake;
+    if (player instanceof DevicePlayer) {
+      const devices = player;
+      model.outputTargets = preferences.remotes ?? [];
+      model.onOutput = host => devices.select(host);
+    }
     // Updates install in the background and start the next time Peel opens. The settings page
     // shows the result, and choosing another channel checks it at once.
     const updates = (force: boolean) => {

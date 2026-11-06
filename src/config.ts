@@ -11,6 +11,8 @@ export interface Preferences {
   channel: Channel;
   // The engine's stream quality. Apple's web player offers AAC at 256 or 64 kbps.
   quality: Quality;
+  remote?: string;
+  remotes?: string[];
 }
 export type Channel = "stable" | "nightly";
 export type Quality = "high" | "standard";
@@ -36,6 +38,8 @@ export async function readPreferences(dir = configDir): Promise<Preferences> {
       heartsInFavourites: value.heartsInFavourites === true,
       channel: value.channel === "nightly" ? "nightly" : "stable",
       quality: value.quality === "standard" ? "standard" : "high",
+      ...(typeof value.remote === "string" ? { remote: value.remote } : {}),
+      ...(Array.isArray(value.remotes) ? { remotes: value.remotes.filter((host: unknown) => typeof host === "string") } : {}),
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(defaults);

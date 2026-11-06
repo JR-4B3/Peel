@@ -203,3 +203,9 @@ With Cider stopped on main, run `bun scripts/verify-startup.ts` to check automat
 For the playlist selection regression, run `bun scripts/verify-song-click.ts --index 12` on main with Favourite Songs as the current queue. The index is zero-based and must name a non-first song in the loaded page. The check drives single and double mouse clicks through the rendered controls and compares Cider's actual audio against direct-play references for the selected song and the first song. It verifies that each click sequence starts the selected song once and preserves the collection queue. It saves `evidence/song-click-report.json` and restores the original song, queue order, volume, and playback settings. Audio comparisons stay in memory. Run it while you are not controlling playback elsewhere.
 
 API references: [Cider v2 documentation](https://taproom.cider.sh/docs/api), [OpenTUI interaction documentation](https://opentui.com/docs/core-concepts/interaction/).
+
+## Desktop remote control
+
+Run `peel --remote main` on a computer with SSH access to `main`. Audio and the queue stay on `main`, while the local Peel controls it. The target is saved. Settings lets you switch between saved computers, and `peel --local` returns to this computer's engine. Switching controllers preserves the host queue. Moving playback between engines is not implemented yet.
+
+Both computers need this version of Peel. The host needs an Apple Music sign-in and an active desktop session. See [remote setup and limits](docs/remote-play.md).
