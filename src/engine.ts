@@ -13,7 +13,9 @@ import type { Media, Page, Playback, Player } from "./types";
 // engine's browser profile in the local AppData folder, which does not roam between PCs.
 export const engineHome = process.env.PEEL_ENGINE_HOME ?? join(systemDir(process.platform === "win32" ? "cache" : "config"), "peel-engine");
 const engineDir = fileURLToPath(new URL("../engine/", import.meta.url));
-const electronDir = join(engineDir, ".electron");
+// A release install shares one Electron download between its versions, so an update does not
+// download it again. A source checkout keeps it in engine/.electron.
+const electronDir = process.env.PEEL_ELECTRON_DIR ?? join(engineDir, ".electron");
 export const electronVersion = "v44.5.1+wvcus";
 const electronPath = join(electronDir, process.platform === "win32" ? "electron.exe" : process.platform === "darwin" ? "Electron.app/Contents/MacOS/Electron" : "electron");
 // Widevine on Windows and macOS rejects players without a VMP signature from castlabs' EVS service.
@@ -289,6 +291,7 @@ export class Engine implements Player {
   }
 
   appleTokens(): Promise<{ userToken: string; storefront?: string }> { return this.call("tokens"); }
+  async setQuality(quality: "high" | "standard") { await this.call("quality", quality); }
   async rating(): Promise<number> { return await this.call("rating") ?? 0; }
 
   // The songs the listener added that have not played yet. The rest of the playing collection is not listed.

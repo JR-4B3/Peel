@@ -11,6 +11,16 @@ if [[ -z "$peel_bun" ]]; then
 fi
 cd "$peel_project_dir"
 "$peel_bun" install --frozen-lockfile
+# A release install (bun src/update.ts install) sets PEEL_RELEASE_ROOT. Its launcher starts whichever
+# version $PEEL_RELEASE_ROOT/current names, so updates need no new launcher. The icons are copied
+# there, because old versions are removed after an update.
+peel_release_root=${PEEL_RELEASE_ROOT:-}
+peel_assets_dir="$peel_project_dir/assets"
+if [[ -n "$peel_release_root" ]]; then
+  mkdir -p "$peel_release_root/assets"
+  cp "$peel_project_dir"/assets/peel.* "$peel_release_root/assets/"
+  peel_assets_dir="$peel_release_root/assets"
+fi
 mkdir -p "$HOME/.local/bin"
 peel_launcher="$HOME/.local/bin/peel"
 if [[ -e "$peel_launcher" ]] && ! head -3 "$peel_launcher" | grep -q '^# Peel launcher'; then
@@ -19,7 +29,14 @@ if [[ -e "$peel_launcher" ]] && ! head -3 "$peel_launcher" | grep -q '^# Peel la
 fi
 {
   printf '#!/usr/bin/env bash\n# Peel launcher\n'
-  printf 'cd %q\n' "$peel_project_dir"
+  if [[ -n "$peel_release_root" ]]; then
+    printf 'root=%q\n' "$peel_release_root"
+    printf 'cd "$root/versions/$(cat "$root/current")" || exit 1\n'
+    # Every version shares one engine download.
+    printf 'export PEEL_ELECTRON_DIR="$root/electron"\n'
+  else
+    printf 'cd %q\n' "$peel_project_dir"
+  fi
   printf 'exec %q src/index.ts "$@"\n' "$peel_bun"
 } > "$peel_launcher"
 chmod 755 "$peel_launcher"
@@ -69,8 +86,8 @@ APP
   peel_icons=$(mktemp -d)
   mkdir -p "$peel_icons/peel.iconset"
   for size in 16 32 128 256 512; do
-    sips -z "$size" "$size" "$peel_project_dir/assets/peel.png" --out "$peel_icons/peel.iconset/icon_${size}x${size}.png" >/dev/null
-    sips -z $((size * 2)) $((size * 2)) "$peel_project_dir/assets/peel.png" --out "$peel_icons/peel.iconset/icon_${size}x${size}@2x.png" >/dev/null
+    sips -z "$size" "$size" "$peel_assets_dir/peel.png" --out "$peel_icons/peel.iconset/icon_${size}x${size}.png" >/dev/null
+    sips -z $((size * 2)) $((size * 2)) "$peel_assets_dir/peel.png" --out "$peel_icons/peel.iconset/icon_${size}x${size}@2x.png" >/dev/null
   done
   iconutil -c icns -o "$peel_app/Contents/Resources/peel.icns" "$peel_icons/peel.iconset"
   rm -rf "$peel_icons"
@@ -95,7 +112,7 @@ peel_desktop_launcher=${peel_desktop_launcher//%/%%}
 {
   printf '[Desktop Entry]\nType=Application\nName=Peel\n'
   printf 'Comment=Search your Apple Music library and control playback\n'
-  printf 'Icon=%s\nCategories=AudioVideo;Audio;Music;\nX-Peel-Launcher=true\n' "$peel_project_dir/assets/peel.svg"
+  printf 'Icon=%s\nCategories=AudioVideo;Audio;Music;\nX-Peel-Launcher=true\n' "$peel_assets_dir/peel.svg"
   # Ghostty shows album covers through the kitty graphics protocol and includes
   # the Nerd Font symbols Peel uses for its controls.
   if command -v ghostty >/dev/null 2>&1; then

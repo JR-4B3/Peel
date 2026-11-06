@@ -6,12 +6,16 @@ import { Engine, ensureEngine, stopEngine } from "./engine";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { ensureCider } from "./startup";
+import { checkForUpdate, currentBuild } from "./update";
 
 // Peel plays through its own engine. PEEL_PLAYER=cider uses Cider instead.
 const useCider = process.env.PEEL_PLAYER === "cider";
 
 try {
-  if (process.argv.includes("--help")) {
+  if (process.argv.includes("--version")) {
+    const build = await currentBuild();
+    console.log(build ? `Peel ${build.version} (${build.channel}, ${build.commit.slice(0, 7)}, built ${build.date})` : "Peel from a source folder");
+  } else if (process.argv.includes("--help")) {
     console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nSet PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
   } else if (process.argv.includes("--connect") && useCider) {
     await ensureCider(new Cider().base, "", false, console.log);
@@ -67,6 +71,15 @@ try {
       read: () => readCache("home.json"), write: value => saveJson("home.json", value, cacheDir),
     });
     model.wake = wake;
+    // Updates install in the background and start the next time Peel opens. The settings page
+    // shows the result, and choosing another channel checks it at once.
+    const updates = (force: boolean) => void checkForUpdate(model.preferences.channel, force).then(result => {
+      model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message };
+      if (/is installed\./.test(result.message)) model.status = result.message;
+      model.changed();
+    });
+    model.onChannel = () => { model.update = { ...model.update, message: "Checking for updates..." }; model.changed(); updates(true); };
+    updates(false);
     let interval: ReturnType<typeof setInterval> | undefined;
     const ui = new PeelUI(renderer, model, () => { clearInterval(interval); ui.dispose(); renderer.destroy(); });
     // q, Ctrl+C, and closing the terminal window all destroy the renderer. The engine stops with it.
