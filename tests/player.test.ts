@@ -410,7 +410,8 @@ test("layout preferences survive a restart and use private file permissions", as
   // A layout from an older Peel, without the newer settings, gets their defaults.
   await saveJson("layout.json", { order: [], hidden: [], heartsInFavourites: false }, dir);
   expect(await readPreferences(dir)).toMatchObject({ channel: "stable", quality: "high" });
-  expect((await stat(join(dir, "layout.json"))).mode & 0o777).toBe(0o600);
+  // Windows has no Unix file modes. Its user profile folders are private already.
+  if (process.platform !== "win32") expect((await stat(join(dir, "layout.json"))).mode & 0o777).toBe(0o600);
 });
 
 test("a slow earlier search cannot overwrite a later search", async () => {
