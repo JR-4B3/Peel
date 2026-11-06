@@ -62,14 +62,24 @@ setInterval(() => {
   if (!owners.size) { log("every Peel has exited"); app.quit(); }
 }, 1000).unref();
 
+const maxBody = 8 * 1024 * 1024;
+
 // Only the page's player methods can be called, by name, with JSON arguments.
 function serve(window, key) {
   const call = (method, args = []) => {
     if (!/^\w+$/.test(method)) throw new Error("Invalid method");
     return window.webContents.executeJavaScript(`window.peelEngine ? Promise.resolve(window.peelEngine.${method}(...${JSON.stringify(args)})) : { ready: false }`);
   };
-  http.createServer(async (request, response) => {
-    const reply = (status, value) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value ?? null)); };
+  http.createServer((request, response) => {
+    const reply = (status, value) => {
+      if (response.headersSent || response.destroyed) return;
+      response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value ?? null));
+    };
+    // A client that disconnects mid-request must not take the engine down with it.
+    handle(request, reply).catch(error => { log(`request failed: ${error?.message ?? error}`); reply(500, { error: "Request failed" }); });
+  }).listen(port, "127.0.0.1", () => log(`listening on 127.0.0.1:${port}`));
+
+  async function handle(request, reply) {
     if (request.headers["x-peel-key"] !== key) return reply(403, { error: "Wrong engine key" });
     const owner = Number(request.headers["x-peel-owner"]);
     const known = Number.isInteger(owner) && owner > 0;
@@ -81,9 +91,13 @@ function serve(window, key) {
       return;
     }
     if (known) owners.add(owner);
-    let body = "";
-    for await (const chunk of request) body += chunk;
     try {
+      // Peel's largest request queues a few hundred songs. Anything far larger is refused.
+      let body = "";
+      for await (const chunk of request) {
+        body += chunk;
+        if (body.length > maxBody) return reply(413, { error: "Request too large" });
+      }
       if (request.method === "GET" && request.url === "/state") return reply(200, { ...await call("state"), version });
       if (request.method === "POST" && request.url === "/quit") { reply(200, null); return app.quit(); }
       if (request.method === "POST" && request.url === "/call") {
@@ -92,7 +106,7 @@ function serve(window, key) {
       }
       reply(404, { error: "Not found" });
     } catch (error) { reply(500, { error: String(error?.message ?? error) }); }
-  }).listen(port, "127.0.0.1", () => log(`listening on 127.0.0.1:${port}`));
+  }
 }
 
 app.whenReady().then(async () => {

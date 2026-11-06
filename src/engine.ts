@@ -259,7 +259,7 @@ export class Engine implements Player {
       "/playback/repeat/toggle": () => this.call("toggleRepeat"),
       "/queue/jump": () => this.call("jump", body.index),
       "/queue/move": () => this.call("move", body.from, body.to),
-      "/library/now-playing/rating": () => this.call("rate", method === "DELETE" ? 0 : body.rating),
+      "/library/now-playing/rating": () => this.call("rate", method === "DELETE" ? 0 : body.rating, ...(body.id ? [body.id] : [])),
     };
     const removed = method === "DELETE" && path.match(/^\/queue\/items\/(\d+)$/);
     const run = removed ? () => this.call("remove", Number(removed[1])) : commands[path];

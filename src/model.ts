@@ -32,7 +32,7 @@ export function parseFilter(text: string) {
   }
   return { words, years, either };
 }
-interface Snapshot { view: string; title: string; items: Media[]; more: boolean; detail?: Media; shelves: ArtistShelf[]; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string }; filter: Filter }
+interface Snapshot { view: string; title: string; items: Media[]; more: boolean; loading: boolean; detail?: Media; shelves: ArtistShelf[]; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string }; filter: Filter }
 
 // Case and accents do not matter: "beyonce" finds "Beyoncé".
 const fold = (text: string) => text.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
@@ -236,7 +236,7 @@ export class Model extends EventEmitter {
   }
 
   private remember() {
-    this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter });
+    this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, loading: this.loading, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter });
     this.filter = unfiltered;
   }
 
@@ -282,8 +282,10 @@ export class Model extends EventEmitter {
     this.generation++; this.loading = false;
     ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter } = previous);
     this.changed();
-    // Opening the page stopped this list's background loading. It continues where it was.
-    if (this.more && this.items.length < backgroundLimit) void this.load(true, backgroundLimit);
+    // Opening the page stopped this list's loading. A list left before its first page arrived
+    // loads again. Otherwise the background loading continues where it was.
+    if (previous.loading && !this.items.length && this.loader) void this.load(false);
+    else if (this.more && this.items.length < backgroundLimit) void this.load(true, backgroundLimit);
     return closed;
   }
 
@@ -520,13 +522,18 @@ export class Model extends EventEmitter {
     if (this.playback.repeatMode !== "one") {
       return this.act(direction === 1 ? "/playback/next" : "/playback/previous", direction === -1 ? { force: true } : {});
     }
-    try {
-      // Cider's ordinary Next can repeat the current song in repeat-one mode.
-      // An explicit queue jump skips without changing the user's repeat setting.
+    // Cider's ordinary Next can repeat the current song in repeat-one mode.
+    // An explicit queue jump skips without changing the user's repeat setting.
+    // The position is read in the same queued command as the jump, so rapid presses each move
+    // one song from where the previous press landed.
+    let jumped = false;
+    const done = await this.execute(async () => {
       const queue = await this.player.queuePosition();
-      if (queue.total < 2) return false;
-      return this.act("/queue/jump", { index: (queue.position + direction + queue.total) % queue.total });
-    } catch (error) { this.fail(error); return false; }
+      if (queue.total < 2) return;
+      await this.player.command("/queue/jump", { index: (queue.position + direction + queue.total) % queue.total });
+      jumped = true;
+    });
+    return done && jumped;
   }
 
   // Undefined until Apple has said whether the playing song is a favourite.
@@ -535,8 +542,8 @@ export class Model extends EventEmitter {
     return this.loved?.key === key ? this.loved.value : this.playback.nowPlaying?.inFavorites;
   }
 
-  private songKey() {
-    const song = this.playback.nowPlaying;
+  private songKey(playback = this.playback) {
+    const song = playback.nowPlaying;
     return song ? song.playParams?.catalogId ?? song.playParams?.id ?? `${song.name}/${song.artistName}` : "";
   }
 
@@ -561,14 +568,27 @@ export class Model extends EventEmitter {
     // Toggling an unknown state could remove a favourite, which would move it in Favourite Songs.
     if (this.favourite === undefined) { this.status = "Still checking whether this song is a favourite."; this.changed(); return; }
     const value = !this.favourite;
+    const id = this.playback.nowPlaying?.playParams?.id;
     this.loved = { key, value }; this.changed();
-    const done = await this.execute(() => value
-      ? this.player.command("/library/now-playing/rating", { rating: 1 }, "PUT")
-      : this.player.command("/library/now-playing/rating", {}, "DELETE"));
+    // The player rates whatever plays when the command runs. A command queued before this one,
+    // such as starting another song, can change that, so the song is checked first.
+    let moved = false;
+    const done = await this.execute(async () => {
+      if (this.songKey(await this.player.snapshot()) !== key) { moved = true; return; }
+      await (value
+        ? this.player.command("/library/now-playing/rating", { rating: 1, id }, "PUT")
+        : this.player.command("/library/now-playing/rating", { id }, "DELETE"));
+    });
+    if (moved) {
+      if (this.loved?.key === key) this.loved = undefined;
+      this.status = "The song changed before the favourite was saved. Nothing was changed.";
+      this.changed();
+      return;
+    }
     // Cider applies ratings asynchronously. Read the stored rating before claiming it.
     let saved = !value;
     try {
-      for (let attempt = 0; done && attempt < 30 && saved !== value; attempt++) {
+      for (let attempt = 0; done && attempt < 30 && saved !== value && this.songKey() === key; attempt++) {
         saved = await this.player.rating() === 1;
         if (saved !== value) await Bun.sleep(100);
       }
