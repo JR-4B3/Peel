@@ -1,0 +1,89 @@
+# Hi-res playback
+
+Peel's standard engine plays Apple Music's web stream, which is AAC. Hi-res Lossless (ALAC up to 24-bit/192 kHz) is only decrypted inside Apple's own apps. On Linux, Peel runs Apple's Android app in a slimmed-down [Waydroid](https://waydro.id), with its window on an invisible display, and the audio reaches PipeWire bit-perfect.
+
+This directory holds the pipeline that builds, tests and updates that Android.
+
+## Setup (once)
+
+On the machine that plays the music:
+
+```sh
+sudo hires/install.sh "$USER"   # root helper + a sudoers rule that allows only that helper
+hires/install.sh --user         # peel-hires CLI, systemd units, PipeWire sample rates
+peel-hires setup                # first release, Apple Music, sign-in, then the full test
+```
+
+`peel-hires setup` starts Android on the invisible display, builds and switches to the first release, and installs Apple Music. It then shows Apple Music once for sign-in and hides it again, and finally runs `peel-hires update --force`, which tests the release and keeps it. Until Apple Music is installed and signed in, `peel-hires update` stops with a notification instead of testing and switching back.
+
+Setup authorizes this machine's adb key inside Android through the root helper, because Android's confirmation prompt would appear on the invisible display.
+
+`peel-hires apple-update` installs or updates the Apple Music app. The pipeline downloads it from APKPure and refuses any package that isn't signed with Apple's certificate.
+
+## What a release is
+
+`peel-hires build` has the root helper fetch Waydroid's newest system and vendor images, check them against Waydroid's published SHA-256 sums, and repack them:
+
+- removes what [`manifest.conf`](manifest.conf) lists: apps nothing in playback uses, and the 32-bit graphics stack;
+- runs Android with only the 64-bit zygote;
+- adds Peel's audio driver ([`android/audio_hw.c`](android/audio_hw.c), built by [`android/build-hal.sh`](android/build-hal.sh)), which opens streams at the rate and format Android asks for;
+- adds the audio policy ([`android/audio_policy_configuration.xml`](android/audio_policy_configuration.xml)) that runs Android's mixer at 192 kHz float;
+- sets release build tags, which Apple Music requires;
+- skips Android's boot animation, which nobody sees on the invisible display and which held back each boot by about 5 seconds;
+- writes both images as EROFS, compressed as the manifest's `[build]` section says: zstd at level 15, which makes a release 796 MB instead of 1,055 MB with LZ4HC and boots as fast. The build runs at low priority on half the cores.
+
+A release ID combines the image dates with a hash of the manifest, the policy and the driver, for example `s20260927-v20261022-1a2b3c4d`. Releases live in `/var/lib/peel-hires/releases/`.
+
+## The root helper
+
+Repacking and switching images need root. `install.sh` installs [`root/peel-hires-root`](root/peel-hires-root) root-owned and adds a sudoers rule that lets the user run only that file without a password. Its boundary is that nothing the caller passes changes the host outside `/var/lib/peel-hires` and Waydroid's own state, or reveals a file the caller couldn't read:
+
+- It downloads Waydroid's images itself and checks their SHA-256 against Waydroid's list. It never mounts an image from the caller.
+- It reads the caller's inputs (manifest, audio driver, policy, adb key) through `runuser` with the caller's own permissions, so a symlink or a swapped file can't make it read root's files.
+- It edits image trees one path component at a time with `O_NOFOLLOW`, so a symlink inside an image can't point a removal or a write at the host.
+- Image trees live in a root-only folder, mounted `nosuid,nodev,noexec` while they are copied.
+- Properties are checked to be plain `key=value` lines before they reach `waydroid.cfg`.
+- Steps that change state hold one lock, and a switch stops the container before touching anything Android has mounted.
+
+The helper doesn't update itself. After changing it, run `sudo install.sh "$USER"` again.
+
+## Tests
+
+`peel-hires test` writes a JSON report to `~/.local/state/peel-hires/reports/`:
+
+| Test | Passes when |
+| --- | --- |
+| boot | Android finishes booting |
+| properties | Release build tags are set and only the 64-bit zygote runs |
+| bit-perfect-android | A random 24-bit signal played at 192 kHz through Android arrives in PipeWire sample-for-sample identical |
+| audio-driver-rate | The audio driver opened a 192 kHz float stream |
+| apple-music-app | Apple Music is installed, signed in, set to Hi-Res Lossless, opens, its screen can be read, and it is not blocking a "rooted" device |
+| apple-music-hires-playback | Apple Music decodes ALAC at 192 kHz and every sample reaching PipeWire is an exact 24-bit value |
+
+The audio tests play into a temporary silent sink and put Waydroid's streams back on their own sinks afterwards. The test signal starts with silence, and the default output is muted for the moment Apple Music starts, so nothing is heard. The last test uses the Apple account's single stream, so it is skipped while music is playing. It shows that Apple's audio reaches PipeWire at 192 kHz with full 24-bit samples; only the test signal is compared sample by sample, because Apple's decoded audio has no reference to compare against.
+
+`hires/tests/offline/run.sh` tests parts of the pipeline without Waydroid, Android or audio hardware: the audio driver's write function against a simulated ALSA device, and the health checks against a simulated adb that fails in different ways. It needs bash, python3 and a C compiler, and `bun test` runs it too.
+
+## Updates
+
+`peel-hires-update.timer` runs `peel-hires update` daily at 04:30. When Waydroid publishes new images, the manifest, the audio policy or the audio driver changes, or the host's Waydroid, LXC or kernel version changes, it builds a release if needed, switches to it, and runs the tests. If they pass, the release stays; if anything fails, a boot that never finishes included, it switches back and sends a desktop notification. If music is playing (in Android, Peel's engine or Cider), it waits for the next run.
+
+After a passing release it updates the Apple Music app and runs the tests again. Android won't downgrade an app without wiping its data, so a bad Apple Music version is reported, not undone. Last, if nothing is playing, it restarts Apple Music and stops Android's background apps (`peel-hires trim`). Apple Music grows from about 115 to 475 MB over a day of use.
+
+`peel-hires-watchdog.timer` runs `peel-hires watchdog` every 5 minutes. If Android stops answering over adb, isn't booted, or has no `system_server` in two checks in a row, it restarts the session and sends a notification. It waits while music plays or an update runs.
+
+## Memory and disk
+
+Turning off Android apps that playback doesn't use saved about 60 MB, but Android then booted 2 seconds slower without a home screen app, and stalled when the persistent Phone app was off. `peel-hires` therefore keeps all apps on, and the nightly trim stops the ones that linger.
+
+`peel-hires prune` deletes stock Waydroid's images (2.4 GB) once no release state refers to them, and the image zips in `~/.cache/peel-hires/downloads`, which the root helper keeps its own verified copies of. It and every passing update also remove releases that are neither active, confirmed, nor the fallback.
+
+With `AGENT=claude` in `~/.config/peel-hires/config`, a failed update starts a Claude Code agent with [`agent/repair.md`](agent/repair.md). Its instructions limit it to restoring lines removed in `manifest.conf` and to leaving a passing release active. Those instructions are not a security boundary; the agent can do what the `peel-hires` CLI can, which the root helper bounds as described above. It is off by default.
+
+## Known limits
+
+- Android's mixer runs at a fixed 192 kHz. Songs at 44.1, 48 or 96 kHz are resampled to it, so only 192 kHz songs are bit-perfect end to end. Following each song's rate needs a change in the audio driver.
+- Apple allows one stream per account. A test that plays Apple Music stops playback on every other device.
+- Signing in needs the Apple Music window once. Apple can end the session at any time, and then `peel-hires signin` is needed again.
+
+[`docs/phase-one.md`](docs/phase-one.md) describes how hi-res was first proven, with measurements.

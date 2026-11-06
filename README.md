@@ -15,7 +15,8 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 - Song lists can be filtered by title, artist, or album, sorted, and narrowed to favourites. Favourite songs show a heart before their title.
 - Playback controls use icons with their keyboard shortcut beside them when the terminal is at least 100 columns wide. There is one player strip at the bottom with the current cover and a favourite heart.
 - Mouse clicks and keyboard shortcuts control the same actions.
-- Lyrics are deferred.
+- Lyrics of the playing song follow it line by line, beside the music or in its place (`y`).
+- Hi-res playback on Linux is in progress. [hires/](hires/README.md) builds and tests a slimmed Waydroid in which Apple Music's Android app plays bit-perfect up to 24-bit/192 kHz. Peel does not play through it yet.
 
 ## Run
 
@@ -51,6 +52,7 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Jump through a long song list | Page Up / Page Down, Home / End | Scroll, three songs at a time |
 | Back from an album, playlist, or artist | Escape or Backspace | Back |
 | Show the cover large, the open album's or else the playing song's | `c`. Escape or `c` closes it | The cover beside an album's name or in the player |
+| Show the playing song's lyrics | `y`. On narrow windows Escape closes them too | The microphone in the player |
 | Favourite the current song | `f` | Heart |
 | Favourite the open album | `l` | Favourite, beside Play |
 | Add the highlighted song, album, or playlist to the queue, after the songs already added | `e` | |
@@ -75,6 +77,8 @@ The bottom right of the window lists the keys for what has focus, such as play n
 Selecting a song in a playlist or album starts that song directly, then adds its collection and restores its position in the displayed order. Cider adds only the first hundred songs of a collection, so a song further down starts at once and the next hundred loaded songs are queued after it in the background. The songs before it are not queued then, and selecting another song stops the queueing. The collection's first song never starts as an intermediate step. Next and Previous continue through the collection. A double-click on the same song starts it once. Shuffle can change the order afterwards. Manual Next and Previous still change tracks in repeat-one mode and preserve the repeat setting.
 
 Left and Right move between covers on Home, Albums, Artists, and artist pages, and seek in song lists. On Home and artist pages, each row scrolls sideways. Click the arrows beside a row's title to page through it. On an artist page, Down from the last top song moves into the album rows, and Up from the first row returns to the songs.
+
+Lyrics follow the song line by line. Peel uses Apple Music's time-synced lyrics, and LRCLIB's when Apple has none. Lyrics without timing scroll with the song's progress. Windows at least 110 columns wide show them beside the music; narrower windows show them in its place. Peel fetches lyrics only while the pane is open and redraws it only when the sung line changes, so a closed pane costs nothing.
 
 Apple Music does not report how often you played a song, so an artist page shows Apple's top songs for that artist, its most played songs across Apple Music. Selecting one plays that song. Search shows up to three matching artists above the songs and albums.
 

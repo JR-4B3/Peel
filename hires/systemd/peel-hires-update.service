@@ -1,0 +1,10 @@
+[Unit]
+Description=Check for and test updates to Peel's hi-res Android
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/peel-hires update
+# 75 means music was playing and the update was postponed.
+SuccessExitStatus=75
+Nice=10
+IOSchedulingClass=idle
