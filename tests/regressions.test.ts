@@ -128,6 +128,7 @@ function engineMain(env: Record<string, string>) {
       return require(name);
     },
     process: { env }, __dirname: engineDir, __filename: join(engineDir, "main.js"), console: { log() {} }, Buffer,
+    setInterval: () => ({ unref() {} }),
   });
   vm.runInContext(source.slice(0, source.indexOf("app.whenReady()")), context);
   return { context, server: () => server! };
