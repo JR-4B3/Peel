@@ -36,6 +36,7 @@ function fakeEngine() {
     const { method, args = [] } = body;
     state.calls.push(method);
     if (method === "pause") state.playing = false;
+    if (method === "stop") Object.assign(state, { items: [], position: 0, time: 0, playing: false, added: [] });
     if (method === "resume") state.playing = true;
     if (method === "play") { state.items = structuredClone(args[0]); state.position = args[1] ?? 0; state.playing = true; state.time = 0; }
     if (method === "exportPlayback") return { items: state.items, position: state.position, added: state.added, time: state.time, playing: state.playing, repeatMode: "none", shuffleMode: false };
@@ -170,7 +171,9 @@ test("play here moves the queue, song, and position, and the old device pauses",
   await mac.player.playOn(main.network.id);
   expect(main.fake.state).toMatchObject({ position: 1, time: 42, playing: true, added: [2] });
   expect(main.fake.state.items.map(item => item.id)).toEqual(["c1", "c2", "a1"]);
-  expect(mac.fake.state.playing).toBe(false);
+  // The Mac stops, so it no longer holds the account's stream.
+  expect(mac.fake.state.calls.slice(-1)).toEqual(["stop"]);
+  expect(mac.fake.state.items).toEqual([]);
   expect(mac.player.peer).toBe(main.network.id);
   // Both devices agree that main plays now.
   await waitFor(() => main.network.claim.device === main.network.id, "main's claim");

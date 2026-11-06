@@ -145,7 +145,7 @@ Filtering, sorting, or narrowing to favourites first loads the rest of the list,
 Every Peel on the same network is a device. Press `d`, or click the devices button beside the lyrics button, to open a popup above the player. It lists this computer, your paired devices with what each one plays, and nearby Peels you have not paired yet.
 
 - **Pairing.** Choose a nearby device. Both screens show the same six-digit code. You do not type it anywhere. It is there so you can check that you pair with your own device: if both screens show the same code, press Enter on both. You pair once. Pairing a device with any device in your group adds it to the whole group, so three computers need two pairings, not three.
-- **Moving the music.** Choose a paired device. Peel moves the queue, the playing song, and its position there, and the device that played pauses. If the new device cannot start, the music keeps playing where it was.
+- **Moving the music.** Choose a paired device. Peel moves the queue, the playing song, and its position there, and the device that played stops. If the new device cannot start, the music keeps playing where it was.
 - **Controlling.** Every Peel controls whichever device plays. Play, pause, skip, seek, volume, favourites, and queue edits all go to that device, and every open Peel shows its song, queue, and hearts. When another Peel moves the music, this one follows.
 - **No device is in charge.** The device that plays holds the queue only because it plays it. Each device keeps working without the others.
 

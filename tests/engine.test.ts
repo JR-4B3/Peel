@@ -232,3 +232,21 @@ test("an import that fails partway leaves the engine paused at its own volume", 
   expect(playing).toBe(false);
   expect(music.volume).toBe(0.7);
 });
+
+test("a moved queue keeps library songs as library songs, and survives a song MusicKit leaves out", async () => {
+  const source = await musicKit(), target = await musicKit();
+  await source.engine.play([song("i.one"), song("i.two"), song("i.three"), song("i.four")], 2);
+  await source.engine.enqueue([song("i.added")], false);
+  // MusicKit reports every entry's type as "song".
+  for (const entry of source.music.items) entry.type = "song";
+  const exported = source.engine.exportPlayback();
+  expect(exported.items.every((item: any) => item.type === "library-songs")).toBe(true);
+  // The target's MusicKit cannot play "i.two" and leaves it out.
+  const setQueue = target.music.setQueue;
+  target.music.setQueue = async (options: any) => setQueue({ ...options, items: options.items.filter((item: any) => item.id !== "i.two") });
+  Object.assign(target.music, { play: async () => {}, pause: async () => {}, seekToTime: async () => {} });
+  await target.engine.importPlayback(JSON.parse(JSON.stringify(exported)));
+  expect(target.music.items.map((item: any) => item.id)).toEqual(["i.one", "i.three", "i.added", "i.four"]);
+  expect(target.music.items[target.music.position].id).toBe("i.three");
+  expect(target.queued()).toEqual(["i.added"]);
+});

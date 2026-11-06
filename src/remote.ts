@@ -218,4 +218,7 @@ export async function moveMusic(source: EngineTransport, destination: EngineTran
     if (playing) await call(source, "resume").catch(() => {});
     throw new Error(`Could not start the music on ${to}. It keeps playing on ${from}. ${error instanceof Error ? error.message : String(error)}`);
   }
+  // A paused player still holds the account's Apple stream, which can stop the new device when
+  // Apple allows one stream at a time. The old device stops. Its queue now lives on the new one.
+  await call(source, "stop").catch(() => {});
 }

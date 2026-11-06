@@ -40,7 +40,7 @@ interface Stored { id: string; keys: GroupKey[]; known: Known[]; output?: Claim 
 interface Nearby { id: string; name: string; address: string; port: number; keys: string[]; seen: number }
 
 // The engine methods another device may call. Tokens and stream quality stay on this computer.
-const methods = new Set(["state", "pause", "resume", "toggle", "next", "previous", "seek", "volume", "shuffle", "toggleShuffle", "toggleRepeat", "play", "enqueue", "move", "remove", "jump", "queue", "rating", "rate", "exportPlayback", "importPlayback"]);
+const methods = new Set(["state", "pause", "stop", "resume", "toggle", "next", "previous", "seek", "volume", "shuffle", "toggleShuffle", "toggleRepeat", "play", "enqueue", "move", "remove", "jump", "queue", "rating", "rate", "exportPlayback", "importPlayback"]);
 export function allowedRequest(path: unknown, body: any) {
   if (path === "/state") return body === undefined;
   return path === "/call" && typeof body?.method === "string" && methods.has(body.method) && (body.args === undefined || Array.isArray(body.args));

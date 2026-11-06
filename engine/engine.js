@@ -54,8 +54,10 @@
 
   // A queued entry as a Peel song again, for moving the queue to another device. Added songs keep
   // the song Peel queued. The collection's entries are read back from MusicKit.
+  // MusicKit names every queued entry's type "song", so a library song is known by its
+  // library ID or its play parameters. Without that, another device would look it up in the catalog.
   const song = item => added.get(item) ?? {
-    id: item.id, type: item.type ?? "songs",
+    id: item.id, type: item.playParams?.isLibrary || /^i\./.test(item.id ?? "") || item.type?.startsWith("library-") ? "library-songs" : "songs",
     name: item.attributes?.name ?? item.title ?? "", artist: item.attributes?.artistName ?? item.artistName ?? "", album: item.attributes?.albumName ?? item.albumName ?? "",
     duration: (item.attributes?.durationInMillis ?? item.playbackDuration ?? 0) / 1000,
     ...(item.attributes?.artwork?.url ?? item.artwork?.url ? { artwork: item.attributes?.artwork?.url ?? item.artwork?.url } : {}),
@@ -91,6 +93,8 @@
     },
     tokens: () => ({ userToken: music.musicUserToken, storefront: music.storefrontId }),
     pause: () => music.pause(),
+    // Ends playback here and gives up Apple's stream, after the music moved to another device.
+    stop: () => music.stop(),
     resume: () => music.play(),
     toggle: () => music.playbackState === 2 ? music.pause() : music.play(),
     next: () => music.skipToNextItem(),
@@ -162,11 +166,25 @@
       const start = Math.min(Math.max(0, position), items.length - 1);
       music.shuffleMode = 0;
       await music.setQueue({ items: items.map(resource), startWith: start, startPlaying: false });
-      music.queue.items.forEach((item, index) => { if (marks.includes(index) && items[index]) added.set(item, items[index]); });
+      // MusicKit leaves out songs it cannot play, which moves the rest. Each entry is matched to
+      // the song it came from by ID, in order, for the added marks and the song to start with.
+      const sources = [];
+      let next = 0;
+      for (const entry of music.queue.items) {
+        let index = next;
+        while (index < items.length && items[index].id !== entry.id) index++;
+        if (index < items.length) next = index + 1;
+        sources.push(index < items.length ? index : -1);
+      }
+      music.queue.items.forEach((item, index) => { if (marks.includes(sources[index])) added.set(item, items[sources[index]]); });
+      const target = sources.findIndex(index => index >= start);
       music.repeatMode = Math.max(0, repeats.indexOf(repeatMode));
       const volume = music.volume;
       if (!playing) music.volume = 0;
       try {
+        if (target >= 0 && target !== music.queue.position) await music.changeToMediaAtIndex(target);
+        // The song to start with was left out, so its position does not apply to the next one.
+        if (sources[target] !== start) time = 0;
         await music.play();
         if (time > 1) await music.seekToTime(time);
         if (!playing) await music.pause();
@@ -195,6 +213,12 @@
     music.volume = window.peel.volume;
     music.addEventListener("nowPlayingItemDidChange", () => void checkRating());
     music.addEventListener("playbackVolumeDidChange", () => log(`volume ${music.volume}`));
+    // Playback that ends by itself is logged with Apple's reason, if MusicKit gives one.
+    music.addEventListener("mediaPlaybackError", event => log(`playback error ${event?.errorCode ?? event?.name ?? ""} ${event?.message ?? event?.description ?? ""}`.trim()));
+    music.addEventListener("playbackStateDidChange", event => {
+      const state = event?.state ?? music.playbackState;
+      if (state === MusicKit.PlaybackStates?.stopped || state === 4) log(`playback stopped at ${Math.round(music.currentPlaybackTime ?? 0)}s of ${music.nowPlayingItem?.title ?? "nothing"}`);
+    });
     log(`configured, authorized=${music.isAuthorized}`);
     if (!music.isAuthorized) {
       signIn = true;

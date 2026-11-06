@@ -41,7 +41,9 @@ Every Peel controls the claimed device while it can reach it. When that device g
 
 ## Moving the music
 
-Moving the music to a device pauses the device that played, reads its queue with the engine's `exportPlayback`, and sends it to the new device's `importPlayback`. The export includes every queued song, the playing place, the songs you added, the position, repeat, and shuffle. The new device keeps its own volume. If the import fails, the new device pauses, the old device plays again, and the claim does not change.
+Moving the music to a device pauses the device that played, reads its queue with the engine's `exportPlayback`, and sends it to the new device's `importPlayback`. The export includes every queued song, the playing place, the songs you added, the position, repeat, and shuffle. The new device keeps its own volume. If the import fails, the new device pauses, the old device plays again, and the claim does not change. Once the import worked, the old device stops instead of staying paused. Apple may allow one stream per account, and a paused player still holds it, so a paused old device could stop the new one, for example when it reconnects after its network dropped.
+
+MusicKit reports every queued song as type `song`, so the export marks library songs by their library ID. MusicKit can leave out a song it cannot play. The import then matches each queued song to the exported one by ID, so the added songs and the song to start with stay right. If the song to start with was left out, the next one starts from its beginning. The engine logs playback errors and stopped playback with the song and position, in `engine.log` or in the `peel-engine` unit's journal.
 
 These limits apply:
 
