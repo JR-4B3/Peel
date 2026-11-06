@@ -3,7 +3,7 @@ import { Cider } from "../src/cider";
 import { stopped, type Playback } from "../src/types";
 
 // Serve Cider's v2 envelopes for playback and Apple Music's native JSON for the library.
-export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number } = {}) {
+export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number; silentRating?: boolean } = {}) {
   const playback: Playback = { ...structuredClone(stopped), nowPlaying: { name: "Soma", artistName: "Skrillex" }, time: { currentTime: 30, duration: 200 } };
   const calls: { path: string; method: string; body: any }[] = [];
   const song = { id: "i.soma", name: "Soma", artistName: "Skrillex", albumName: "SOMA", durationMs: 200000 };
@@ -15,6 +15,8 @@ export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number
   let position = 1;
   const audible: string[] = [];
   let rating = 0;
+  // Rated albums, by the id in their rating path.
+  const lovedAlbums = new Set<string>();
   const album = (id: string, name: string, artistName: string, releaseDate = "2026-01-01") => ({ id, type: "albums", attributes: { name, artistName, releaseDate, trackCount: 3 } });
   const skrillex = { id: "100", type: "artists", attributes: { name: "Skrillex", genreNames: ["Dance"] } };
   const top = [1, 2, 3, 4, 5, 6].map(n => ({ id: `t${n}`, type: "songs", attributes: { name: `Top song ${n}`, artistName: "Skrillex", albumName: "SOMA", durationInMillis: 180000 } }));
@@ -64,6 +66,14 @@ export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number
       { id: "l.soma", type: "library-albums", attributes: { name: "SOMA", artistName: "Skrillex", trackCount: 3, releaseDate: "2026-01-01" } },
       { id: "l.other", type: "library-albums", attributes: { name: "Other Album", artistName: "Other", trackCount: 3 } },
     ] };
+    else if (path === "/v1/me/library/albums/l.soma/catalog") data = { data: [{ id: "1440", type: "albums" }] };
+    else if (path === "/v1/me/library/albums/l.other/catalog") data = { data: [] };
+    else if (/^\/v1\/me\/ratings\/(library-)?albums/.test(path)) {
+      const id = path.split("/")[5];
+      if (request.method === "PUT") lovedAlbums.add(id!);
+      else if (request.method === "DELETE") { lovedAlbums.delete(id!); return new Response(null, { status: 204 }); }
+      else data = { data: (url.searchParams.get("ids") ?? "").split(",").filter(id => lovedAlbums.has(id)).map(id => ({ id, type: "ratings", attributes: { value: 1 } })) };
+    }
     else if (path.startsWith("/v1/me/ratings/")) {
       // Only "Selected song" is a favourite.
       const ids = (url.searchParams.get("ids") ?? "").split(",");
@@ -79,7 +89,7 @@ export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number
     const body = request.method === "GET" ? undefined : await request.json();
     calls.push({ path, method: request.method, body });
     let data: any = {};
-    if (path === "/playback") data = { ...playback, nowPlaying: playback.nowPlaying && { ...playback.nowPlaying, inFavorites: rating === 1 } };
+    if (path === "/playback") data = { ...playback, nowPlaying: playback.nowPlaying && { ...playback.nowPlaying, inFavorites: options.silentRating ? undefined : rating === 1 } };
     else if (path === "/playback/toggle") playback.state = playback.state === "playing" ? "paused" : "playing";
     else if (path === "/playback/pause") playback.state = "paused";
     else if (path === "/playback/play") playback.state = "playing";
@@ -122,6 +132,6 @@ export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number
     else if (path === "/queue/position") data = { position, total: queue.length };
     return Response.json({ data, meta: { offset: 0, limit: 100, total: data.items?.length ?? 0 } });
   } });
-  return { server, playback, calls, audible, beginPlayback: () => { playback.time.currentTime = 1; }, player: new Cider(`http://127.0.0.1:${server.port}`, "test-token"),
+  return { server, playback, calls, audible, lovedAlbums, beginPlayback: () => { playback.time.currentTime = 1; }, player: new Cider(`http://127.0.0.1:${server.port}`, "test-token"),
     library: new AppleMusic("user-token", { base: `http://127.0.0.1:${server.port}`, developerToken: async () => "dev-token" }) };
 }

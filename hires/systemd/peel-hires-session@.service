@@ -1,0 +1,11 @@
+[Unit]
+Description=Peel hi-res Android session (%i)
+# The headless instance draws on the invisible display; the visible one on the desktop.
+Wants=peel-hires-display.service
+After=peel-hires-display.service
+
+[Service]
+ExecStart=%h/.local/bin/peel-hires session run %i
+ExecStop=/usr/bin/waydroid session stop
+Restart=on-failure
+RestartSec=5

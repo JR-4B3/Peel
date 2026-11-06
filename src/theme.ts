@@ -43,4 +43,5 @@ export const icon = {
   sort: "\u{F04BA}",
   left: "\u{F0141}",
   right: "\u{F0142}",
+  lyrics: "\u{F036C}",
 };

@@ -1,0 +1,10 @@
+[Unit]
+Description=Daily update check for Peel's hi-res Android
+
+[Timer]
+OnCalendar=*-*-* 04:30
+RandomizedDelaySec=45min
+Persistent=true
+
+[Install]
+WantedBy=timers.target
