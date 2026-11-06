@@ -197,7 +197,8 @@ export class AppleMusic implements Library {
     return [...results("songs"), ...results("albums"), ...results("artists")];
   }
 
-  // Catalog songs are rated through their catalog id, songs only in the library as library songs.
+  // A library song's rating can differ from its linked catalog song. Use the library ID for
+  // library songs, including ones with catalog links, and the catalog ID for catalog songs.
   async ratings(items: Media[]): Promise<Set<string>> {
     const songs = items.filter(item => /songs/.test(item.type));
     const ask = async (kind: string, ids: string[]) => {
@@ -209,10 +210,10 @@ export class AppleMusic implements Library {
       return loved;
     };
     const [catalog, library] = await Promise.all([
-      ask("songs", [...new Set(songs.flatMap(item => item.catalogId ? [item.catalogId] : []))]),
-      ask("library-songs", songs.filter(item => !item.catalogId && item.id.startsWith("i.")).map(item => item.id)),
+      ask("songs", [...new Set(songs.flatMap(item => !item.id.startsWith("i.") && item.catalogId ? [item.catalogId] : []))]),
+      ask("library-songs", [...new Set(songs.filter(item => item.id.startsWith("i.")).map(item => item.id))]),
     ]);
-    return new Set(songs.filter(item => item.catalogId ? catalog.has(item.catalogId) : library.has(item.id)).map(item => item.id));
+    return new Set(songs.filter(item => item.id.startsWith("i.") ? library.has(item.id) : !!item.catalogId && catalog.has(item.catalogId)).map(item => item.id));
   }
 
   // Apple keeps an album's favourite mark on the catalog album, which library albums reach through
