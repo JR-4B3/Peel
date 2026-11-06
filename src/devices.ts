@@ -420,7 +420,7 @@ export class DeviceNetwork extends EventEmitter {
   // Requests for a paired device's engine.
   request(id: string, path: string, body?: unknown) {
     const session = this.session(id);
-    if (!session) return Promise.reject(new Error(`${this.nameOf(id)} is offline. Open Peel on it, on the same network.`));
+    if (!session) return Promise.reject(new Error(`Can't reach ${this.nameOf(id)}. Open Peel on ${this.nameOf(id)} and check that it's on the same Wi-Fi.`));
     // Starting the engine there can include its first sign-in.
     return session.request("engine", { path, body }, path === "/state" ? 15000 : 120000);
   }

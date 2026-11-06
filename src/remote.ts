@@ -172,7 +172,7 @@ export class DevicePlayer extends Engine {
     const network = this.network;
     if (!network) throw new Error("Devices are not available with this player.");
     const here = device === network.id, name = network.nameOf(device);
-    if (!here && !network.online(device)) throw new Error(`${name} is offline. Open Peel on it, on the same network.`);
+    if (!here && !network.online(device)) throw new Error(`Can't reach ${name}. Open Peel on ${name} and check that it's on the same Wi-Fi.`);
     const current = this.remote ? `ssh:${this.host}` : this.peer ?? network.id;
     if (current !== device) {
       const source: EngineTransport = this.remote ? this.remote.request : this.peer ? (path, body) => network.request(this.peer!, path, body) : (path, body) => this.local.send(path, body);

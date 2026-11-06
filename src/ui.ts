@@ -1038,7 +1038,7 @@ export class PeelUI {
       const controlled = !ssh && (device.self ? !model.target : device.online && model.targetId === device.id);
       const right = !device.paired ? "Pair" : !device.online ? "Offline" : summary?.state === "playing" ? "Playing" : summary?.state === "paused" ? "Paused" : device.output ? "Selected" : "";
       const description = !device.paired ? "Nearby. Enter pairs it with this computer."
-        : !device.online ? "Open Peel on it, on the same network."
+        : !device.online ? `Open Peel on ${device.name} to play there.`
         : summary?.song ? [summary.song, summary.artist].filter(Boolean).join("  /  ")
         : device.self ? device.note ?? "This computer. Nothing playing." : "Nothing playing";
       rows.push({
@@ -1047,7 +1047,7 @@ export class PeelUI {
         faint: device.paired && !device.online, active: controlled, right, description,
         activate: () => {
           if (!device.paired) { this.closeDevices(); model.onPair?.(device.id); return; }
-          if (!device.online) { model.status = `${device.name} is offline. Open Peel on it, on the same network.`; model.changed(); return; }
+          if (!device.online) { model.status = `Can't reach ${device.name}. Open Peel on ${device.name} and check that it's on the same Wi-Fi.`; model.changed(); return; }
           this.closeDevices();
           if (!controlled) void model.playOn(device.id);
         },
