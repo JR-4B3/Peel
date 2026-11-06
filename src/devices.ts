@@ -579,9 +579,12 @@ export class DeviceNetwork extends EventEmitter {
     if (this.stopped || !this.active) return;
     const own = await this.options.local.summary().catch(() => undefined);
     if (JSON.stringify(own) !== JSON.stringify(this.summaries.get(this.id))) { this.summaries.set(this.id, own); this.changed(); }
-    await Promise.all([...this.sessions.keys()].map(async id => {
-      const session = this.session(id);
-      if (!session || this.checking.has(session)) return;
+    // Every connection is checked, not only the newest one per device. A device that changed
+    // networks can leave an older connection open that no longer reaches it.
+    const open = [...this.sessions.values()].flatMap(set => [...set]).filter(session => !session.closed && !session.retiring);
+    await Promise.all(open.map(async session => {
+      const id = session.peer.id;
+      if (this.checking.has(session)) return;
       this.checking.add(session);
       try {
         const status = await session.request("status", { claim: this.claim, keys: this.groupKeys.map(key => key.id) }, 5000);

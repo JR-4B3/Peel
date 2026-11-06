@@ -680,3 +680,21 @@ test("the player says when the device that plays cannot be reached", async () =>
   await model.start(); await app.flush();
   expect(app.captureCharFrame()).toContain("main plays the music, but this Peel cannot reach it");
 });
+
+test("an older connection that stops answering is closed too", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  const sessions = (mac.network as any).sessions;
+  const old = [...sessions.get(main.network.id)][0];
+  // A second, newer connection, as after the Mac changed networks. Peel opens no second connection
+  // while one works, so the old one is set aside while the new one opens.
+  sessions.delete(main.network.id);
+  mac.network.connectTo(main.network.id, "127.0.0.1", main.network.port);
+  await waitFor(() => sessions.get(main.network.id)?.size === 1, "a second connection");
+  sessions.get(main.network.id).add(old);
+  // The old one stops answering.
+  old.request = () => Promise.reject(new Error("no answer"));
+  for (let count = 0; count < 120 && !old.closed; count++) await Bun.sleep(100);
+  expect(old.closed).toBe(true);
+  expect(mac.network.online(main.network.id)).toBe(true);
+}, 20000);
