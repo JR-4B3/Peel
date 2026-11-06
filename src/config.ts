@@ -7,7 +7,13 @@ export interface Preferences {
   hidden: string[];
   // Every song in Favourite Songs is a favourite, so its rows show no heart unless this is true.
   heartsInFavourites: boolean;
+  // Which releases Peel updates to: tested releases, or each night's build of main.
+  channel: Channel;
+  // The engine's stream quality. Apple's web player offers AAC at 256 or 64 kbps.
+  quality: Quality;
 }
+export type Channel = "stable" | "nightly";
+export type Quality = "high" | "standard";
 
 // Each system keeps settings and caches in its own place: the XDG directories on Linux,
 // ~/Library on macOS, and AppData on Windows.
@@ -19,7 +25,7 @@ export function systemDir(kind: "config" | "cache") {
 
 export const configDir = process.env.PEEL_CONFIG_DIR ?? join(systemDir("config"), "peel");
 export const cacheDir = process.env.PEEL_CACHE_DIR ?? join(systemDir("cache"), "peel");
-export const defaults: Preferences = { order: [], hidden: [], heartsInFavourites: false };
+export const defaults: Preferences = { order: [], hidden: [], heartsInFavourites: false, channel: "stable", quality: "high" };
 
 export async function readPreferences(dir = configDir): Promise<Preferences> {
   try {
@@ -28,6 +34,8 @@ export async function readPreferences(dir = configDir): Promise<Preferences> {
       order: Array.isArray(value.order) ? value.order.filter((v: unknown) => typeof v === "string") : [],
       hidden: Array.isArray(value.hidden) ? value.hidden.filter((v: unknown) => typeof v === "string") : [],
       heartsInFavourites: value.heartsInFavourites === true,
+      channel: value.channel === "nightly" ? "nightly" : "stable",
+      quality: value.quality === "standard" ? "standard" : "high",
     };
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code === "ENOENT") return structuredClone(defaults);

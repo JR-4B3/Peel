@@ -114,6 +114,13 @@
       const [entry] = music.queue.spliceQueueItems(from, 1);
       music.queue.spliceQueueItems(to, 0, [entry]);
     },
+    // Apple's web player streams AAC at 256 kbps (high) or 64 kbps (standard). Returns the bitrate
+    // MusicKit reports afterwards.
+    quality: value => {
+      const rates = MusicKit.PlaybackBitrate ?? { HIGH: 256, STANDARD: 64 };
+      music.bitrate = value === "standard" ? rates.STANDARD : rates.HIGH;
+      return music.bitrate;
+    },
     remove: index => { if (index > music.queue.position) music.queue.spliceQueueItems(index, 1); },
     jump: index => music.changeToMediaAtIndex(index),
     queue: () => ({ position: music.queue.position, items: music.queue.items.map(item => ({ ...describe(item), added: pending().includes(item) })) }),

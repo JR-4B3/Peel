@@ -1,5 +1,7 @@
 import { EventEmitter } from "node:events";
 import type { Preferences } from "./config";
+// What the settings page says about updates. index.ts fills it from src/update.ts.
+export interface UpdateState { version?: string; channel?: string; installed: boolean; message: string }
 import { defaults } from "./config";
 import { stopped, type ArtistShelf, type Home, type Library, type Media, type Page, type Playback, type Player } from "./types";
 
@@ -105,7 +107,7 @@ export class Model extends EventEmitter {
     const entries: Navigation[] = [
       { id: "favourites", name: "Favourite Songs", media: this.playlists.find(p => p.favourite) },
       ...this.playlists.filter(p => !p.favourite).map(p => ({ id: `playlist:${p.id}`, name: p.name, media: p })),
-      { id: "songs", name: "All songs" }, { id: "albums", name: "Albums" }, { id: "artists", name: "Artists" }, { id: "queue", name: "Queue" },
+      { id: "songs", name: "All songs" }, { id: "albums", name: "Albums" }, { id: "artists", name: "Artists" }, { id: "queue", name: "Queue" }, { id: "settings", name: "Settings" },
     ];
     const rank = (id: string) => { const index = this.preferences.order.indexOf(id); return index < 0 ? 1e6 : index; };
     entries.sort((a, b) => rank(a.id) - rank(b.id));
@@ -144,6 +146,8 @@ export class Model extends EventEmitter {
         void this.lookUpFavourite();
         const recovering = !this.connected;
         this.connected = true;
+        // A started or restarted engine plays at its default quality until told otherwise.
+        if (recovering) void this.player.setQuality?.(this.preferences.quality).catch(() => {});
         if (recovering && !this.starting) this.status = "Ready to play";
         this.changed();
       } catch (error) {
@@ -182,6 +186,10 @@ export class Model extends EventEmitter {
     if (id === "home") {
       this.generation++; this.loader = undefined; this.items = []; this.more = false; this.loading = false;
       this.changed(); await this.loadHome(); return;
+    }
+    if (id === "settings") {
+      this.generation++; this.loader = undefined; this.items = []; this.more = false; this.loading = false;
+      this.changed(); return;
     }
     if (id === "favourites" || id.startsWith("playlist:")) {
       if (!navigation?.media) {
@@ -636,8 +644,22 @@ export class Model extends EventEmitter {
     const hidden = this.preferences.hidden.includes(id) ? this.preferences.hidden.filter(value => value !== id) : [...this.preferences.hidden, id];
     await this.persist({ ...this.preferences, hidden });
   }
-  private async persist(value: Preferences) {
-    try { await this.save(value); this.preferences = value; this.status = "Layout saved"; this.changed(); }
-    catch (error) { this.fail(error); }
+  update: UpdateState = { installed: false, message: "" };
+  // Called when the update channel changes, so the new channel is checked at once.
+  onChannel: () => void = () => {};
+
+  // Changes one setting on the settings page and saves it with the layout.
+  async setPreference(change: Partial<Preferences>, message: string) {
+    const previous = this.preferences;
+    if (!await this.persist({ ...previous, ...change }, message)) return;
+    if (change.quality && change.quality !== previous.quality && this.connected) {
+      await this.player.setQuality?.(change.quality).catch(error => this.fail(error));
+    }
+    if (change.channel && change.channel !== previous.channel) this.onChannel();
+  }
+
+  private async persist(value: Preferences, message = "Layout saved") {
+    try { await this.save(value); this.preferences = value; this.status = message; this.changed(); return true; }
+    catch (error) { this.fail(error); return false; }
   }
 }

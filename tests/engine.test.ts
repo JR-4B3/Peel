@@ -161,3 +161,10 @@ test("the engine rates only the song Peel names, so a song that changed in betwe
   await engine.rate(1, "i.now");
   expect(rated).toEqual(["/v1/me/ratings/library-songs/i.now"]);
 });
+
+test("the engine switches MusicKit's stream between 256 and 64 kbps", async () => {
+  const { engine, music } = await musicKit();
+  expect(engine.quality("standard")).toBe(64);
+  expect(music.bitrate).toBe(64);
+  expect(engine.quality("high")).toBe(256);
+});

@@ -736,7 +736,7 @@ export class PeelUI {
     this.sizeHeader();
     this.trackPanel.title = model.view.startsWith("artist:") ? "Artist" : model.detail ? (model.detail.type.includes("playlist") ? "Playlist" : "Album") : model.title;
     this.arrange(display);
-    this.empty.visible = display === "list" && !model.items.length;
+    this.empty.visible = display === "list" && !model.items.length && model.view !== "settings";
     this.empty.content = model.loading ? "Loading..." : model.view === "queue" && !model.connected ? "The player is not running yet. The queue starts with your first song."
       : model.view === "queue" ? "No songs queued. Press e on a song, album, or playlist to add it, or Shift+E to play it next."
       : "Nothing here yet. Search above or choose something on the left.";
@@ -770,7 +770,7 @@ export class PeelUI {
     const sidebarKey = JSON.stringify([nav.map(item => [item.id, item.name, item.hidden]), model.view, editing]);
     if (sidebarKey !== this.lastSidebar) {
       this.lastSidebar = sidebarKey;
-      const glyph = (id: string) => id === "home" ? icon.home : id === "favourites" ? icon.heart : id === "songs" ? icon.songs : id === "albums" ? icon.album : id === "artists" ? icon.artist : id === "queue" ? icon.queue : icon.playlist;
+      const glyph = (id: string) => id === "home" ? icon.home : id === "favourites" ? icon.heart : id === "songs" ? icon.songs : id === "albums" ? icon.album : id === "artists" ? icon.artist : id === "queue" ? icon.queue : id === "settings" ? icon.settings : icon.playlist;
       // Home cannot be hidden, so it keeps its own glyph while editing.
       const editable = (id: string) => editing && id !== "home";
       this.sidebar.setRows(nav.map(item => ({
@@ -796,7 +796,10 @@ export class PeelUI {
     // Loading a page replaces the items array, so comparing the array is enough to notice new songs.
     const rowsKey = JSON.stringify([model.view, playing?.name, playing?.artistName, this.tracks.columns, this.tracks.rowHeight, model.lovedRevision, model.preferences.heartsInFavourites]);
     const shown = model.shown;
-    if (rowsKey !== this.lastRows || shown !== this.lastItems) {
+    if (model.view === "settings") {
+      const rows = this.settingsRows(), key = JSON.stringify(["settings", rows.map(row => [row.id, row.right, row.description])]);
+      if (key !== this.lastRows) { this.lastRows = key; this.lastItems = undefined; this.tracks.setRows(rows); }
+    } else if (rowsKey !== this.lastRows || shown !== this.lastItems) {
       this.lastRows = rowsKey; this.lastItems = shown;
       const digits = String(model.items.length).length;
       this.tracks.setRows(shown.map((item, index) => {
@@ -840,6 +843,7 @@ export class PeelUI {
     if (this.search.focused) pairs.push(["⏎", "search"], ["Esc", "leave"]);
     else if (this.filterInput.focused) pairs.push(["Esc", "clear"]);
     else if (this.sidebar.focused && !this.editingSidebar) pairs.push(["⏎", "open"], ["e", "edit"]);
+    else if (model.view === "settings" && this.tracks.focused) pairs.push(["⏎", "change"]);
     else if (model.view === "queue" && item) pairs.push(["⏎", "play"], ["⇧E", "play next"], ["⇧↑↓", "move"], ["x", "remove"]);
     else if (item?.type.includes("artists")) pairs.push(["⏎", "open"]);
     else if (item) pairs.push(["⏎", /albums|playlists/.test(item.type) ? "open" : "play"], ["e", "add to queue"], ["⇧E", "play next"]);
@@ -985,7 +989,38 @@ export class PeelUI {
     void this.model.moveQueued(from, to);
   }
   private editingQueue() { return this.model.view === "queue" && this.tracks.focused && this.model.items.length > 0; }
-  private filterable() { return this.model.display === "list" && this.model.view !== "queue"; }
+  private filterable() { return this.model.display === "list" && this.model.view !== "queue" && this.model.view !== "settings"; }
+
+  // The settings page: one row per setting, its value on the right. Enter switches it.
+  private settingsRows() {
+    const model = this.model, preferences = model.preferences, update = model.update;
+    const engine = !!model.player.setQuality;
+    const high = preferences.quality === "high", stable = preferences.channel === "stable";
+    const hearts = preferences.heartsInFavourites;
+    const rows: Parameters<ClickList["setRows"]>[0] = [
+      {
+        id: "quality", lead: icon.quality, name: "Audio quality", right: !engine ? "Set in Cider" : high ? "High  256 kbps" : "Standard  64 kbps",
+        description: !engine ? "Cider plays the music, so its own settings choose the quality."
+          : "AAC from Apple. Standard uses a quarter of the data. Hi-Res Lossless is not available in Peel yet.",
+        activate: () => {
+          if (!engine) { model.status = "Cider plays the music. Choose its quality in Cider's settings."; model.changed(); return; }
+          void model.setPreference({ quality: high ? "standard" : "high" }, `Audio quality: ${high ? "Standard, 64 kbps" : "High, 256 kbps"}`);
+        },
+      },
+      {
+        id: "channel", lead: icon.update, name: "Updates", right: stable ? "Stable" : "Nightly",
+        description: update.message || (stable ? "Tested releases." : "Each night's build with the newest features. It can break."),
+        activate: () => void model.setPreference({ channel: stable ? "nightly" : "stable" },
+          stable ? "Updates: Nightly. Peel checks for the newest nightly build now." : "Updates: Stable. Peel checks for the newest stable release now."),
+      },
+      {
+        id: "hearts", lead: icon.heart, leadColour: colour.heart, name: "Hearts in Favourite Songs", right: hearts ? "Shown" : "Hidden",
+        description: "Every song in Favourite Songs is a favourite, so its rows show no heart unless this is on.",
+        activate: () => void model.setPreference({ heartsInFavourites: !hearts }, `Hearts in Favourite Songs: ${hearts ? "hidden" : "shown"}`),
+      },
+    ];
+    return rows;
+  }
 
   private cycleSort() {
     const order = Object.keys(sorts) as Sort[];
