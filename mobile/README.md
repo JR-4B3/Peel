@@ -8,6 +8,7 @@ Status: concept only. Nothing here runs yet. Open [`concept.html`](concept.html)
 - Four tabs at the bottom: Home, Library, Queue, Settings. Settings may change.
 - Library holds songs, albums, artists and playlists, switched by a row at the top of the tab.
 - Screens opened on top of a tab, such as lyrics or an album, show a `‹` back arrow in their panel title. No text hints like "swipe down to close".
+- Settings holds the same settings as the desktop's Settings page, saved in the same place: audio quality (High 256 kbps or Standard 64 kbps), updates (Stable or Nightly), and hearts in Favourite Songs. The phone app reads and changes them through the playing machine, so both always agree.
 - The player strip sits above the tabs and says where the music plays ("Playing on main"). Tapping the device name picks another device.
 
 ## How it would run
