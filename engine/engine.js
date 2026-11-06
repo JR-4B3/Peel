@@ -12,13 +12,14 @@
   // MusicKit's queue is the collection that was playing.
   let added = new WeakMap();
 
-  // Ratings belong to the catalog song. Library songs name it in their play parameters, and
-  // songs only in the library are rated as library songs.
+  // Library and catalog ratings can differ. A library song is read and rated by its library
+  // ID even when its play parameters also name a catalog song.
   const catalogId = item => item?.playParams?.catalogId ?? (/^\d+$/.test(item?.id ?? "") ? item.id : "");
   const ratingPath = item => {
+    if (item?.id?.startsWith("i.")) return `/v1/me/ratings/library-songs/${item.id}`;
     const id = catalogId(item);
     if (id) return `/v1/me/ratings/songs/${id}`;
-    return item?.id?.startsWith("i.") ? `/v1/me/ratings/library-songs/${item.id}` : "";
+    return "";
   };
   // Asked by id, Apple lists only the songs that have a rating, so an unrated song is an empty
   // list. Asked by path, Apple answers 404, which MusicKit reports in shapes that change between

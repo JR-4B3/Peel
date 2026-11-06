@@ -121,6 +121,29 @@ test("a restarted engine's new key is read again", async () => {
   expect(calls.map(call => call.method)).toEqual(["next", "previous"]);
 });
 
+test("the engine reads and changes a library favourite through its library ID despite a catalog link", async () => {
+  const { engine, music } = await musicKit();
+  music.nowPlayingItem = { id: "i.creep", title: "Creep", artistName: "fakemink", playParams: { catalogId: "catalog.creep" } };
+  let value = 1;
+  const paths: string[] = [];
+  music.api = { music: async (path: string, _query: unknown, options?: any) => {
+    paths.push(path);
+    if (options?.fetchOptions) {
+      value = options.fetchOptions.method === "DELETE" ? 0 : 1;
+      return {};
+    }
+    return { data: { data: path.endsWith("library-songs") && value ? [{ attributes: { value } }] : [] } };
+  } };
+  expect(await engine.rating()).toBe(1);
+  await engine.rate(0, "i.creep");
+  expect(await engine.rating()).toBe(0);
+  expect(engine.state().playback.nowPlaying.inFavorites).toBe(false);
+  await engine.rate(1, "i.creep");
+  expect(await engine.rating()).toBe(1);
+  expect(engine.state().playback.nowPlaying.inFavorites).toBe(true);
+  expect(paths.every(path => path.startsWith("/v1/me/ratings/library-songs"))).toBe(true);
+});
+
 test("Peel hashes the engine's files the way the engine does", async () => {
   const { createHash } = await import("node:crypto");
   const read = (name: string) => Bun.file(new URL(`../engine/${name}`, import.meta.url)).bytes();
