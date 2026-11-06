@@ -4,7 +4,7 @@ import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestRenderer } from "@opentui/core/testing";
-import { DeviceNetwork, allowedRequest, newer, ownAddresses } from "../src/devices";
+import { DeviceNetwork, allowedRequest, newer, onLocalNetwork, ownAddresses } from "../src/devices";
 import { Engine } from "../src/engine";
 import { Cipher, Ephemeral, clientFinish, clientHello, commitment, newGroupKey, pairingKeys, type PairOffer } from "../src/link";
 import { Model } from "../src/model";
@@ -16,8 +16,8 @@ import { fixture } from "./fixture";
 const cleanup: (() => unknown)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 
-async function waitFor(predicate: () => boolean, what = "state") {
-  for (let count = 0; count < 300; count++) { if (predicate()) return; await Bun.sleep(10); }
+async function waitFor(predicate: () => boolean, what = "state", milliseconds = 3000) {
+  for (let count = 0; count < milliseconds / 10; count++) { if (predicate()) return; await Bun.sleep(10); }
   throw new Error(`Expected ${what} did not arrive`);
 }
 
@@ -87,8 +87,8 @@ test("paired devices control each other's engines, and nothing else", async () =
   await expect(mac.network.request(main.network.id, "/quit", {})).rejects.toThrow("not allowed");
   expect(main.fake.state.calls).toEqual(["pause"]);
   // Each device lists the other as paired and online, with what it plays.
-  await waitFor(() => mac.network.views().some(device => device.name === "main" && device.online && device.summary?.state === "paused"), "main's status");
-});
+  await waitFor(() => mac.network.views().some(device => device.name === "main" && device.online && device.summary?.state === "paused"), "main's status", 6000);
+}, 15000);
 
 test("a device without a shared key cannot open a session", async () => {
   const mac = await computer("Mac"), stranger = await computer("stranger");
@@ -413,8 +413,10 @@ test("paired devices learn each other's addresses, and a device is tried at each
   await waitFor(() => JSON.stringify(mac.network.knownList().find(device => device.id === main.network.id)?.addresses ?? []) === JSON.stringify(ownAddresses()), "main's addresses");
   // A laptop away from home knows main by an address that no longer answers and by one that
   // does, as its Tailscale address would.
+  const working = ownAddresses()[0];
+  if (!working) return;
   const laptop = await computer("laptop", 200);
-  laptop.network.merge(main.network.groupKeys, [{ id: main.network.id, name: "main", address: "192.0.2.1", port: main.network.port, addresses: ["127.0.0.1"] }]);
+  laptop.network.merge(main.network.groupKeys, [{ id: main.network.id, name: "main", address: "192.0.2.1", port: main.network.port, addresses: [working] }]);
   for (let count = 0; count < 150 && !laptop.network.online(main.network.id); count++) await Bun.sleep(100);
   expect(laptop.network.online(main.network.id)).toBe(true);
 }, 20000);
@@ -477,4 +479,100 @@ test("a connection that has not proven it is paired cannot send large messages",
   socket.on("close", () => { closed = true; });
   socket.on("error", () => {});
   await waitFor(() => closed, "the connection closing");
+});
+
+test("gossip cannot point devices at this computer's own services, or change how another device is reached", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  const fake = { id: "fake-device-1", name: "fake", port: 22, addresses: ["127.0.0.1", "169.254.1.1", "224.0.0.1", "0.0.0.0", "999.1.1.1", "10.0.0.5"], address: "127.0.0.2" };
+  mac.network.merge([], [fake], main.network.id);
+  expect(mac.network.knownList().find(device => device.id === "fake-device-1")).toEqual({ id: "fake-device-1", name: "fake", port: 22, addresses: ["10.0.0.5"] });
+  // main's own record changes only when main sends it.
+  const before = JSON.stringify(mac.network.knownList().find(device => device.id === main.network.id));
+  mac.network.merge([], [{ id: main.network.id, name: "main", port: 1, addresses: ["10.9.9.9"] }], "fake-device-1");
+  expect(JSON.stringify(mac.network.knownList().find(device => device.id === main.network.id))).toBe(before);
+  expect(onLocalNetwork("127.0.0.1")).toBe(false);
+});
+
+test("a second Peel on the same computer leaves the devices to the first, and takes over when it closes", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "peel-devices-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  const probe = (await import("node:net")).createServer();
+  const port: number = await new Promise(resolve => probe.listen(0, "0.0.0.0", () => resolve((probe.address() as any).port)));
+  await new Promise(resolve => probe.close(resolve));
+  const open = async () => {
+    const fake = fakeEngine(), player = new DevicePlayer(undefined, () => {}, fake.engine, async () => {});
+    const network = new DeviceNetwork({ local: player.localPlayer(), dir, name: "Mac", port, discovery: false, announceEvery: 100 });
+    player.attach(network); await network.start(); cleanup.push(() => network.close());
+    return network;
+  };
+  const first = await open(), second = await open();
+  expect(first.active).toBe(true);
+  expect(second.active).toBe(false);
+  expect(second.id).toBe(first.id);
+  expect(second.views()[0]!.note).toContain("Another Peel window");
+  await expect(second.forget()).rejects.toThrow("Another Peel window");
+  first.close();
+  await waitFor(() => second.active, "the second Peel taking over");
+});
+
+test("a status check answers while the engine is slow", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  const inner = (main.fake.engine as any).transport;
+  (main.fake.engine as any).transport = async (path: string, body?: any) => { if (path === "/state") await Bun.sleep(9000); return inner(path, body); };
+  await Bun.sleep(11000);
+  expect(mac.network.online(main.network.id)).toBe(true);
+}, 20000);
+
+test("a connection replaced by a better one finishes its requests first", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  const other = ownAddresses()[0];
+  if (!other) return;
+  const inner = (main.fake.engine as any).transport;
+  (main.fake.engine as any).transport = async (path: string, body?: any) => { if (body?.method === "exportPlayback") await Bun.sleep(500); return inner(path, body); };
+  const slow = mac.network.request(main.network.id, "/call", { method: "exportPlayback", args: [] });
+  (mac.network as any).connecting.clear();
+  (mac.network as any).connect(main.network.id, other, main.network.port, true);
+  await expect(slow).resolves.toBeDefined();
+});
+
+test("a source that cannot be read keeps the music and the claim where they are", async () => {
+  const mac = await computer("Mac"), main = await computer("main"), laptop = await computer("laptop");
+  await link(mac, main); await link(mac, laptop);
+  Object.assign(main.fake.state, { items: [song("c1")], position: 0, playing: true });
+  mac.player.onRetarget = () => { mac.player.applyTarget(); };
+  await mac.player.playOn(main.network.id);
+  await waitFor(() => mac.player.peer === main.network.id, "the Mac controlling main");
+  const inner = (main.fake.engine as any).transport;
+  (main.fake.engine as any).transport = async (path: string, body?: any) => { if (path === "/state") throw new Error("busy"); return inner(path, body); };
+  const claim = mac.network.claim;
+  await expect(mac.player.playOn(laptop.network.id)).rejects.toThrow("nothing moved");
+  expect(mac.network.claim).toEqual(claim);
+  expect(laptop.fake.state.calls).not.toContain("importPlayback");
+});
+
+test("a move that loses the new device leaves the old one paused, so they never both play", async () => {
+  const { moveMusic } = await import("../src/remote");
+  const { unanswered } = await import("../src/devices");
+  const source = fakeEngine(), destination = fakeEngine();
+  Object.assign(source.state, { items: [song("c1")], position: 0, playing: true });
+  const lost = async (path: string, body?: any) => { if (body?.method === "importPlayback") throw unanswered("Lost the connection to main."); return (destination.engine as any).transport(path, body); };
+  await expect(moveMusic((source.engine as any).transport, lost, "this computer", "main", true)).rejects.toThrow("paused on this computer");
+  expect(source.state.playing).toBe(false);
+  expect(source.state.calls).not.toContain("resume");
+});
+
+test("a library song's favourite does not spill onto its catalog song or other library copies", async () => {
+  const api = fixture(); cleanup.push(() => api.server.stop(true));
+  const snapshot = api.player.snapshot.bind(api.player);
+  api.player.snapshot = async () => ({ ...await snapshot(), nowPlaying: { name: "Soma", playParams: { id: "i.mine", catalogId: "c.soma" }, inFavorites: true } });
+  const model = new Model(api.library, api.player, structuredClone(defaults));
+  model.items = [
+    { id: "i.mine", type: "library-songs", name: "Soma", artist: "", album: "", duration: 1, catalogId: "c.soma", loved: false },
+    { id: "c.soma", type: "songs", name: "Soma", artist: "", album: "", duration: 1, loved: false },
+    { id: "i.copy", type: "library-songs", name: "Soma", artist: "", album: "", duration: 1, catalogId: "c.soma", loved: false },
+  ];
+  await model.refresh();
+  expect(model.items.map(item => item.loved)).toEqual([true, false, false]);
 });

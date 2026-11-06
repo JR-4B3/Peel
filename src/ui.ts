@@ -1036,7 +1036,7 @@ export class PeelUI {
       const description = !device.paired ? "Nearby. Enter pairs it with this computer."
         : !device.online ? "Open Peel on it, on the same network."
         : summary?.song ? [summary.song, summary.artist].filter(Boolean).join("  /  ")
-        : device.self ? "This computer. Nothing playing." : "Nothing playing";
+        : device.self ? device.note ?? "This computer. Nothing playing." : "Nothing playing";
       rows.push({
         id: `device:${device.id}`, lead: !device.paired ? icon.link : controlled ? icon.speaker : icon.laptop,
         leadColour: controlled ? colour.accent : colour.faint, name: device.self ? `${device.name}  (this computer)` : device.name,

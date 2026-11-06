@@ -643,7 +643,10 @@ export class Model extends EventEmitter {
       this.loved = { key, value: reported };
     }
     const id = song.playParams?.id, catalog = song.playParams?.catalogId;
-    const matches = (item: Media) => /songs/.test(item.type) && (item.id === id || !!catalog && (item.catalogId === catalog || item.id === catalog));
+    // Library songs and catalog songs have separate ratings, so a row follows only its own song: the
+    // same ID, or the catalog song itself when a catalog song plays.
+    const library = !!id && id.startsWith("i.");
+    const matches = (item: Media) => /songs/.test(item.type) && (item.id === id || !library && !!catalog && !item.type.startsWith("library-") && item.id === catalog);
     let changed = false;
     const lists = [this.items, ...this.history.map(entry => entry.items), ...[...this.lists.values()].map(entry => entry.items)];
     for (const items of new Set(lists)) for (const item of items) if (matches(item) && item.loved !== undefined && item.loved !== reported) { item.loved = reported; changed = true; }

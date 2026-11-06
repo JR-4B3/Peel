@@ -177,7 +177,7 @@ export class DevicePlayer extends Engine {
     if (current !== device) {
       const source: EngineTransport = this.remote ? this.remote.request : this.peer ? (path, body) => network.request(this.peer!, path, body) : (path, body) => this.local.send(path, body);
       const destination: EngineTransport = here ? async (path, body) => { await this.ensureLocal(); return this.local.send(path, body); } : (path, body) => network.request(device, path, body);
-      await moveMusic(source, destination, this.host ?? (this.peer ? network.nameOf(this.peer) : "this computer"), here ? "this computer" : name);
+      await moveMusic(source, destination, this.host ?? (this.peer ? network.nameOf(this.peer) : "this computer"), here ? "this computer" : name, !this.remote && !this.peer);
     }
     this.remote?.close(); this.remote = undefined; this.host = undefined;
     this.peer = here ? undefined : device;
@@ -196,10 +196,15 @@ export class DevicePlayer extends Engine {
 
 const starts = new Set(["play", "enqueue", "resume", "toggle", "jump"]);
 
-export async function moveMusic(source: EngineTransport, destination: EngineTransport, from: string, to: string) {
+// local says the source is this computer, whose engine may simply not be running.
+export async function moveMusic(source: EngineTransport, destination: EngineTransport, from: string, to: string, local = false) {
   const call = (transport: EngineTransport, method: string, ...args: unknown[]) => transport("/call", { method, args });
-  // A computer whose engine is not running has nothing to move.
-  const state = await source("/state").catch(() => undefined);
+  // This computer's engine not running means nothing to move. Another device that does not answer
+  // may still play, so the move stops there.
+  const state = await source("/state").catch(error => {
+    if (local) return undefined;
+    throw new Error(`Could not reach ${from}, so nothing moved. ${error instanceof Error ? error.message : String(error)}`);
+  });
   const playback = state?.playback;
   if (!playback?.nowPlaying) return;
   // The same engine reached two ways, such as over SSH and over the network, already plays.
@@ -216,6 +221,12 @@ export async function moveMusic(source: EngineTransport, destination: EngineTran
   if (!exported?.items?.length) return;
   try { await call(destination, "importPlayback", { ...exported, playing }); }
   catch (error) {
+    // Without an answer, the new device may still start the music. The old one stays paused, so
+    // the two never play at once.
+    if ((error as { unanswered?: boolean })?.unanswered) {
+      await call(destination, "pause").catch(() => {});
+      throw new Error(`Lost ${to} while moving the music. It is paused on ${from}. Check ${to}, then choose where to play.`);
+    }
     // The new device may have started before it failed. It stops before the old one plays again.
     await call(destination, "pause").catch(() => {});
     if (playing) await call(source, "resume").catch(() => {});

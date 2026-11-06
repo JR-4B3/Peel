@@ -19,7 +19,7 @@ export const discoveryPort = Number(process.env.PEEL_DISCOVERY_PORT ?? 10771);
 // devices that move the music at the same moment still agree on one of them.
 export interface Claim { device: string; generation: number }
 export interface Summary { state: Playback["state"]; song?: string; artist?: string }
-export interface DeviceView { id: string; name: string; self: boolean; paired: boolean; online: boolean; output: boolean; summary?: Summary }
+export interface DeviceView { id: string; name: string; self: boolean; paired: boolean; online: boolean; output: boolean; summary?: Summary; note?: string }
 export interface Pairing {
   id: string; name: string; incoming: boolean; code?: string;
   // confirm: waiting for this person. waiting: accepted here, waiting for the other device.
@@ -48,7 +48,15 @@ export function allowedRequest(path: unknown, body: any) {
 
 const text = (value: unknown, max = 200) => typeof value === "string" && value.length > 0 && value.length <= max;
 const validId = (value: unknown): value is string => typeof value === "string" && /^[\w-]{8,64}$/.test(value);
-const validAddress = (value: unknown): value is string => typeof value === "string" && /^\d{1,3}(\.\d{1,3}){3}$/.test(value);
+// An IPv4 address another device can be reached at. Loopback, link-local, unspecified, multicast
+// and broadcast addresses are refused, so gossip cannot make Peel connect to this computer's own
+// services or to anything that is not a device.
+const validAddress = (value: unknown): value is string => {
+  if (typeof value !== "string" || !/^\d{1,3}(\.\d{1,3}){3}$/.test(value)) return false;
+  const [a, b] = value.split(".").map(Number);
+  if (value.split(".").some(part => Number(part) > 255 || part.length > 1 && part.startsWith("0"))) return false;
+  return a !== 0 && a !== 127 && !(a === 169 && b === 254) && a! < 224;
+};
 const validPort = (value: unknown): value is number => Number.isInteger(value) && (value as number) > 0 && (value as number) < 65536;
 function readKnown(device: any): Known | undefined {
   if (!validId(device?.id) || !text(device.name, 100)) return undefined;
@@ -75,6 +83,8 @@ export function onLocalNetwork(address: string) {
 // Generations stay far below the largest safe integer, so a claim can always be raised by one.
 const validClaim = (value: any): value is Claim => validId(value?.device) && Number.isSafeInteger(value?.generation) && value.generation >= 0 && value.generation < 2 ** 40;
 export const newer = (a: Claim, b: Claim) => a.generation > b.generation || a.generation === b.generation && a.device > b.device;
+// A request that got no answer may still have run on the other device.
+export const unanswered = (text: string) => Object.assign(new Error(text), { unanswered: true });
 const message = (error: unknown) => error instanceof Error ? error.message : String(error);
 
 export function deviceName() {
@@ -91,6 +101,14 @@ class Session {
   private sequence = 0;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   closed = false;
+  // A session replaced by a better one takes no new requests and closes once its answers are in.
+  retiring = false;
+  retire() {
+    this.retiring = true;
+    const until = Date.now() + 130000;
+    const check = () => { if (this.closed) return; if (!this.pending.size || Date.now() > until) this.end(); else setTimeout(check, 500); };
+    check();
+  }
   constructor(readonly peer: { id: string; name: string; address?: string }, private cipher: Cipher, private send: (text: string) => void,
     private hangUp: () => void, private handle: (session: Session, op: string, body: any) => Promise<unknown>) {}
 
@@ -111,7 +129,7 @@ class Session {
     if (this.closed) return Promise.reject(new Error(`${this.peer.name} is offline.`));
     const id = ++this.sequence;
     return new Promise((resolve, reject) => {
-      const timer = setTimeout(() => { this.pending.delete(id); reject(new Error(`${this.peer.name} did not answer. A command may have completed there.`)); }, timeout);
+      const timer = setTimeout(() => { this.pending.delete(id); reject(unanswered(`${this.peer.name} did not answer. A command may have completed there.`)); }, timeout);
       this.pending.set(id, { resolve, reject, timer });
       this.post({ id, op, body });
     });
@@ -122,7 +140,7 @@ class Session {
   end() {
     if (this.closed) return;
     this.closed = true;
-    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(new Error(`Lost the connection to ${this.peer.name}.`)); }
+    for (const pending of this.pending.values()) { clearTimeout(pending.timer); pending.reject(unanswered(`Lost the connection to ${this.peer.name}.`)); }
     this.pending.clear();
     try { this.hangUp(); } catch {}
   }
@@ -176,7 +194,7 @@ class PairingFlow implements Pairing {
     if (value?.t === "accept") { this.otherAccepted = true; this.progress(); }
     else if (value?.t === "keys" && this.accepted && this.otherAccepted) {
       if (this.epoch !== this.network.keyEpoch) return this.fail("The paired devices were forgotten. Pair again.");
-      this.network.merge(value.keys, value.known);
+      this.network.merge(value.keys, value.known, this.id);
       this.network.remember({ id: this.id, name: this.name, address: this.address, port: typeof value.port === "number" ? value.port : undefined });
       this.gotKeys = true; this.progress();
     }
@@ -290,6 +308,7 @@ export class DeviceNetwork extends EventEmitter {
   private attempts = new Map<string, number>();
   private turns = new Map<string, number>();
   private missed = new WeakMap<Session, number>();
+  private checking = new WeakSet<Session>();
   private sockets = new Set<Line>();
   private clients = new Set<Line>();
   private server?: Server;
@@ -305,24 +324,40 @@ export class DeviceNetwork extends EventEmitter {
     this.dir = options.dir ?? configDir;
   }
 
+  // Only one Peel per computer runs the devices: the one that listens on the device port. Another
+  // window waits and takes over once that one closes, so pairing, keys, and forgetting stay in
+  // one place.
+  active = false;
+
   async start() {
+    await this.load();
+    await this.listen();
+    const every = this.options.announceEvery ?? 3000;
+    this.timers.push(setInterval(() => this.tick(), every));
+    this.timers.push(setInterval(() => void this.poll(), 2000));
+    if (this.server) this.activate();
+    this.changed();
+  }
+
+  private activate() {
+    this.active = true;
+    if (this.options.discovery !== false) this.discover();
+    this.tick();
+    this.changed();
+  }
+
+  private async load() {
     const stored = await readCache<Stored>("devices.json", this.dir);
     this.id = validId(stored?.id) ? stored.id : randomUUID();
     this.groupKeys = Array.isArray(stored?.keys) ? stored.keys.filter(key => validId(key?.id) && typeof key.key === "string" && keyId(Buffer.from(key.key, "base64url")) === key.id) : [];
     if (!this.groupKeys.length) this.groupKeys = [newGroupKey()];
     for (const value of Array.isArray(stored?.known) ? stored.known : []) { const device = readKnown(value); if (device && device.id !== this.id) this.known.set(device.id, device); }
     this.claim = validClaim(stored?.output) ? stored.output : { device: this.id, generation: 0 };
-    if (!stored || stored.id !== this.id) await this.persist();
-    await this.listen();
-    if (this.options.discovery !== false) this.discover();
-    const every = this.options.announceEvery ?? 3000;
-    this.timers.push(setInterval(() => this.tick(), every));
-    this.timers.push(setInterval(() => void this.poll(), 2000));
-    this.tick();
-    this.changed();
+    if (!stored || stored.id !== this.id) await saveJson("devices.json", { id: this.id, keys: this.groupKeys, known: this.knownList(), output: this.claim }, this.dir).catch(() => {});
   }
 
   private persist() {
+    if (!this.active) return Promise.resolve();
     const stored: Stored = { id: this.id, keys: this.groupKeys, known: this.knownList(), output: this.claim };
     return saveJson("devices.json", stored, this.dir).catch(() => {});
   }
@@ -334,12 +369,14 @@ export class DeviceNetwork extends EventEmitter {
   // What this device tells paired devices: the devices it knows, and itself with its addresses.
   shareList(): Known[] { return [...this.knownList(), { id: this.id, name: this.name, port: this.port, addresses: ownAddresses() }]; }
   online(id: string) { return [...this.sessions.get(id) ?? []].some(session => !session.closed); }
-  private session(id: string) { return [...this.sessions.get(id) ?? []].reverse().find(session => !session.closed); }
+  private session(id: string) { return [...this.sessions.get(id) ?? []].reverse().find(session => !session.closed && !session.retiring); }
   nameOf(id: string) { return id === this.id ? this.name : this.known.get(id)?.name ?? this.nearby.get(id)?.name ?? "the other device"; }
 
   // The device list for the popup: this computer, then paired devices, then nearby ones to pair.
   views(): DeviceView[] {
-    const views: DeviceView[] = [{ id: this.id, name: this.name, self: true, paired: true, online: true, output: this.claim.device === this.id, summary: this.summaries.get(this.id) }];
+    const views: DeviceView[] = [{ id: this.id, name: this.name, self: true, paired: true, online: true, output: this.claim.device === this.id, summary: this.summaries.get(this.id),
+      ...(this.active ? {} : { note: "Another Peel window on this computer handles devices." }) }];
+    if (!this.active) return views;
     const now = Date.now();
     // A paired device that reset its pairing announces keys this one lacks. It can be paired again.
     const unpaired = (id: string) => { const device = this.nearby.get(id); return !!device && now - device.seen < 12000 && !this.online(id) && !device.keys.some(key => this.groupKeys.some(own => own.id === key)); };
@@ -378,9 +415,11 @@ export class DeviceNetwork extends EventEmitter {
     this.changed();
   }
 
-  merge(keys: unknown, known: unknown) {
+  // from is the device that sent the list. Only a device itself changes how it is reached.
+  merge(keys: unknown, known: unknown, from?: string) {
     let changed = false;
-    for (const key of Array.isArray(keys) ? keys : []) {
+    for (const key of Array.isArray(keys) ? keys.slice(0, 16) : []) {
+      if (this.groupKeys.length >= 16) break;
       if (!validId(key?.id) || typeof key.key !== "string" || this.groupKeys.some(own => own.id === key.id)) continue;
       const bytes = Buffer.from(key.key, "base64url");
       if (bytes.length !== 32 || keyId(bytes) !== key.id) continue;
@@ -390,7 +429,10 @@ export class DeviceNetwork extends EventEmitter {
       const device = readKnown(value);
       if (!device || device.id === this.id) continue;
       if (!this.known.has(device.id) && this.known.size >= 64) continue;
-      if (this.known.has(device.id)) { this.remember({ id: device.id, name: this.known.get(device.id)!.name, port: device.port, addresses: [...device.addresses ?? [], ...device.address ? [device.address] : []] }); continue; }
+      if (this.known.has(device.id)) {
+        if (device.id === from) this.remember({ id: device.id, name: this.known.get(device.id)!.name, port: device.port, addresses: [...device.addresses ?? [], ...device.address ? [device.address] : []] });
+        continue;
+      }
       this.known.set(device.id, device);
       changed = true;
     }
@@ -410,6 +452,7 @@ export class DeviceNetwork extends EventEmitter {
   // Forgets every paired device and starts a new group of one. Devices paired before keep the old
   // key, so this computer can no longer reach them or be reached by them.
   async forget() {
+    if (!this.active) throw new Error("Another Peel window on this computer handles devices. Forget them there.");
     this.epoch++;
     this.pairing?.fail("The paired devices were forgotten.");
     this.pairing = undefined;
@@ -471,6 +514,10 @@ export class DeviceNetwork extends EventEmitter {
 
   private tick() {
     if (this.stopped) return;
+    if (!this.active) {
+      if (!this.server) void this.listen().then(async () => { if (this.server && !this.active && !this.stopped) { await this.load(); this.activate(); } });
+      return;
+    }
     this.announce();
     if (!this.server) this.listen();
     // Paired devices are also tried at their last address, which reaches them across networks
@@ -494,12 +541,13 @@ export class DeviceNetwork extends EventEmitter {
 
   // Asks every connected device what it plays, and tells it which device this one thinks plays.
   private async poll() {
-    if (this.stopped) return;
+    if (this.stopped || !this.active) return;
     const own = await this.options.local.summary().catch(() => undefined);
     if (JSON.stringify(own) !== JSON.stringify(this.summaries.get(this.id))) { this.summaries.set(this.id, own); this.changed(); }
     await Promise.all([...this.sessions.keys()].map(async id => {
       const session = this.session(id);
-      if (!session) return;
+      if (!session || this.checking.has(session)) return;
+      this.checking.add(session);
       try {
         const status = await session.request("status", { claim: this.claim, keys: this.groupKeys.map(key => key.id) }, 5000);
         this.adopt(status?.claim);
@@ -514,23 +562,24 @@ export class DeviceNetwork extends EventEmitter {
         const missed = (this.missed.get(session) ?? 0) + 1;
         this.missed.set(session, missed);
         if (missed >= 2 && !session.closed) session.end();
-      }
+      } finally { this.checking.delete(session); }
     }));
   }
 
   private async sync(session: Session) {
     const reply = await session.request("keys", { keys: this.groupKeys, known: this.shareList() });
-    this.merge(reply?.keys, reply?.known);
+    this.merge(reply?.keys, reply?.known, session.peer.id);
   }
 
   // What a paired device may ask this one.
   private async handle(session: Session, op: string, body: any): Promise<unknown> {
     if (op === "status") {
       this.adopt(body?.claim);
-      return { name: this.name, summary: await this.options.local.summary().catch(() => undefined), claim: this.claim, keys: this.groupKeys.map(key => key.id), port: this.port, addresses: ownAddresses() };
+      // The answer does not wait for the engine, so a slow engine does not look like a lost device.
+      return { name: this.name, summary: this.summaries.get(this.id), claim: this.claim, keys: this.groupKeys.map(key => key.id), port: this.port, addresses: ownAddresses() };
     }
     if (op === "claim") { this.adopt(body?.claim); return this.claim; }
-    if (op === "keys") { this.merge(body?.keys, body?.known); return { keys: this.groupKeys, known: this.shareList() }; }
+    if (op === "keys") { this.merge(body?.keys, body?.known, session.peer.id); return { keys: this.groupKeys, known: this.shareList() }; }
     if (op === "engine") {
       if (!allowedRequest(body?.path, body?.body)) throw new Error("This request is not allowed from another device.");
       return this.options.local.send(body.path, body.body);
@@ -641,6 +690,7 @@ export class DeviceNetwork extends EventEmitter {
 
   // The connecting side of a session, to a paired device.
   private connect(id: string, address: string, port: number, local = false) {
+    if (!this.active) return;
     const sessions = [...this.sessions.get(id) ?? []].filter(session => !session.closed);
     if (this.stopped || id === this.id || Date.now() - (this.connecting.get(id) ?? 0) < 5000) return;
     // A device already reached on this network keeps that connection. A computer with two network
@@ -678,7 +728,7 @@ export class DeviceNetwork extends EventEmitter {
       this.remember({ id, name: server.name, address, port });
       this.register(opened);
       // The connection on this network replaces one made another way.
-      if (local) for (const other of sessions) if (!other.closed && other.peer.address !== address) other.end();
+      if (local) for (const other of sessions) if (!other.closed && other.peer.address !== address) other.retire();
       void this.sync(opened).catch(() => {});
     };
     socket.onclose = () => { clearTimeout(timer); this.clients.delete(socket); session?.end(); };
@@ -686,6 +736,7 @@ export class DeviceNetwork extends EventEmitter {
 
   // Starts pairing with a nearby device. Both screens then show the same code.
   pair(id: string) {
+    if (!this.active) throw new Error("Another Peel window on this computer handles devices. Pair there.");
     const device = this.nearby.get(id);
     if (!device) throw new Error("That device is no longer nearby.");
     if (this.pairing && this.pairing.state !== "done" && this.pairing.state !== "failed") throw new Error("Finish the pairing that is open first.");
