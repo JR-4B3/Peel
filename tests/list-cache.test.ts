@@ -191,3 +191,53 @@ test("a read ahead list grows page by page once the new answer covers it", async
   await opening;
   expect({ count: model.items.length, loading: model.loading }).toEqual({ count: 500, loading: false });
 });
+
+test("going back to a long list that was loading keeps the songs it had", async () => {
+  const { model, library } = setup();
+  const page = (offset: number): Page => ({ items: Array.from({ length: 100 }, (_, index) => song(String(offset + index))), more: offset < 1900 });
+  library.songs = async (_id, offset = 0) => page(offset);
+  await model.open("songs");
+  await model.load(true, 800);
+  library.songs = async (_id, offset = 0) => offset >= 800 ? new Promise(() => {}) : page(offset);
+  void model.load(true);
+  await model.openCollection({ ...song("a"), type: "library-albums" });
+  model.back(); await Bun.sleep(0);
+  expect({ count: model.items.length, more: model.more }).toEqual({ count: 800, more: true });
+});
+
+test("going back to a filtered list loads the rest of it again", async () => {
+  const { model, library } = setup();
+  const page = (offset: number): Page => ({ items: Array.from({ length: 100 }, (_, index) => song(String(offset + index))), more: offset < 900 });
+  let stall = false;
+  library.songs = async (_id, offset = 0) => { if (stall && offset >= 600) await new Promise(() => {}); return page(offset); };
+  await model.open("songs");
+  stall = true;
+  void model.setFilter({ text: "999" }); await Bun.sleep(0);
+  await model.openCollection({ ...song("a"), type: "library-albums" });
+  stall = false;
+  model.back();
+  await Bun.sleep(20);
+  expect({ count: model.items.length, more: model.more, shown: model.shown.map(item => item.id) }).toEqual({ count: 1000, more: false, shown: ["999"] });
+});
+
+test("a favourite changed while a list's marks are asked again keeps its heart", async () => {
+  const { model, library } = setup();
+  library.songs = async () => ({ items: [song("1"), song("2")], more: false });
+  library.ratings = async () => new Set<string>();
+  await model.open("songs"); await Bun.sleep(0);
+  await model.open("albums");
+
+  // Apple read its ratings before the favourite was saved.
+  let answer!: (loved: Set<string>) => void;
+  library.ratings = () => new Promise(resolve => { answer = resolve; });
+  await model.open("songs");
+  const playing = { name: "1", artistName: "Artist", inFavorites: false, playParams: { id: "1", catalogId: "1" } };
+  Object.assign(model, { connected: true });
+  model.playback = { ...model.playback, nowPlaying: playing };
+  Object.assign(model.player as object, { snapshot: async () => model.playback, command: async () => {}, rating: async () => 1 });
+  await model.toggleFavourite();
+  expect(model.items[0]!.loved).toBe(true);
+  answer(new Set());
+  await Bun.sleep(0);
+  expect(model.items.map(item => item.loved)).toEqual([true, false]);
+});

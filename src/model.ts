@@ -89,6 +89,8 @@ export class Model extends EventEmitter {
   private albumsLoved = new Map<string, boolean>();
   private homeRead = false;
   private prefetched = false;
+  // Counts favourite changes, so a slower ratings answer does not undo one.
+  private favouriteEdits = 0;
   releases: Promise<void> = Promise.resolve();
 
   // Starts Cider when it is not running. Tests and custom API addresses need nothing started.
@@ -324,10 +326,14 @@ export class Model extends EventEmitter {
     this.generation++; this.loading = false;
     ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter } = previous);
     this.changed();
-    // Opening the page stopped this list's loading, so the list loads again. The songs it had
-    // stay on screen meanwhile. A finished list continues its background loading.
-    if (previous.loading && this.loader) void this.load(false);
+    // Opening the page stopped this list's loading. A list that was empty or was being refreshed
+    // from the cache loads again, with its kept songs on screen meanwhile. A list already longer
+    // than the cache keeps, or one with nothing kept, continues where it was.
+    const key = this.listKey();
+    if (previous.loading && this.loader && (!this.items.length || key && this.lists.has(key) && this.items.length <= backgroundLimit)) void this.load(false);
     else if (this.more && this.items.length < backgroundLimit) void this.load(true, backgroundLimit);
+    // A filter needs the whole list, so its loading starts again too.
+    void this.setFilter({});
     return closed;
   }
 
@@ -472,9 +478,11 @@ export class Model extends EventEmitter {
     const songs = items.filter(item => /songs/.test(item.type) && (recheck || item.loved === undefined));
     if (!songs.length) return;
     if (this.view === "favourites") { for (const item of songs) item.loved = true; this.lovedRevision++; this.changed(); return; }
+    const edits = this.favouriteEdits;
     try {
       const loved = await this.library.ratings(songs);
-      for (const item of songs) item.loved = loved.has(item.id);
+      // A favourite changed meanwhile may be missing from Apple's answer, so marks already shown stay.
+      for (const item of songs) if (edits === this.favouriteEdits || item.loved === undefined) item.loved = loved.has(item.id);
       this.lovedRevision++; this.changed();
     } catch {}
   }
@@ -674,6 +682,7 @@ export class Model extends EventEmitter {
     this.loved = { key, value: saved };
     // The song's row shows its heart too.
     for (const item of this.items) if (item.id === key || item.catalogId === key) item.loved = saved;
+    this.favouriteEdits++;
     this.lovedRevision++;
     if (saved !== value) this.status = "Apple Music did not save the favourite. Try again.";
     else this.status = value ? "Added to Favourite Songs" : "Removed from Favourite Songs";
