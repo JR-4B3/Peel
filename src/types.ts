@@ -62,6 +62,8 @@ export interface Library {
   // Whether an album is a favourite, and marking or unmarking it as one.
   albumFavourite(item: Media): Promise<boolean>;
   favouriteAlbum(item: Media, value: boolean): Promise<void>;
+  // A catalog song's time-synced lyrics as TTML, when the library can read them.
+  lyrics?(catalogId: string): Promise<string | undefined>;
 }
 
 // The playback engine: the player state, the queue, and the playing song's rating.

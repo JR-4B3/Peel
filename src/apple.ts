@@ -49,6 +49,8 @@ export function webPlayerToken(refresh = false, dir = cacheDir): Promise<string>
 
 export interface AppleOptions {
   base?: string;
+  // Lyrics come from the web player's own host; api.music.apple.com rejects the lyrics endpoint.
+  lyricsBase?: string;
   developerToken?: (refresh: boolean) => Promise<string>;
   storefront?: string;
   // Asks the playback engine for a current Music User Token after Apple rejects the saved one.
@@ -59,19 +61,21 @@ export interface AppleOptions {
 
 export class AppleMusic implements Library {
   readonly base: string;
+  readonly lyricsBase: string;
   private developerToken: (refresh: boolean) => Promise<string>;
   private storefront?: Promise<string>;
   private renewing?: Promise<string | undefined>;
 
   constructor(private userToken: string, private options: AppleOptions = {}) {
     this.base = options.base ?? process.env.APPLE_MUSIC_API_BASE ?? "https://api.music.apple.com";
+    this.lyricsBase = options.lyricsBase ?? (options.base ? options.base : process.env.APPLE_MUSIC_LYRICS_BASE ?? "https://amp-api.music.apple.com");
     this.developerToken = options.developerToken ?? (refresh => webPlayerToken(refresh));
     if (options.storefront) this.storefront = Promise.resolve(options.storefront);
   }
 
-  private async fetch(path: string, developer: string, init: RequestInit = {}) {
+  private async fetch(path: string, developer: string, init: RequestInit = {}, base = this.base) {
     try {
-      return await fetch(`${this.base.replace(/\/$/, "")}/${path}`, {
+      return await fetch(`${base.replace(/\/$/, "")}/${path}`, {
         ...init,
         headers: { Authorization: `Bearer ${developer}`, "Music-User-Token": this.userToken, Origin: "https://music.apple.com", ...init.body ? { "Content-Type": "application/json" } : {} },
         signal: AbortSignal.timeout(35000),
@@ -82,7 +86,7 @@ export class AppleMusic implements Library {
   // Apple answers 401 for a stale developer token and 403 for a stale user token.
   // Each is renewed once per request, so a lasting rejection cannot loop.
   // Cider's proxy only reads, so changes such as ratings need Peel's own sign-in.
-  async request(path: string, init: RequestInit = {}): Promise<Resource> {
+  async request(path: string, init: RequestInit = {}, base = this.base): Promise<Resource> {
     const write = !!init.method && init.method !== "GET";
     this.userToken ||= await this.renewUser() ?? "";
     if (!this.userToken) {
@@ -92,11 +96,11 @@ export class AppleMusic implements Library {
     // Cider's proxy fills in the storefront itself, so the fallback keeps the placeholder.
     const original = path;
     path = path.replace("$STOREFRONT", await this.storefrontId(path));
-    let response = await this.fetch(path, await this.developerToken(false), init);
-    if (response.status === 401) response = await this.fetch(path, await this.developerToken(true), init);
+    let response = await this.fetch(path, await this.developerToken(false), init, base);
+    if (response.status === 401) response = await this.fetch(path, await this.developerToken(true), init, base);
     if (response.status === 401 || response.status === 403) {
       const token = await this.renewUser();
-      if (token && token !== this.userToken) { this.userToken = token; response = await this.fetch(path, await this.developerToken(false), init); }
+      if (token && token !== this.userToken) { this.userToken = token; response = await this.fetch(path, await this.developerToken(false), init, base); }
     }
     if (response.status === 401 || response.status === 403) {
       // Later requests skip the rejected sign-in until Cider provides a new one.
@@ -124,6 +128,13 @@ export class AppleMusic implements Library {
     });
     // A failed lookup must be retried on the next request.
     return this.storefront.catch(error => { this.storefront = undefined; throw error; });
+  }
+
+  // The time-synced lyrics of a catalog song as TTML, or undefined when Apple has none.
+  async lyrics(catalogId: string): Promise<string | undefined> {
+    const response = await this.request(`v1/catalog/$STOREFRONT/songs/${encodeURIComponent(catalogId)}/lyrics`, {}, this.lyricsBase);
+    const ttml = response.data?.[0]?.attributes?.ttml;
+    return typeof ttml === "string" ? ttml : undefined;
   }
 
   async playlists(): Promise<Media[]> {
