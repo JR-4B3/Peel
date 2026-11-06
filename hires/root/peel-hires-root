@@ -1,0 +1,514 @@
+#!/bin/bash
+# Root side of Peel's hi-res pipeline. It is installed root-owned at
+# /usr/local/libexec/peel-hires/peel-hires-root, and a sudoers rule lets the user run it without a
+# password. Its boundary: whatever the caller passes, it changes nothing on the host outside
+# /var/lib/peel-hires and Waydroid's own state, and reveals nothing the caller couldn't read.
+#
+#  - It downloads Waydroid's images itself and checks them against Waydroid's published SHA-256
+#    sums. It never mounts an image the caller supplies.
+#  - It reads the caller's small inputs (manifest, audio driver, audio policy, adb key) with the
+#    caller's own permissions, through runuser, so symlinks and races can't reach root's files.
+#  - It edits image trees component by component with O_NOFOLLOW, so a symlink inside an image
+#    can't point a removal or a write at the host.
+#  - Image trees live in a root-only folder, mounted nosuid,nodev,noexec while copied.
+#  - Changing verbs hold one lock. Inputs are read before the lock, without blocking.
+#  - It runs from /, and every embedded Python runs isolated (-I): sudo keeps the caller's working
+#    directory, from which Python would otherwise import modules.
+#  - A switch is a transaction: everything it changes is set aside first and put back on any
+#    failure. A release only becomes the fallback once the caller confirms it booted and passed.
+#
+#   latest                             the newest Waydroid images (date and file name)
+#   repack <inputs-dir> <release-id>   build a release from the newest verified images
+#   activate <release-id|stock>        stop Waydroid, switch it to a release, start it again
+#   confirm                            mark the active release as working (it becomes the fallback)
+#   rollback                           activate the last confirmed release, or the one before it
+#   remove <release-id>                delete a release that is neither current nor previous
+#   probe                              read-only checks inside the running container
+#   logcat [lines]                     the end of Android's log (read-only)
+#   adb-auth                           authorize the caller's adb key inside Android
+#   prune                              delete stock Waydroid's images once nothing refers to them
+#   list                               releases, current and previous
+set -euo pipefail
+umask 022
+export LC_ALL=C PATH=/usr/sbin:/usr/bin:/sbin:/bin
+cd /
+
+STATE=/var/lib/peel-hires
+RELEASES=$STATE/releases
+BUILD=$STATE/build
+DOWNLOADS=$STATE/downloads
+WAYDROID=/var/lib/waydroid
+WAYDROID_CFG=$WAYDROID/waydroid.cfg
+SYSTEM_OTA=https://ota.waydro.id/system/lineage/waydroid_x86_64/VANILLA.json
+VENDOR_OTA=https://ota.waydro.id/vendor/waydroid_x86_64/MAINLINE.json
+INPUTS=(manifest.conf audio.primary.waydroid.32.so audio.primary.waydroid.64.so audio_policy_configuration.xml)
+
+die() { echo "peel-hires-root: $*" >&2; exit 1; }
+[ "$(id -u)" = 0 ] || die "must run as root (through sudo)"
+CALLER=${SUDO_USER:-}
+[ -n "$CALLER" ] && [ "$CALLER" != root ] && id -u "$CALLER" >/dev/null 2>&1 || die "run through sudo from the user account"
+CALLER_HOME=$(getent passwd "$CALLER" | cut -d: -f6)
+
+# Reads a regular file with the caller's permissions: at most $2 bytes, within $3 seconds. Opening
+# is non-blocking and anything but a regular file is refused, so a FIFO can't stall the helper.
+as_caller_read() {
+  timeout -k 5 "${3:-60}" runuser -u "$CALLER" -- /usr/bin/python3 -I -c '
+import os, stat, sys
+fd = os.open(sys.argv[1], os.O_RDONLY | os.O_NONBLOCK | os.O_NOCTTY)
+if not stat.S_ISREG(os.fstat(fd).st_mode): sys.exit("not a regular file")
+os.set_blocking(fd, True)
+left, out = int(sys.argv[2]), sys.stdout.buffer
+while left > 0:
+    chunk = os.read(fd, min(left, 1 << 20))
+    if not chunk: break
+    out.write(chunk); left -= len(chunk)' "$1" "${2:-67108864}"
+}
+
+valid_id() { [[ $1 =~ ^[A-Za-z0-9][A-Za-z0-9._-]{0,80}$ ]] || die "invalid release id: $1"; }
+current() { cat "$STATE/current" 2>/dev/null || true; }
+good() { cat "$STATE/good" 2>/dev/null || true; }
+previous() { cat "$STATE/previous" 2>/dev/null || true; }
+release_dir() { if [ "$1" = stock ]; then echo "$WAYDROID/images"; else echo "$RELEASES/$1"; fi; }
+# The lock lives in the root-only build folder, so the caller can't open it and hold it. While it is
+# held, output goes to a private file and is printed after the lock is released, so a caller who
+# stops reading the helper's output can't make it hang holding the lock.
+LOCKED=
+lock() {
+  [ -n "$LOCKED" ] && return 0
+  exec 9>"$BUILD/.lock"; flock -w 900 9 || die "another pipeline step is running"
+  LOCKED=1
+  OUTPUT=$(mktemp "$BUILD/output.XXXXXX")
+  exec 7>&1 8>&2 >"$OUTPUT" 2>&1
+}
+unlock() {
+  [ -n "$LOCKED" ] || return 0
+  LOCKED=
+  exec >&7 2>&8 7>&- 8>&- 9>&-
+  cat "$OUTPUT" 2>/dev/null || true
+  rm -f "$OUTPUT"
+}
+
+MOUNTS=()
+# The lock is released last: printing the held output can block, and until the build folder is
+# gone another repack could take the lock and reuse it.
+cleanup() {
+  local m
+  for m in "${MOUNTS[@]}"; do [ -n "$m" ] || continue; umount "$m" 2>/dev/null || umount -l "$m" 2>/dev/null || true; rmdir "$m" 2>/dev/null || true; done
+  if [ -n "${BUILD_DIR:-}" ]; then rm -rf "$BUILD_DIR"; fi
+  unlock
+  return 0
+}
+trap cleanup EXIT
+
+# --- Images ---------------------------------------------------------------------------------
+
+ota() {  # ota <url> -> "datetime filename url sha256" of the newest image
+  curl -fsSL -m 30 "$1" | python3 -I -c '
+import json, re, sys
+b = json.load(sys.stdin)["response"][0]
+name, url, sha = b["filename"], b["url"], b["id"]
+assert re.fullmatch(r"[A-Za-z0-9._-]+\.zip", name) and re.fullmatch(r"[0-9a-f]{64}", sha) and url.startswith("https://")
+print(int(b["datetime"]), name, url, sha)'
+}
+
+# Prints the path of the newest image zip of one kind, downloaded or reused and always verified.
+fetch_verified() {
+  local dt name url sha dest
+  read -r dt name url sha < <(ota "$1") || die "could not read $1"
+  dest="$DOWNLOADS/$name"
+  if [ -f "$dest" ] && [ "$(sha256sum "$dest" | cut -d' ' -f1)" = "$sha" ]; then echo "$dest"; return; fi
+  # The caller may already have the file; it is read with their permissions and verified here.
+  local cached="$CALLER_HOME/.cache/peel-hires/downloads/$name"
+  if ! { as_caller_read "$cached" 4294967296 900 > "$dest.part" 2>/dev/null && [ "$(sha256sum "$dest.part" | cut -d' ' -f1)" = "$sha" ]; }; then
+    curl -fsSL --retry 3 -o "$dest.part" "$url" || die "download of $name failed"
+    [ "$(sha256sum "$dest.part" | cut -d' ' -f1)" = "$sha" ] || { rm -f "$dest.part"; die "$name does not match Waydroid's published checksum"; }
+  fi
+  mv "$dest.part" "$dest"
+  # Only the two newest of each kind are kept.
+  ls -1t "$DOWNLOADS"/*"${name#lineage-*-*-}" 2>/dev/null | tail -n +3 | xargs -r rm -f
+  echo "$dest"
+}
+
+cmd_latest() {
+  local dt name rest
+  read -r dt name rest < <(ota "$SYSTEM_OTA") && echo "system $dt $name"
+  read -r dt name rest < <(ota "$VENDOR_OTA") && echo "vendor $dt $name"
+}
+
+copy_image() {  # copy_image <img> <dest-dir>: the image's tree with owners, modes and xattrs
+  local mnt; mnt=$(mktemp -d "$BUILD/mnt.XXXXXX")
+  mount -o loop,ro,nosuid,nodev,noexec "$1" "$mnt"; MOUNTS+=("$mnt")
+  mkdir -p "$2"
+  cp -a --preserve=all "$mnt/." "$2/"
+  umount "$mnt"; rmdir "$mnt"; MOUNTS=("${MOUNTS[@]/$mnt}")
+}
+
+# Every edit of an image tree, done without following symlinks.
+edit_tree() {
+  python3 -I - "$@" <<'EOF'
+import os, re, stat, sys
+build = sys.argv[1]
+root_fd = {part: os.open(os.path.join(build, part), os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW) for part in ("system", "vendor")}
+NOFOLLOW_DIR = os.O_RDONLY | os.O_DIRECTORY | os.O_NOFOLLOW
+
+def parent(part, rel):
+    """The directory fd holding rel's last component, refusing any symlink on the way."""
+    parts = rel.split("/")
+    if not rel or rel.startswith("/") or any(p in ("", ".", "..") for p in parts):
+        raise SystemExit(f"unsafe path: {rel}")
+    fd = os.dup(root_fd[part])
+    for p in parts[:-1]:
+        try: nxt = os.open(p, NOFOLLOW_DIR, dir_fd=fd)
+        except OSError: os.close(fd); return None, parts[-1]
+        os.close(fd); fd = nxt
+    return fd, parts[-1]
+
+def remove_at(fd, name):
+    st = os.lstat(name, dir_fd=fd)
+    if stat.S_ISDIR(st.st_mode):
+        sub = os.open(name, NOFOLLOW_DIR, dir_fd=fd)
+        for child in os.listdir(sub): remove_at(sub, child)
+        os.close(sub); os.rmdir(name, dir_fd=fd)
+    else:
+        os.unlink(name, dir_fd=fd)
+
+def remove(part, rel):
+    fd, name = parent(part, rel)
+    if fd is None: return False
+    try:
+        try: os.lstat(name, dir_fd=fd)
+        except FileNotFoundError: return False
+        remove_at(fd, name); return True
+    finally: os.close(fd)
+
+def read(part, rel):
+    fd, name = parent(part, rel)
+    if fd is None: return None
+    try:
+        f = os.open(name, os.O_RDONLY | os.O_NOFOLLOW, dir_fd=fd)
+        with os.fdopen(f, "rb") as h: return h.read()
+    except OSError: return None
+    finally: os.close(fd)
+
+def write(part, rel, data, mode=0o644):
+    fd, name = parent(part, rel)
+    if fd is None: raise SystemExit(f"missing folder for {rel}")
+    try:
+        try:
+            if stat.S_ISDIR(os.lstat(name, dir_fd=fd).st_mode): raise SystemExit(f"{rel} is a folder")
+            os.unlink(name, dir_fd=fd)
+        except FileNotFoundError: pass
+        f = os.open(name, os.O_WRONLY | os.O_CREAT | os.O_EXCL | os.O_NOFOLLOW, mode, dir_fd=fd)
+        with os.fdopen(f, "wb") as h:
+            h.write(data); os.fchown(h.fileno(), 0, 0); os.fchmod(h.fileno(), mode)
+    finally: os.close(fd)
+
+inputs = os.path.join(build, "in")
+def section(name):
+    on, out = False, []
+    for line in open(os.path.join(inputs, "manifest.conf"), encoding="utf-8"):
+        line = line.rstrip("\n")
+        if line.startswith("["): on = line.strip() == f"[{name}]"; continue
+        if on and line.strip() and not line.lstrip().startswith("#"): out.append(line.strip())
+    return out
+
+removed = missing = 0
+for part in ("system", "vendor"):
+    for rel in section(f"remove-{part}"):
+        if not re.fullmatch(r"[A-Za-z0-9._@+-][A-Za-z0-9._@+/-]*", rel): raise SystemExit(f"unsafe path in manifest: {rel}")
+        if remove(part, rel): removed += 1
+        else: missing += 1
+print(f"  removed {removed} paths, {missing} not present in this image")
+
+for name, rel in (("audio.primary.waydroid.32.so", "lib/hw/audio.primary.waydroid.so"),
+                  ("audio.primary.waydroid.64.so", "lib64/hw/audio.primary.waydroid.so"),
+                  ("audio_policy_configuration.xml", "etc/audio_policy_configuration.xml")):
+    write("vendor", rel, open(os.path.join(inputs, name), "rb").read())
+
+# A 64-bit-only zygote: the primary block of the stock 64/32 configuration.
+stock = read("system", "system/etc/init/hw/init.zygote64_32.rc")
+if not stock: raise SystemExit("init.zygote64_32.rc is missing")
+primary = stock.decode().split("\n\n")[0].rstrip("\n") + "\n"
+if "app_process64" not in primary: raise SystemExit("could not derive init.zygote64.rc")
+write("system", "system/etc/init/hw/init.zygote64.rc", primary.encode())
+
+# Release properties: the manifest's, plus every partition's fingerprint rewritten to
+# user/release-keys so Android's build-consistency check sees one build.
+props = {}
+for line in section("properties"):
+    key, _, value = line.partition("=")
+    key, value = key.strip(), value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.]+", key) or not re.fullmatch(r"[\x20-\x7e]*", value) or "[" in value or "]" in value:
+        raise SystemExit(f"invalid property: {line}")
+    props[key] = value
+for part, rel in (("system", "system/build.prop"), ("system", "system/system_ext/etc/build.prop"), ("system", "system/product/etc/build.prop"),
+                  ("vendor", "build.prop"), ("vendor", "odm/etc/build.prop"), ("vendor", "vendor_dlkm/etc/build.prop")):
+    text = (read(part, rel) or b"").decode(errors="replace")
+    for m in re.finditer(r"^(ro\.(?:[a-z_]+\.)?build\.fingerprint)=([\x20-\x7e]+)$", text, re.M):
+        props.setdefault(m.group(1), re.sub(r":(userdebug|eng)/test-keys$", ":user/release-keys", m.group(2)))
+fp = props.get("ro.system.build.fingerprint")
+if fp:
+    for key in ("ro.build.fingerprint", "ro.bootimage.build.fingerprint", "ro.odm.build.fingerprint", "ro.product.build.fingerprint",
+                "ro.system_ext.build.fingerprint", "ro.system_dlkm.build.fingerprint", "ro.odm_dlkm.build.fingerprint", "ro.vendor_dlkm.build.fingerprint"):
+        props.setdefault(key, fp)
+with open(os.path.join(build, "release.props"), "w") as f:
+    for key, value in props.items(): f.write(f"{key}={value}\n")
+print(f"removed={removed}", file=open(os.path.join(build, "removed"), "w"))
+EOF
+}
+
+cmd_repack() {
+  local inputs=$1 id=$2 f
+  valid_id "$id"
+  # Inputs are read before taking the lock, into a private staging folder.
+  local staging; staging=$(mktemp -d "$BUILD/in.XXXXXX"); BUILD_DIR=$staging
+  for f in "${INPUTS[@]}"; do
+    as_caller_read "$inputs/$f" > "$staging/$f" 2>/dev/null || die "cannot read input $f"
+    [ -s "$staging/$f" ] || die "input $f is empty"
+  done
+  lock
+  [ -e "$RELEASES/$id" ] && die "release $id already exists"
+  local build="$BUILD/$id"
+  rm -rf "$build"; mkdir -p "$build"; mv "$staging" "$build/in"; BUILD_DIR=$build
+  echo "fetching and verifying Waydroid's images"
+  local sys ven; sys=$(fetch_verified "$SYSTEM_OTA"); ven=$(fetch_verified "$VENDOR_OTA")
+  echo "unpacking images"
+  unzip -q -o "$sys" system.img -d "$build/in"
+  unzip -q -o "$ven" vendor.img -d "$build/in"
+  copy_image "$build/in/system.img" "$build/system"
+  copy_image "$build/in/vendor.img" "$build/vendor"
+  rm -f "$build/in/system.img" "$build/in/vendor.img"
+  echo "removing listed parts, adding the audio driver, policy and 64-bit zygote"
+  edit_tree "$build"
+  # The manifest's [build] section may choose the compression; anything unexpected is refused.
+  local comp; comp=$(sed -n '/^\[build\]/,/^\[/{s/^compression *= *//p}' "$build/in/manifest.conf" | head -1)
+  comp=${comp:-lz4hc,12}
+  [[ $comp =~ ^(lz4|lz4hc|zstd|lzma)(,[0-9]{1,2})?$ ]] || die "unsupported compression: $comp"
+  echo "building $comp-compressed EROFS images"
+  mkdir -p "$build/out"
+  # Half the cores at low priority, so a nightly build doesn't heat up the machine or stall the desktop.
+  local workers=$(( ($(nproc) + 1) / 2 ))
+  nice -n 15 mkfs.erofs -z"$comp" -Eztailpacking -T0 --workers="$workers" --quiet "$build/out/system.img" "$build/system"
+  nice -n 15 mkfs.erofs -z"$comp" -Eztailpacking -T0 --workers="$workers" --quiet "$build/out/vendor.img" "$build/vendor"
+  cp "$build/release.props" "$build/out/release.props"
+  cp "$build/in/manifest.conf" "$build/out/manifest.conf"
+  chmod 644 "$build/out"/*
+  printf '{"id":"%s","built":"%s","compression":"%s","system_img":%d,"vendor_img":%d,"%s}\n' "$id" "$(date -Is)" "$comp" \
+    "$(stat -c %s "$build/out/system.img")" "$(stat -c %s "$build/out/vendor.img")" "$(sed 's/=/":/' "$build/removed")" > "$build/out/release.json"
+  chmod 755 "$build/out"
+  mv "$build/out" "$RELEASES/$id"; rm -rf "$build"; BUILD_DIR=
+  echo "release $id: system $(du -h "$RELEASES/$id/system.img" | cut -f1), vendor $(du -h "$RELEASES/$id/vendor.img" | cut -f1)"
+}
+
+# --- Activation -------------------------------------------------------------------------------
+
+# Rewrites waydroid.cfg's [properties] and images path. Keys and values are checked again here,
+# so a properties file can't add sections or lines.
+write_cfg() {
+  python3 -I - "$WAYDROID_CFG" "$1" "$2" <<'EOF'
+import configparser, re, sys
+cfg = configparser.ConfigParser(); cfg.optionxform = str; cfg.read(sys.argv[1])
+cfg.remove_section("properties"); cfg.add_section("properties")
+for line in open(sys.argv[2]):
+    line = line.strip()
+    if not line or line.startswith("#"): continue
+    key, _, value = line.partition("=")
+    key, value = key.strip(), value.strip()
+    if not re.fullmatch(r"[A-Za-z0-9_.]+", key) or not re.fullmatch(r"[\x20-\x7e]*", value): raise SystemExit(f"invalid property: {line}")
+    cfg["properties"][key] = value
+cfg["waydroid"]["images_path"] = sys.argv[3]
+with open(sys.argv[1] + ".new", "w") as f: cfg.write(f)
+EOF
+  mv "$WAYDROID_CFG.new" "$WAYDROID_CFG"
+}
+
+# A switch as a transaction. Recovery takes over before anything changes: it knows whether the
+# container was stopped, which folders were moved aside and whether the config and the record of
+# the active release were saved, and puts back exactly those on any failure or signal.
+TXN=$STATE/txn
+TXN_MOVED=()
+TXN_STOPPED=
+txn_begin() {
+  rm -rf "$TXN"; install -d -m 700 "$TXN"
+  IN_TXN=1; TXN_MOVED=(); TXN_STOPPED=
+  trap 'txn_abort' EXIT
+  trap 'exit 1' INT TERM HUP
+  cp -p "$STATE/current" "$TXN/current" 2>/dev/null || true
+  cp -p "$WAYDROID_CFG" "$TXN/waydroid.cfg"
+  TXN_STOPPED=1
+  systemctl stop waydroid-container
+  local d
+  for d in overlay/vendor overlay_rw overlay_work; do
+    if [ -e "$WAYDROID/$d" ]; then mv "$WAYDROID/$d" "$TXN/${d//\//-}"; TXN_MOVED+=("$d"); fi
+  done
+}
+txn_abort() {
+  trap - INT TERM HUP
+  if [ "${IN_TXN:-}" = 1 ]; then
+    IN_TXN=
+    echo "peel-hires-root: switch failed; restoring the previous state" >&2
+    [ -n "$TXN_STOPPED" ] && systemctl stop waydroid-container 2>/dev/null || true
+    local d
+    for d in overlay/vendor overlay_rw overlay_work; do
+      if [[ " ${TXN_MOVED[*]} " == *" $d "* ]]; then rm -rf "${WAYDROID:?}/$d"; mv "$TXN/${d//\//-}" "$WAYDROID/$d"; fi
+    done
+    if [ -f "$TXN/waydroid.cfg" ]; then cp -p "$TXN/waydroid.cfg" "$WAYDROID_CFG"; waydroid upgrade --offline >/dev/null 2>&1 || true; fi
+    if [ -f "$TXN/current" ]; then cp -p "$TXN/current" "$STATE/current"; fi
+    [ -n "$TXN_STOPPED" ] && systemctl start waydroid-container 2>/dev/null || true
+    rm -rf "$TXN"
+  fi
+  cleanup
+}
+txn_commit() { IN_TXN=; rm -rf "$TXN"; trap - INT TERM HUP; trap cleanup EXIT; }
+
+cmd_activate() {
+  local id=$1 dir cur
+  [ "$id" = stock ] || valid_id "$id"
+  dir=$(release_dir "$id")
+  [ -f "$dir/system.img" ] && [ -f "$dir/vendor.img" ] || die "release $id not found"
+  lock
+  cur=$(current)
+  # The first switch remembers stock Waydroid (its properties and overlay), once, as the fallback.
+  if [ -z "$cur" ]; then
+    if [ ! -e "$STATE/stock.props" ]; then
+      sed -n '/^\[properties\]/,/^\[/{/^\[/d;s/ = /=/;p}' "$WAYDROID_CFG" > "$STATE/stock.props.new"
+      mv "$STATE/stock.props.new" "$STATE/stock.props"
+    fi
+    if [ ! -e "$STATE/stock-overlay" ] && [ -d "$WAYDROID/overlay/vendor" ] && [ -n "$(ls -A "$WAYDROID/overlay/vendor")" ]; then
+      rm -rf "$STATE/stock-overlay.new"; cp -a "$WAYDROID/overlay/vendor" "$STATE/stock-overlay.new"; mv "$STATE/stock-overlay.new" "$STATE/stock-overlay"
+    fi
+    cur=stock; echo stock > "$STATE/current"; [ -n "$(good)" ] || echo stock > "$STATE/good"
+  fi
+  local props="$dir/release.props"
+  [ "$id" = stock ] && props=$STATE/stock.props
+  [ -f "$props" ] || die "no properties for $id"
+
+  # Everything below changes files Android has mounted, so the container stops first.
+  txn_begin
+
+  # Anything Android wrote to its system overlay is kept per release, in a root-only folder.
+  # Overlayfs remembers the lower image's files by handle, so these folders can't follow an image.
+  install -d -m 700 "$STATE/rw"
+  rm -rf "$STATE/rw/$cur"
+  if [ -d "$TXN/overlay_rw" ] && [ -n "$(find "$TXN/overlay_rw" -mindepth 2 -print -quit)" ]; then cp -a "$TXN/overlay_rw" "$STATE/rw/$cur"; fi
+  if [ -d "$STATE/rw/$id" ]; then cp -a "$STATE/rw/$id" "$WAYDROID/overlay_rw"; fi
+  mkdir -p "$WAYDROID/overlay_rw/system" "$WAYDROID/overlay_rw/vendor" "$WAYDROID/overlay_work/system" "$WAYDROID/overlay_work/vendor"
+  # Releases carry the audio fixes inside their images; stock gets the phase-one overlay back.
+  # Waydroid mounts overlay/vendor as an overlay layer, so the folder has to exist even when empty.
+  if [ "$id" = stock ] && [ -d "$STATE/stock-overlay" ]; then cp -a "$STATE/stock-overlay" "$WAYDROID/overlay/vendor"; fi
+  mkdir -p "$WAYDROID/overlay/vendor"
+
+  write_cfg "$props" "$dir"
+  waydroid upgrade --offline >/dev/null 2>&1
+  echo "$id" > "$STATE/current.new"; mv "$STATE/current.new" "$STATE/current"
+  systemctl start waydroid-container
+  txn_commit
+  if [ "$id" = "$(good)" ]; then echo "active: $id (the confirmed release)"; else echo "active: $id (fallback: $(good); confirm it once it works)"; fi
+}
+
+# The active release works: it becomes the fallback, and the old fallback the one before it.
+cmd_confirm() {
+  lock
+  local cur g; cur=$(current); g=$(good)
+  [ -n "$cur" ] || die "nothing is active"
+  if [ "$cur" != "$g" ]; then [ -n "$g" ] && echo "$g" > "$STATE/previous"; echo "$cur" > "$STATE/good"; fi
+  echo "confirmed: $cur (before it: $(previous))"
+}
+
+# Back to the last confirmed release; if the active one is confirmed, to the one before it.
+cmd_rollback() {
+  lock
+  local cur g target; cur=$(current); g=$(good)
+  if [ -n "$g" ] && [ "$cur" != "$g" ]; then target=$g; else target=$(previous); fi
+  [ -n "$target" ] || die "no release to roll back to"
+  cmd_activate "$target"
+  if [ "$cur" = "$g" ]; then echo "$target" > "$STATE/good"; echo "" > "$STATE/previous"; fi
+}
+
+cmd_remove() {
+  valid_id "$1"
+  lock
+  [ "$1" = "$(current)" ] && die "$1 is the current release"
+  [ "$1" = "$(good)" ] && die "$1 is the confirmed fallback"
+  [ "$1" = "$(previous)" ] && die "$1 is the release before the fallback"
+  [ -d "$RELEASES/$1" ] || die "release $1 not found"
+  rm -rf "${RELEASES:?}/$1" "$STATE/rw/$1"; echo "removed $1"
+}
+
+# --- Read-only and Android-side helpers ------------------------------------------------------
+
+cmd_probe() {
+  waydroid status 2>/dev/null | sed -n 's/^Session:\s*/session=/p; s/^Container:\s*/container=/p'
+  waydroid shell -- sh -c '
+    p=/data/data/com.apple.android.music/shared_prefs/com.apple.android.music.playback_preferences.xml
+    echo "boot_completed=$(getprop sys.boot_completed)"
+    echo "zygote=$(getprop ro.zygote)"
+    echo "build_tags=$(getprop ro.build.tags)"
+    echo "apple_installed=$([ -d /data/data/com.apple.android.music ] && echo 1 || echo 0)"
+    echo "apple_subscription=$(grep -o "subscription_status\" value=\"[0-9]*" $p 2>/dev/null | grep -o "[0-9]*$")"
+    echo "apple_quality_wifi=$(grep -o "key_wifi_audio_quality\">[A-Z_]*" $p 2>/dev/null | cut -d\> -f2)"
+    echo "apple_bitstream_switching=$(grep -o "key_is_bit_stream_switching_enabled\" value=\"[a-z]*" $p 2>/dev/null | grep -o "[a-z]*$")"
+    echo "fake_wifi=$(getprop persist.waydroid.fake_wifi)"
+  ' 2>/dev/null || echo "container=unreachable"
+  local cg=/sys/fs/cgroup/lxc.payload.waydroid
+  if [ -r "$cg/memory.stat" ]; then awk '/^anon |^shmem |^kernel /{printf "mem_%s=%d\n", $1, $2/1048576}' "$cg/memory.stat"; fi
+  return 0
+}
+
+cmd_logcat() {
+  local n=${1:-2000}
+  [[ $n =~ ^[0-9]{1,6}$ ]] || die "invalid line count"
+  waydroid shell -- logcat -d -b all -t "$n"
+}
+
+cmd_adb_auth() {
+  local key
+  # Read once, as the caller, then checked and used as that same text.
+  key=$(as_caller_read "$CALLER_HOME/.android/adbkey.pub" 4096 10 2>/dev/null) || die "no readable adb key (run adb once to create it)"
+  [[ $key =~ ^QAAAA[A-Za-z0-9+/=]+\ [[:print:]]*$ ]] || die "the adb key does not look like an adb public key"
+  lock
+  printf '%s\n' "$key" | waydroid shell -- sh -c 'mkdir -p /data/misc/adb; touch /data/misc/adb/adb_keys; cat > /data/misc/adb/key.new;
+    grep -qxF -f /data/misc/adb/key.new /data/misc/adb/adb_keys || cat /data/misc/adb/key.new >> /data/misc/adb/adb_keys
+    rm /data/misc/adb/key.new; chown system:shell /data/misc/adb/adb_keys; chmod 640 /data/misc/adb/adb_keys'
+  echo "adb key authorized"
+}
+
+# Deletes Waydroid's stock images once no state refers to them: releases replace them, and
+# Waydroid's zip in the downloads folder still holds them. Also reports the helper's disk use.
+cmd_prune() {
+  lock
+  local ref f
+  for ref in "$(current)" "$(good)" "$(previous)"; do
+    [ "$ref" != stock ] || die "stock Waydroid is still current, confirmed or the fallback; keeping its images"
+  done
+  [ -n "$(current)" ] || die "no release has been activated yet; keeping the stock images"
+  for f in system.img vendor.img; do
+    if [ -f "$WAYDROID/images/$f" ]; then echo "deleting $WAYDROID/images/$f ($(du -h "$WAYDROID/images/$f" | cut -f1))"; rm -f "$WAYDROID/images/$f"; fi
+  done
+  du -sh "$DOWNLOADS" "$RELEASES" "$STATE/rw" 2>/dev/null | sed 's/^/disk: /'
+}
+
+cmd_list() {
+  echo "current=$(current)"; echo "good=$(good)"; echo "previous=$(previous)"
+  local d
+  for d in "$RELEASES"/*/; do [ -f "$d/release.json" ] && cat "$d/release.json"; done
+  return 0
+}
+
+install -d -m 755 "$STATE" "$RELEASES"
+install -d -m 700 "$BUILD" "$DOWNLOADS"
+verb=${1:-}; shift || true
+case "$verb" in
+  latest)   cmd_latest ;;
+  repack)   [ $# = 2 ] || die "usage: repack <inputs-dir> <release-id>"; cmd_repack "$@" ;;
+  activate) [ $# = 1 ] || die "usage: activate <release-id|stock>"; cmd_activate "$1" ;;
+  confirm)  cmd_confirm ;;
+  rollback) cmd_rollback ;;
+  remove)   [ $# = 1 ] || die "usage: remove <release-id>"; cmd_remove "$1" ;;
+  probe)    cmd_probe ;;
+  logcat)   cmd_logcat "${1:-2000}" ;;
+  adb-auth) cmd_adb_auth ;;
+  prune)    cmd_prune ;;
+  list)     cmd_list ;;
+  *) die "unknown verb '${verb}'. Verbs: latest repack activate confirm rollback remove prune probe logcat adb-auth list" ;;
+esac

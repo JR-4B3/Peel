@@ -1,0 +1,558 @@
+#!/bin/bash
+# peel-hires: builds, tests and runs the slimmed Waydroid that plays Apple Music in hi-res.
+# Root work goes through the root-owned helper that `install.sh` sets up; everything here runs
+# as the user. Run `peel-hires help` for the commands.
+set -euo pipefail
+export LC_ALL=C
+
+HIRES=$(cd "$(dirname "$(readlink -f "$0")")/.." && pwd)
+CACHE=${XDG_CACHE_HOME:-$HOME/.cache}/peel-hires
+STATE=${XDG_STATE_HOME:-$HOME/.local/state}/peel-hires
+CONFIG=${XDG_CONFIG_HOME:-$HOME/.config}/peel-hires/config
+export XDG_RUNTIME_DIR=${XDG_RUNTIME_DIR:-/run/user/$(id -u)}
+ROOT_HELPER=/usr/local/libexec/peel-hires/peel-hires-root
+APPLE=com.apple.android.music
+# Apple's signing certificate for Apple Music on Android (CN=Apple Inc). An APK signed by
+# anything else is refused before it reaches Android.
+APPLE_CERT_SHA256=88:BA:59:0E:C2:E1:EA:33:C4:45:8D:AF:59:48:9F:AE:E2:CE:F2:97:A9:B4:07:1E:18:CF:82:EF:53:11:00:AA
+HEADLESS_DISPLAY=peel-hires
+TEST_RATE=192000
+
+# Settings that can be overridden in ~/.config/peel-hires/config (shell syntax):
+AGENT=off            # "claude" lets a Claude Code agent try to repair a failed update
+NOTIFY=on            # desktop notifications about updates
+APPLE_PLAY_TEST=on   # play a real hi-res song during tests, only when nothing is playing
+[ -f "$CONFIG" ] && . "$CONFIG"
+
+mkdir -p "$CACHE" "$STATE/reports"
+log() { printf '%s\n' "$*" >&2; }
+die() { log "peel-hires: $*"; exit 1; }
+root() { sudo -n "$ROOT_HELPER" "$@"; }
+json_get() { python3 -c 'import json,sys; d=json.load(open(sys.argv[1])); print(eval("d"+sys.argv[2]))' "$@"; }
+
+notify() {
+  [ "$NOTIFY" = on ] || return 0
+  command -v notify-send >/dev/null && DBUS_SESSION_BUS_ADDRESS=${DBUS_SESSION_BUS_ADDRESS:-unix:path=$XDG_RUNTIME_DIR/bus} \
+    notify-send -a Peel -i audio-x-generic "$1" "${2:-}" 2>/dev/null || true
+}
+
+# --- Android access -------------------------------------------------------------------------
+
+adb_target() {
+  local ip; ip=$(waydroid status 2>/dev/null | sed -n 's/^IP address:\s*//p')
+  [ -n "$ip" ] && [ "$ip" != UNKNOWN ] || return 1
+  echo "$ip:5555"
+}
+A() { timeout "${ADB_TIMEOUT:-30}" adb -s "$(adb_target)" "$@"; }
+adb_connect() {
+  local t; t=$(adb_target) || return 1
+  timeout 5 adb connect "$t" >/dev/null 2>&1 || true
+  timeout 5 adb -s "$t" wait-for-device 2>/dev/null
+}
+
+# Android only accepts adb from keys listed in its data partition. A new key would wait for a
+# confirmation on a display nobody sees, so the root helper adds it, and adb connects again.
+authorize_adb() {
+  local t; t=$(adb_target) || return 1
+  log "authorizing this machine's adb key in Android"
+  root adb-auth >&2 || return 1
+  timeout 5 adb disconnect "$t" >/dev/null 2>&1 || true
+}
+adb_unauthorized() {
+  local t; t=$(adb_target) || return 1
+  timeout 5 adb devices 2>/dev/null | grep -q "^$t[[:space:]]*unauthorized"
+}
+
+wait_boot() {  # waits up to BOOT_TIMEOUT seconds (default 180) for Android to finish booting
+  local deadline=$((SECONDS + ${BOOT_TIMEOUT:-180})) authorized= enabled=
+  while [ $SECONDS -lt $deadline ]; do
+    adb_connect && [ "$(ADB_TIMEOUT=5 A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && return 0
+    if [ -z "$authorized" ] && adb_unauthorized; then authorize_adb && authorized=1; fi
+    # A home screen app must be on before boot can complete; see ENABLED_APPS.
+    if [ -z "$enabled" ] && adb_connect 2>/dev/null; then enable_apps && enabled=1; fi
+    sleep 2
+  done
+  return 1
+}
+
+apple_playing() {  # true when Apple Music plays in Android, Peel's engine or Cider
+  if adb_target >/dev/null 2>&1 && adb_connect; then
+    A shell dumpsys media_session 2>/dev/null | grep -A20 "package=$APPLE" | grep -q "state=PlaybackState {state=3" && return 0
+  fi
+  local key="${XDG_CONFIG_HOME:-$HOME/.config}/peel-engine/key.json"
+  if [ -f "$key" ]; then
+    local port k
+    port=$(json_get "$key" '["port"]' 2>/dev/null) && k=$(json_get "$key" '["key"]' 2>/dev/null) &&
+      curl -s -m 3 -H "x-peel-key: $k" "localhost:$port/state" | grep -q '"state":"playing"' && return 0
+  fi
+  local cider=${CIDER_API_BASE:-http://127.0.0.1:10767} token="${XDG_CONFIG_HOME:-$HOME/.config}/peel/auth.json"
+  local auth=""; [ -f "$token" ] && auth=$(json_get "$token" '["token"]' 2>/dev/null || true)
+  curl -s -m 3 -H "apptoken: $auth" "$cider/api/v2/playback" 2>/dev/null | grep -q '"state":"playing"' && return 0
+  return 1
+}
+
+# --- Session: Waydroid on an invisible display, or visible for signing in --------------------
+
+session_running() { waydroid status 2>/dev/null | grep -q '^Session:\s*RUNNING'; }
+
+cmd_session() {
+  case "${1:-status}" in
+    start)
+      local mode=headless; [ "${2:-}" = --visible ] && mode=visible
+      systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service 2>/dev/null || true
+      session_running && waydroid session stop >/dev/null 2>&1 || true
+      systemctl --user start "peel-hires-session@$mode.service" || die "the session did not start"
+      if ! wait_boot; then
+        # Right after a container restart Android sometimes boots without its network, so adb
+        # can't reach it. One session restart fixes that; a release that really fails to boot
+        # still fails the second time.
+        root probe 2>/dev/null | grep -q '^boot_completed=1$' || die "Android did not finish booting"
+        # adb may not report an unknown key as unauthorized, so the key is added in any case.
+        authorize_adb || true
+        if BOOT_TIMEOUT=20 wait_boot; then apply_android_settings; log "session running ($mode)"; return 0; fi
+        log "Android booted but is unreachable; restarting the session once"
+        systemctl --user restart "peel-hires-session@$mode.service" || die "the session did not restart"
+        BOOT_TIMEOUT=90 wait_boot || die "Android booted but stays unreachable over adb"
+      fi
+      apply_android_settings
+      log "session running ($mode)" ;;
+    stop)
+      systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service peel-hires-display.service 2>/dev/null || true
+      session_running && waydroid session stop >/dev/null 2>&1 || true
+      log "session stopped" ;;
+    status) waydroid status ;;
+    run)  # used by the systemd unit: peel-hires session run <headless|visible>
+      if [ "${2:-}" = headless ]; then export WAYLAND_DISPLAY=$HEADLESS_DISPLAY
+      else export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-$(systemctl --user show-environment | sed -n 's/^WAYLAND_DISPLAY=//p')}; fi
+      export XDG_SESSION_TYPE=wayland
+      exec waydroid session start ;;
+    *) die "usage: peel-hires session start [--visible] | stop | status" ;;
+  esac
+}
+
+# An earlier version turned these apps off to save about 60 MB. Without a home screen app or
+# with the persistent Phone app off, Android's boot slowed by 2 seconds or stalled, so they are
+# turned on again. The nightly trim stops the ones that linger instead. Without the boot
+# animation, Android never finishes booting while no home screen app is on, so wait_boot turns
+# them on as soon as the package manager answers, before boot completes.
+ENABLED_APPS="com.android.launcher3 com.android.settings com.android.providers.calendar com.android.printspooler
+  com.android.se com.android.localtransport com.android.smspush com.android.statementservice
+  org.lineageos.lineageparts com.android.phone"
+
+# Settings that live in Android's data partition, so they survive image updates. Re-applied
+# after every start in case an app update reset them. Android saves package states a few
+# seconds later, so a restart right after this may lose them until the next start.
+apply_android_settings() {
+  waydroid prop set persist.waydroid.fake_wifi "$APPLE" 2>/dev/null || true
+  waydroid prop set persist.waydroid.suspend false 2>/dev/null || true
+  A shell cmd media_session volume --stream 3 --set 15 >/dev/null 2>&1 || true
+  enable_apps || true
+}
+
+# Turns on any of ENABLED_APPS that is off. Fails while the package manager doesn't answer yet.
+enable_apps() {
+  local on p
+  on=$(ADB_TIMEOUT=10 A shell pm list packages -e 2>/dev/null | tr -d '\r' | sed -n 's/^package://p')
+  [ -n "$on" ] || return 1
+  for p in $ENABLED_APPS; do
+    grep -qx "$p" <<<"$on" || { log "turning $p back on"; ADB_TIMEOUT=10 A shell pm enable "$p" >/dev/null 2>&1 || true; }
+  done
+}
+
+# Frees what Android accumulates over a day: Apple Music's caches (it grows from about 115 to
+# 475 MB) and background processes. Only while nothing plays; it starts again when needed.
+trim_android() {
+  apple_playing && return 0
+  adb_connect || return 0
+  A shell am force-stop "$APPLE" >/dev/null 2>&1 || true
+  A shell am kill-all >/dev/null 2>&1 || true
+  log "Android trimmed: Apple Music restarted, background apps stopped"
+}
+
+# --- Images: fetch, build, activate ---------------------------------------------------------
+
+# The newest Waydroid images, as the root helper sees them: "system <datetime> <file>" and "vendor ...".
+latest() { root latest || die "could not read Waydroid's image list"; }
+
+# The host software the pipeline runs on. A change to any of it runs the tests again, since a
+# Waydroid, LXC or kernel update can break playback without the images changing.
+host_versions() { { waydroid --version; lxc-start --version; uname -r; } 2>/dev/null | tr '\n' ' '; }
+
+# Hash of everything a release is built from besides the images, so changes to any of it rebuild.
+inputs_hash() { cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$HIRES/android/audio_hw.c" "$HIRES/android/build-hal.sh" | sha256sum | cut -c1-8; }
+
+build_hal() {  # prints the directory holding the two driver builds for the current source
+  local h; h=$(sha256sum "$HIRES/android/audio_hw.c" "$HIRES/android/build-hal.sh" | sha256sum | cut -c1-12)
+  local out="$CACHE/hal/$h"
+  if [ ! -f "$out/audio.primary.waydroid.32.so" ] || [ ! -f "$out/audio.primary.waydroid.64.so" ]; then
+    log "building the audio driver"
+    session_running || die "the audio driver build needs Android's libraries; start the session first"
+    rm -rf "$out.part"
+    bash "$HIRES/android/build-hal.sh" "$CACHE/hal-work" "$out.part" >&2 || die "the audio driver build failed"
+    rm -rf "$out"; mv "$out.part" "$out"
+  fi
+  echo "$out"
+}
+
+# Callers run this as `id=$(cmd_build) || ...`, which turns off set -e inside it, so every step
+# checks its own failure.
+cmd_build() {
+  local images hal sys ven id in f
+  images=$(latest) || exit 1
+  hal=$(build_hal) || exit 1
+  sys=$(awk '$1=="system"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
+  ven=$(awk '$1=="vendor"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
+  [ -n "$sys" ] && [ -n "$ven" ] || die "unexpected image list: $images"
+  id="s$sys-v$ven-$(cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so | sha256sum | cut -c1-8)"
+  local built; built=$(root list) || die "could not list the releases"
+  if grep -q "\"id\":\"$id\"" <<<"$built"; then log "release $id already built"; echo "$id"; return; fi
+  # The helper reads these with the user's permissions and fetches and verifies the images itself.
+  in="$CACHE/inputs/$id"; rm -rf "$in"; mkdir -p "$in" || die "cannot create $in"
+  cp "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$in/" || die "cannot stage the inputs"
+  log "repacking release $id"
+  root repack "$in" "$id" >&2 || die "repacking $id failed"
+  rm -rf "$in"
+  echo "$id"
+}
+
+# Switches to a release. It becomes the fallback once Android has booted on it, unless
+# --no-confirm leaves that to the caller (the update confirms only after the tests pass).
+cmd_activate() {
+  local id=${1:?usage: peel-hires activate <release-id> [--force] [--no-confirm]} force="" confirm=1 arg
+  for arg in "${@:2}"; do case $arg in --force) force=1 ;; --no-confirm) confirm="" ;; esac; done
+  [ -n "$force" ] || ! apple_playing || { log "music is playing; not switching now (use --force)"; return 75; }
+  cmd_session stop
+  root activate "$id" >&2 || die "activating $id failed"
+  settle_container
+  cmd_session start
+  if [ -n "$confirm" ]; then root confirm >&2; fi
+}
+
+settle_container() {  # waits until the restarted container and its network are up
+  local i
+  for i in $(seq 30); do
+    waydroid status 2>/dev/null | grep -q '^Container:\s*\(RUNNING\|STOPPED\)' && pgrep -x dnsmasq >/dev/null && break
+    sleep 1
+  done
+  sleep 2
+}
+
+cmd_rollback() {
+  cmd_session stop
+  root rollback >&2 || die "rollback failed"
+  settle_container
+  cmd_session start
+}
+
+# --- Apple Music app ------------------------------------------------------------------------
+
+apkeep() {
+  local bin="$CACHE/bin/apkeep"
+  if [ ! -x "$bin" ]; then
+    mkdir -p "$CACHE/bin"
+    curl -fsSL -o "$bin" https://github.com/EFForg/apkeep/releases/latest/download/apkeep-x86_64-unknown-linux-gnu && chmod +x "$bin"
+  fi
+  "$bin" "$@"
+}
+
+# Empty when Apple Music is missing or adb fails; under pipefail a failure would end the script silently.
+apple_installed_version() { { A shell dumpsys package "$APPLE" 2>/dev/null || true; } | sed -n 's/^ *versionName=//p' | head -1 | tr -d '\r'; }
+apple_latest_version() { apkeep -l -a "$APPLE" -d apk-pure -o arch=x86_64 2>/dev/null | tail -1 | tr ',' '\n' | sed 's/^[ |]*//' | grep . | tail -1; }
+
+cmd_apple_update() {
+  adb_connect || die "Android is not running"
+  local have want dir
+  have=$(apple_installed_version); want=$(apple_latest_version)
+  [ -n "$want" ] || die "could not read the latest Apple Music version"
+  if [ "$have" = "$want" ] && [ "${1:-}" != --force ]; then log "Apple Music $have is current"; return 0; fi
+  dir="$CACHE/apple/$want"; rm -rf "$dir"; mkdir -p "$dir"
+  apkeep -a "$APPLE@$want" -d apk-pure -o acknowledge_dangers=true,arch=x86_64 "$dir" >/dev/null 2>&1 || die "Apple Music download failed"
+  (cd "$dir" && unzip -q -o ./*.xapk) || die "Apple Music package is not a valid XAPK"
+  # All splits must carry the same signature, so checking this split's certificate pins the
+  # whole set to Apple. Android repeats the check against the installed app on update.
+  local cert; cert=$(keytool -printcert -jarfile "$dir/config.x86_64.apk" 2>/dev/null | sed -n 's/^\s*SHA256: //p' | head -1)
+  [ "$cert" = "$APPLE_CERT_SHA256" ] || die "Apple Music $want is not signed by Apple (got '${cert:-none}'); refusing to install"
+  A install-multiple -r "$dir/$APPLE.apk" "$dir/config.x86_64.apk" "$dir/config.xhdpi.apk" >/dev/null || die "installing Apple Music $want failed"
+  rm -rf "$dir"
+  log "Apple Music updated: ${have:-none} -> $want"
+}
+
+# --- Sign-in ---------------------------------------------------------------------------------
+
+cmd_signin() {
+  log "Opening Apple Music for sign-in. It closes by itself once the subscription is active."
+  cmd_session start --visible
+  waydroid prop set persist.waydroid.multi_windows true 2>/dev/null || true
+  A shell monkey -p "$APPLE" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1 || true
+  local i
+  for i in $(seq 300); do
+    root probe 2>/dev/null | grep -q '^apple_subscription=1$' && { log "signed in"; cmd_session start; return 0; }
+    sleep 2
+  done
+  die "not signed in after 10 minutes; the window stays open"
+}
+
+# --- Tests -----------------------------------------------------------------------------------
+
+TESTS=()
+check() {  # check <name> <command...>: runs a test and records pass/fail with its output
+  local name=$1; shift; local out rc=0
+  out=$("$@" 2>&1) || rc=$?
+  TESTS+=("$(python3 -c 'import json,sys; print(json.dumps({"name":sys.argv[1],"pass":sys.argv[2]=="0","detail":sys.argv[3][-600:]}))' "$name" "$rc" "$out")")
+  if [ "$rc" = 0 ]; then log "  pass  $name"; else log "  FAIL  $name: $(tail -1 <<<"$out")"; fi
+  return 0
+}
+
+t_boot() { session_running && wait_boot; }
+t_props() {
+  local p; p=$(root probe)
+  grep -q '^build_tags=release-keys$' <<<"$p" || { echo "build tags: $(grep build_tags <<<"$p")"; return 1; }
+  grep -q '^zygote=zygote64$' <<<"$p" || { echo "zygote: $(grep zygote <<<"$p")"; return 1; }
+  ! A shell pidof zygote >/dev/null 2>&1 || { echo "the 32-bit zygote is running"; return 1; }
+}
+t_driver() {
+  A logcat -d -b all 2>/dev/null | grep -q "adev_open_output_stream selects channels=2 rate=$TEST_RATE format=14" ||
+    { echo "the audio driver never opened $TEST_RATE Hz float"; return 1; }
+}
+t_bitperfect() {
+  local sig="$CACHE/test/signal-$TEST_RATE-v2.f32" bin="$CACHE/test/aaplay"
+  mkdir -p "$CACHE/test"
+  [ -f "$sig" ] || python3 "$HIRES/tests/mk-signal.py" "$sig" 8 "$TEST_RATE"
+  if [ ! -x "$bin" ]; then
+    "$CACHE/hal-work/android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/clang" --target=x86_64-linux-android33 -O2 \
+      "$HIRES/tests/aaplay.c" -laaudio -o "$bin" || return 1
+  fi
+  A push "$bin" /data/local/tmp/aaplay >/dev/null && A push "$sig" /data/local/tmp/signal.f32 >/dev/null
+  python3 "$HIRES/tests/capture.py" --rate "$TEST_RATE" --adb "$(adb_target)" --signal "$sig"
+}
+t_apple_app() {
+  local p; p=$(root probe)
+  grep -q '^apple_installed=1$' <<<"$p" || { echo "Apple Music is not installed"; return 1; }
+  grep -q '^apple_subscription=1$' <<<"$p" || { echo "Apple Music is not signed in (run: peel-hires signin)"; return 1; }
+  grep -q '^apple_quality_wifi=HIGH_RES_LOSSLESS$' <<<"$p" || { echo "Hi-Res Lossless is not selected in Apple Music"; return 1; }
+  grep -q "^fake_wifi=$APPLE\$" <<<"$p" || { echo "fake Wi-Fi is not set for Apple Music"; return 1; }
+  A shell am start -W -n "$APPLE/.activity.MainActivity" >/dev/null 2>&1 || A shell monkey -p "$APPLE" -c android.intent.category.LAUNCHER 1 >/dev/null 2>&1
+  sleep 6
+  A shell uiautomator dump /sdcard/ui.xml >/dev/null 2>&1; local ui; ui=$(A shell cat /sdcard/ui.xml 2>/dev/null)
+  ! grep -q "Unrooted Devices" <<<"$ui" || { echo "Apple Music shows its rooted-device block"; return 1; }
+}
+t_apple_play() {
+  apple_playing && { echo "skipped: music is playing"; return 0; }
+  python3 "$HIRES/tests/apple-play.py" --adb "$(adb_target)" --rate "$TEST_RATE"
+}
+
+cmd_test() {
+  local id; id=$(root list | sed -n 's/^current=//p')
+  log "testing release ${id:-unknown}"
+  TESTS=()
+  check boot t_boot
+  check properties t_props
+  check bit-perfect-android t_bitperfect
+  check audio-driver-rate t_driver
+  check apple-music-app t_apple_app
+  [ "$APPLE_PLAY_TEST" = on ] && check apple-music-hires-playback t_apple_play
+  local probe; probe=$(root probe 2>/dev/null || true)
+  local report="$STATE/reports/$(date +%Y%m%d-%H%M%S)-${id:-unknown}.json"
+  python3 - "$report" "${id:-}" "$probe" "${TESTS[@]}" <<'EOF'
+import json, sys
+report, rid, probe, *tests = sys.argv[1:]
+tests = [json.loads(t) for t in tests]
+mem = {k[4:]: int(v) for k, v in (l.split("=", 1) for l in probe.splitlines() if l.startswith("mem_"))}
+json.dump({"release": rid, "pass": all(t["pass"] for t in tests), "tests": tests, "memory_mb": mem}, open(report, "w"), indent=1)
+EOF
+  ln -sf "$report" "$STATE/reports/last.json"
+  log "report: $report"
+  json_get "$report" '["pass"]' | grep -q True
+}
+
+# --- The update loop --------------------------------------------------------------------------
+
+# The tests need Apple Music installed and signed in. Without that every release would fail
+# them and be switched back, so the update stops and asks for setup or sign-in instead.
+apple_ready() {
+  local p; p=$(root probe 2>/dev/null) || return 1
+  grep -q '^apple_installed=1$' <<<"$p" && grep -q '^apple_subscription=1$' <<<"$p"
+}
+
+# First-time setup, in the order the tests need: a release that boots, Apple Music installed
+# on it, sign-in, then a full update that tests the release and confirms it.
+cmd_setup() {
+  local id cur
+  session_running || cmd_session start
+  id=$(cmd_build) || die "building the first release failed"
+  cur=$(root list | sed -n 's/^current=//p')
+  # Confirmed once Android boots on it, so a failed sign-in later still leaves a fallback.
+  [ "$id" = "$cur" ] || cmd_activate "$id" --force
+  cmd_apple_update
+  if ! root probe 2>/dev/null | grep -q '^apple_subscription=1$'; then cmd_signin; fi
+  if ! root probe 2>/dev/null | grep -q '^apple_quality_wifi=HIGH_RES_LOSSLESS$'; then
+    log "Hi-Res Lossless is not selected yet. Choose it in Apple Music under Settings > Audio Quality (peel-hires session start --visible), then run: peel-hires update --force"
+    return 1
+  fi
+  cmd_update --force
+}
+
+cmd_update() {
+  local force=${1:-} id cur rc
+  exec 9>"$STATE/update.lock"; flock -n 9 || die "another update is running"
+  if apple_playing && [ "$force" != --force ]; then log "music is playing; trying again later"; return 75; fi
+  local key; key="$(latest | awk '{print $2}' | tr '\n' ' ')$(inputs_hash) $(host_versions | sha256sum | cut -c1-8)"
+  if [ "$force" = --force ] || [ "$(cat "$STATE/seen" 2>/dev/null)" != "$key" ]; then
+    session_running || cmd_session start
+    if ! apple_ready; then
+      notify "Peel hi-res" "Apple Music is not installed or not signed in. Run: peel-hires setup"
+      die "Apple Music is not installed or not signed in; run: peel-hires setup (or peel-hires signin)"
+    fi
+    id=$(cmd_build) || { notify "Peel hi-res" "Building the update failed"; run_agent "build failed"; return 1; }
+    cur=$(root list | sed -n 's/^current=//p'); cur=${cur:-stock}
+    # A plain subshell, not an if condition, so set -e stops it at the first failure.
+    set +e
+    ( set -e; [ "$id" = "$cur" ] || cmd_activate "$id" --force --no-confirm; cmd_test; root confirm >&2 )
+    rc=$?
+    set -e
+    if [ "$rc" != 0 ]; then
+      log "release $id failed; switching back to the last confirmed release"
+      if [ "$id" != "$cur" ]; then cmd_rollback || log "switching back failed; run: peel-hires rollback"; fi
+      notify "Peel hi-res update failed" "Kept $cur. Report: $STATE/reports/last.json"
+      run_agent "tests failed on release $id"
+      return 1
+    fi
+    echo "$key" > "$STATE/seen"
+    remove_old_releases
+    notify "Peel hi-res updated" "Release $id passed all tests."
+  else
+    log "images, inputs and host software unchanged"
+  fi
+  update_apple
+  trim_android
+}
+
+# Apple Music updates come after a passing image and are tested again. Android refuses to
+# downgrade an app without wiping its data, so a bad version can only be reported, not undone.
+update_apple() {
+  local before after
+  before=$(apple_installed_version 2>/dev/null || true)
+  cmd_apple_update || { notify "Peel hi-res" "The Apple Music update failed; see peel-hires status"; return 0; }
+  after=$(apple_installed_version 2>/dev/null || true)
+  [ "$before" = "$after" ] && return 0
+  if cmd_test; then notify "Apple Music updated" "$before -> $after passed all tests."
+  else notify "Apple Music $after failed the tests" "Android can't downgrade it without wiping its data. Report: $STATE/reports/last.json"; return 1; fi
+}
+
+# --- Health -------------------------------------------------------------------------------------
+
+# True while Android sends audio to PipeWire, read on the host, so it works when adb doesn't.
+android_streaming() {
+  pactl -f json list sink-inputs 2>/dev/null | python3 -c 'import json, sys
+sys.exit(0 if any(s["properties"].get("application.name") == "Waydroid" and not s.get("corked") for s in json.load(sys.stdin)) else 1)'
+}
+
+# Run every few minutes by a timer. systemd restarts a session that exits; this catches an
+# Android that stays up but stops answering. Two failed checks in a row restart the session,
+# unless music plays or an update holds the lock.
+cmd_watchdog() {
+  systemctl --user -q is-active peel-hires-session@headless.service || systemctl --user -q is-active peel-hires-session@visible.service || return 0
+  exec 9>"$STATE/update.lock"; flock -n 9 || return 0
+  local strikes=$STATE/watchdog.strikes problem=
+  if ! session_running; then problem="the session is not running"
+  elif ! adb_connect; then problem="adb can't reach Android"
+  elif [ "$(ADB_TIMEOUT=10 A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != 1 ]; then problem="Android is not booted"
+  elif ! ADB_TIMEOUT=10 A shell pidof system_server >/dev/null 2>&1; then problem="system_server is not running"
+  fi
+  if [ -z "$problem" ]; then rm -f "$strikes"; return 0; fi
+  local n=$(( $(cat "$strikes" 2>/dev/null || echo 0) + 1 ))
+  echo "$n" > "$strikes"
+  log "watchdog: $problem (check $n)"
+  [ "$n" -ge 2 ] || return 0
+  # Only Android's own audio counts: a restart doesn't touch Peel's engine or the desktop.
+  android_streaming && { log "watchdog: Android is playing audio; not restarting"; return 0; }
+  rm -f "$strikes"
+  local arg=""
+  systemctl --user -q is-active peel-hires-session@visible.service && arg=--visible
+  # A subshell, because a failed start ends with die.
+  if ( cmd_session start $arg ); then notify "Peel hi-res restarted Android" "$problem"
+  else notify "Peel hi-res: Android does not start" "$problem; restarting failed. Try: peel-hires session start"; return 1; fi
+}
+
+# Removes releases that are neither active, confirmed, nor the fallback. Each is about 1 GB.
+remove_old_releases() {
+  local list keep id
+  list=$(root list) || return 0
+  keep=" $(sed -n 's/^\(current\|good\|previous\)=//p' <<<"$list" | tr '\n' ' ') "
+  for id in $(grep -o '"id":"[^"]*"' <<<"$list" | cut -d'"' -f4); do
+    [[ $keep == *" $id "* ]] || { log "removing old release $id"; root remove "$id" >&2 || true; }
+  done
+}
+
+# Deletes image copies nothing needs: stock Waydroid's images, through the root helper, and the
+# zips in this user's cache, which the helper keeps verified copies of.
+cmd_prune() {
+  remove_old_releases
+  root prune >&2 || die "the root helper could not prune"
+  if [ -d "$CACHE/downloads" ]; then log "deleting $CACHE/downloads ($(du -sh "$CACHE/downloads" | cut -f1))"; rm -rf "$CACHE/downloads"; fi
+}
+
+run_agent() {
+  [ "$AGENT" = claude ] || return 0
+  command -v claude >/dev/null || { log "AGENT=claude but claude is not installed"; return 0; }
+  log "asking the repair agent to look at it"
+  (cd "$HIRES" && claude -p "$(cat "$HIRES/agent/repair.md")
+
+Failure: $1
+Last report: $(cat "$STATE/reports/last.json" 2>/dev/null)" \
+    --allowedTools "Bash(peel-hires:*)" "Read" "Grep" "Glob" "Edit(manifest.conf)" \
+    > "$STATE/agent-$(date +%Y%m%d-%H%M%S).log" 2>&1) || true
+}
+
+cmd_status() {
+  root list
+  echo
+  root probe 2>/dev/null || echo "container: not running"
+  echo
+  systemctl --user list-timers peel-hires-update.timer --no-pager 2>/dev/null | sed -n 2p
+  [ -f "$STATE/reports/last.json" ] && python3 - "$STATE/reports/last.json" <<'EOF'
+import json, sys
+r = json.load(open(sys.argv[1]))
+print(f"last test: release {r['release']}: {'pass' if r['pass'] else 'FAIL'}")
+for t in r["tests"]: print(f"  {'pass' if t['pass'] else 'FAIL'}  {t['name']}")
+if r.get("memory_mb"): print("container memory (MB):", r["memory_mb"])
+EOF
+}
+
+case "${1:-help}" in
+  status)   cmd_status ;;
+  build)    cmd_build ;;
+  activate) shift; cmd_activate "$@" ;;
+  rollback) cmd_rollback ;;
+  test)     cmd_test ;;
+  update)   shift; cmd_update "$@" ;;
+  setup)    cmd_setup ;;
+  watchdog) cmd_watchdog ;;
+  prune)    cmd_prune ;;
+  trim)     trim_android ;;
+  session)  shift; cmd_session "$@" ;;
+  signin)   cmd_signin ;;
+  apple-update) shift; cmd_apple_update "$@" ;;
+  releases) root list ;;
+  remove)   shift; root remove "${1:?release id}" ;;
+  help|*) cat <<'EOF'
+peel-hires: Apple Music in hi-res through a slimmed Waydroid
+
+  status              releases, Android state, last test, memory
+  setup               first run: build and start a release, install Apple Music, sign in, test
+  update [--force]    check for new images and Apple Music, rebuild, test, keep or roll back
+  build               build a release from the newest Waydroid images (no switch)
+  activate ID         switch to a release; it becomes the fallback once Android boots on it
+                      (waits if music is playing; --force to override)
+  rollback            switch back to the last confirmed release
+  test                run the test suite against the running release
+  session start [--visible] | stop | status
+  signin              open Apple Music visibly to sign in; hides it again when done
+  apple-update        update the Apple Music app (checks Apple's signature)
+  releases, remove ID manage built releases
+  prune               delete old releases, stock Waydroid's images and cached image zips
+  trim                restart Apple Music and stop background apps, unless music plays
+  watchdog            check Android's health; run every 5 minutes by a timer
+EOF
+  ;;
+esac
