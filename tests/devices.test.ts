@@ -60,7 +60,7 @@ async function computer(name: string, announceEvery = 60000) {
     return inner(path, body);
   };
   const player = new DevicePlayer(undefined, () => {}, fake.engine, async () => { fake.state.started++; });
-  const network = new DeviceNetwork({ local: player.localPlayer(), dir, name, port: 0, discovery: false, announceEvery });
+  const network = new DeviceNetwork({ local: player.localPlayer(), dir, name, port: 0, discovery: false, announceEvery, allowOwnAddresses: true });
   player.attach(network);
   await network.start();
   cleanup.push(() => network.close());
@@ -575,4 +575,70 @@ test("a library song's favourite does not spill onto its catalog song or other l
   ];
   await model.refresh();
   expect(model.items.map(item => item.loved)).toEqual([true, false, false]);
+});
+
+test("a device whose first message after the handshake is large still connects", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  // Sixty devices of gossip make the first key exchange far larger than the handshake limit.
+  mac.network.merge([], Array.from({ length: 60 }, (_, index) => ({ id: `device-${String(index).padStart(4, "0")}-x`, name: `Device number ${index} with a long name`, port: 10770, addresses: ["10.1.2.3", "10.1.2.4", "10.1.2.5"] })), "someone");
+  await link(mac, main);
+  await waitFor(() => main.network.knownList().length >= 60, "the gossip");
+});
+
+test("a device that loses its listener stops handling devices", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  (mac.network as any).server.emit("error", Object.assign(new Error("too many files"), { code: "EMFILE" }));
+  expect(mac.network.active).toBe(false);
+  await waitFor(() => !main.network.online(mac.network.id), "the old connection closing");
+});
+
+test("a replaced connection also finishes what the other device asked", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  await link(mac, main);
+  const inner = (mac.fake.engine as any).transport;
+  (mac.fake.engine as any).transport = async (path: string, body?: any) => { if (body?.method === "exportPlayback") await Bun.sleep(600); return inner(path, body); };
+  const slow = main.network.request(mac.network.id, "/call", { method: "exportPlayback", args: [] });
+  await Bun.sleep(50);
+  const session = [...(mac.network as any).sessions.get(main.network.id)][0];
+  session.retire();
+  await expect(slow).resolves.toBeDefined();
+});
+
+test("forgetting devices starts claims again, and no device list grows past its limit", async () => {
+  const mac = await computer("Mac");
+  mac.network.adopt({ device: "someone-else", generation: 2 ** 40 - 1 });
+  await mac.network.forget();
+  expect(mac.network.claim).toEqual({ device: mac.network.id, generation: 1 });
+  for (let index = 0; index < 70; index++) mac.network.remember({ id: `device-${String(index).padStart(4, "0")}-x`, name: "x" });
+  expect(mac.network.knownList().length).toBe(64);
+});
+
+test("a move whose new device cannot confirm it paused leaves the old one paused", async () => {
+  const { moveMusic } = await import("../src/remote");
+  const source = fakeEngine(), destination = fakeEngine();
+  Object.assign(source.state, { items: [song("c1")], position: 0, playing: true });
+  const broken = async (path: string, body?: any) => {
+    if (body?.method === "importPlayback") { destination.state.playing = true; throw new Error("The playback engine returned HTTP 500."); }
+    if (body?.method === "pause") throw new Error("Peel's playback engine is not running.");
+    return (destination.engine as any).transport(path, body);
+  };
+  await expect(moveMusic((source.engine as any).transport, broken, "this computer", "main", true)).rejects.toThrow("Could not confirm");
+  expect(source.state.playing).toBe(false);
+});
+
+test("a device list never makes Peel connect to this computer itself", async () => {
+  const own = ownAddresses()[0];
+  if (!own) return;
+  const dir = await mkdtemp(join(tmpdir(), "peel-devices-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  let reached = false;
+  const service = (await import("node:net")).createServer(socket => { reached = true; socket.destroy(); });
+  const port: number = await new Promise(resolve => service.listen(0, "0.0.0.0", () => resolve((service.address() as any).port)));
+  cleanup.push(() => new Promise(resolve => service.close(resolve)));
+  const fake = fakeEngine(), player = new DevicePlayer(undefined, () => {}, fake.engine, async () => {});
+  const network = new DeviceNetwork({ local: player.localPlayer(), dir, name: "Mac", port: 0, discovery: false, announceEvery: 100 });
+  await network.start(); cleanup.push(() => network.close());
+  network.merge([], [{ id: "planted-device", name: "planted", port, addresses: [own] }], "someone");
+  await Bun.sleep(600);
+  expect(reached).toBe(false);
 });

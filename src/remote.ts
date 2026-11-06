@@ -227,8 +227,10 @@ export async function moveMusic(source: EngineTransport, destination: EngineTran
       await call(destination, "pause").catch(() => {});
       throw new Error(`Lost ${to} while moving the music. It is paused on ${from}. Check ${to}, then choose where to play.`);
     }
-    // The new device may have started before it failed. It stops before the old one plays again.
-    await call(destination, "pause").catch(() => {});
+    // The new device may have started before it failed. The old one plays again only once the new
+    // one confirmed it paused. The engine runs commands in order, so that pause follows the import.
+    const silent = await call(destination, "pause").then(() => true, () => false);
+    if (!silent) throw new Error(`Could not confirm that ${to} stopped after the move failed. It is paused on ${from}. Check ${to}, then choose where to play.`);
     if (playing) await call(source, "resume").catch(() => {});
     throw new Error(`Could not start the music on ${to}. It keeps playing on ${from}. ${error instanceof Error ? error.message : String(error)}`);
   }

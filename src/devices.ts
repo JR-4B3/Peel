@@ -99,6 +99,8 @@ export function deviceName() {
 // One encrypted connection to a paired device. Either side can ask the other.
 class Session {
   private sequence = 0;
+  // Requests from the other device still being answered.
+  private handling = 0;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
   closed = false;
   // A session replaced by a better one takes no new requests and closes once its answers are in.
@@ -106,7 +108,7 @@ class Session {
   retire() {
     this.retiring = true;
     const until = Date.now() + 130000;
-    const check = () => { if (this.closed) return; if (!this.pending.size || Date.now() > until) this.end(); else setTimeout(check, 500); };
+    const check = () => { if (this.closed) return; if (!this.pending.size && !this.handling || Date.now() > until) this.end(); else setTimeout(check, 500); };
     check();
   }
   constructor(readonly peer: { id: string; name: string; address?: string }, private cipher: Cipher, private send: (text: string) => void,
@@ -121,7 +123,9 @@ class Session {
       this.pending.delete(value.reply); clearTimeout(pending.timer);
       if (typeof value.error === "string") pending.reject(new Error(value.error)); else pending.resolve(value.value);
     } else if (typeof value?.id === "number" && typeof value.op === "string") {
-      this.handle(this, value.op, value.body).then(result => this.post({ reply: value.id, value: result ?? null }), error => this.post({ reply: value.id, error: message(error) }));
+      this.handling++;
+      this.handle(this, value.op, value.body).then(result => this.post({ reply: value.id, value: result ?? null }), error => this.post({ reply: value.id, error: message(error) }))
+        .finally(() => { this.handling--; });
     }
   }
 
@@ -241,8 +245,10 @@ class Line {
     for (let end = this.buffer.indexOf("\n"); end >= 0 && !this.ended; end = this.buffer.indexOf("\n")) {
       const line = this.buffer.slice(0, end);
       this.buffer = this.buffer.slice(end + 1);
+      if (line.length > this.limit) return this.close();
       this.onmessage(line);
     }
+    if (!this.ended && this.buffer.length > this.limit) this.close();
   }
   constructor(private socket: TcpSocket) {
     socket.setEncoding("utf8");
@@ -251,7 +257,10 @@ class Line {
     socket.on("data", (chunk: string) => {
       if (this.ended) return;
       this.buffer += chunk;
-      if (this.buffer.length > this.limit) return this.close();
+      // An unfinished message is held to this stage's limit. Finished lines are checked one by one
+      // when they are handled, since the handshake line can arrive together with the first message
+      // of the stage after it.
+      if (this.buffer.length > maxMessage || this.buffer.indexOf("\n") < 0 && this.buffer.length > this.limit) return this.close();
       // Messages are handled on the next turn of the event loop, not inside the socket's read
       // callback. On Windows, Bun stopped reading a socket that sent a request from inside its
       // read callback and got the reply back at once.
@@ -282,6 +291,8 @@ export interface NetworkOptions {
   // Tests connect devices directly instead of broadcasting.
   discovery?: boolean;
   announceEvery?: number;
+  // Tests run several devices on one computer and reach them at its own addresses.
+  allowOwnAddresses?: boolean;
 }
 
 export class DeviceNetwork extends EventEmitter {
@@ -341,8 +352,23 @@ export class DeviceNetwork extends EventEmitter {
 
   private activate() {
     this.active = true;
+    // Connections that arrived while this Peel was reading the keys start again.
+    this.epoch++;
+    for (const socket of this.sockets) if (socket.data.stage !== "session") socket.close();
     if (this.options.discovery !== false) this.discover();
     this.tick();
+    this.changed();
+  }
+
+  private deactivate() {
+    this.active = false;
+    this.epoch++;
+    this.pairing?.fail("Another Peel window handles devices now.");
+    for (const socket of [...this.sockets, ...this.clients]) socket.close();
+    for (const sessions of this.sessions.values()) for (const session of sessions) session.end();
+    this.sessions.clear(); this.summaries.clear();
+    try { this.socket?.close(); } catch {}
+    this.socket = undefined;
     this.changed();
   }
 
@@ -351,7 +377,8 @@ export class DeviceNetwork extends EventEmitter {
     this.id = validId(stored?.id) ? stored.id : randomUUID();
     this.groupKeys = Array.isArray(stored?.keys) ? stored.keys.filter(key => validId(key?.id) && typeof key.key === "string" && keyId(Buffer.from(key.key, "base64url")) === key.id) : [];
     if (!this.groupKeys.length) this.groupKeys = [newGroupKey()];
-    for (const value of Array.isArray(stored?.known) ? stored.known : []) { const device = readKnown(value); if (device && device.id !== this.id) this.known.set(device.id, device); }
+    this.known.clear();
+    for (const value of Array.isArray(stored?.known) ? stored.known.slice(0, 64) : []) { const device = readKnown(value); if (device && device.id !== this.id) this.known.set(device.id, device); }
     this.claim = validClaim(stored?.output) ? stored.output : { device: this.id, generation: 0 };
     if (!stored || stored.id !== this.id) await saveJson("devices.json", { id: this.id, keys: this.groupKeys, known: this.knownList(), output: this.claim }, this.dir).catch(() => {});
   }
@@ -442,6 +469,7 @@ export class DeviceNetwork extends EventEmitter {
   remember(device: Known) {
     if (device.id === this.id) return;
     const previous = this.known.get(device.id);
+    if (!previous && this.known.size >= 64) return;
     const addresses = [...new Set([...device.addresses ?? [], ...previous?.addresses ?? []].filter(validAddress))].slice(0, 8);
     const next: Known = { id: device.id, name: device.name, address: device.address ?? previous?.address, port: device.port ?? previous?.port, ...(addresses.length ? { addresses } : {}) };
     if (JSON.stringify(previous) === JSON.stringify(next)) return;
@@ -461,7 +489,8 @@ export class DeviceNetwork extends EventEmitter {
     for (const sessions of this.sessions.values()) for (const session of sessions) session.end();
     this.sessions.clear(); this.known.clear(); this.summaries.clear();
     this.groupKeys = [newGroupKey()];
-    this.claim = { device: this.id, generation: this.claim.generation + 1 };
+    // A new group starts its claims again, even after a paired device sent a huge generation.
+    this.claim = { device: this.id, generation: 1 };
     await this.persist();
     this.emit("claim", this.claim);
     this.changed();
@@ -527,7 +556,10 @@ export class DeviceNetwork extends EventEmitter {
     const waiting = [...this.known.values()].filter(device => device.port && (device.address || device.addresses?.length) && !this.online(device.id))
       .sort((a, b) => (this.attempts.get(a.id) ?? 0) - (this.attempts.get(b.id) ?? 0));
     for (const device of waiting) {
-      const candidates = [...new Set([...device.address ? [device.address] : [], ...device.addresses ?? []])];
+      // A device's list never makes Peel connect to this computer itself.
+      const own = this.options.allowOwnAddresses ? [] : ownAddresses();
+      const candidates = [...new Set([...device.address ? [device.address] : [], ...device.addresses ?? []])].filter(address => !own.includes(address));
+      if (!candidates.length) continue;
       const turn = this.turns.get(device.id) ?? 0;
       if (Date.now() - (this.connecting.get(device.id) ?? 0) < 5000) continue;
       this.turns.set(device.id, turn + 1);
@@ -625,7 +657,13 @@ export class DeviceNetwork extends EventEmitter {
     });
     // A port another Peel on this computer already uses, or a later error, closes this server.
     // tick() tries to listen again.
-    server.on("error", () => { try { server.close(); } catch {} if (this.server === server) this.server = undefined; });
+    server.on("error", () => {
+      try { server.close(); } catch {}
+      if (this.server !== server) return;
+      this.server = undefined;
+      // Another Peel window may take the port now, so this one stops handling devices.
+      if (this.active) this.deactivate();
+    });
     return new Promise<void>(resolve => {
       server.once("error", () => resolve());
       server.listen(this.port, "0.0.0.0", () => {
@@ -638,6 +676,8 @@ export class DeviceNetwork extends EventEmitter {
 
   private incoming(socket: Line, data: string) {
     const state = socket.data;
+    // Until this Peel has read the keys it owns, it accepts no handshake.
+    if (!this.active || state.epoch !== this.epoch) return socket.close();
     if (state.stage === "session") return state.session?.receive(data);
     if (state.stage === "pair") return state.pairing?.receive(data);
     if (data.length > 8192) return socket.close();
