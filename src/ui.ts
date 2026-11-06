@@ -564,13 +564,16 @@ export class PeelUI {
     this.title = new TextRenderable(ctx, { id: "now-playing", fg: colour.text, attributes: 1, flexShrink: 1, minWidth: 0, height: 1, truncate: true, selectable: false });
     this.favouriteButton = this.button("favourite", icon.heartOutline, "f", () => void model.toggleFavourite(), colour.faint);
     this.indicator = new TextRenderable(ctx, { id: "playback-indicator", fg: colour.faint, height: 1, flexGrow: 1, minWidth: 0, selectable: false, truncate: true });
-    nowPlaying.add(this.title); nowPlaying.add(this.favouriteButton); nowPlaying.add(this.indicator); deck.add(nowPlaying);
+    // The devices button sits at the top right of the player, under the popup it opens.
+    this.devicesButton = this.button("devices", icon.devices, "d", () => this.toggleDevices(), colour.faint);
+    this.devicesButton.flexShrink = 0;
+    nowPlaying.add(this.title); nowPlaying.add(this.favouriteButton); nowPlaying.add(this.indicator); nowPlaying.add(this.devicesButton); deck.add(nowPlaying);
     this.subtitle = new TextRenderable(ctx, { id: "now-playing-artist", fg: colour.muted, height: 1, width: "100%", truncate: true, selectable: false,
       onMouseDown: event => { const song = model.playing; if (event.button === 0 && song) { event.stopPropagation(); void model.openArtist(song); this.focusContent(); } } });
     deck.add(this.subtitle);
     this.progress = new TextRenderable(ctx, { id: "seek", content: "", fg: colour.accent, height: 1, width: "100%", selectable: false, onMouseDown: event => this.seekClick(event) });
     deck.add(this.progress);
-    this.controls = new BoxRenderable(ctx, { id: "controls", height: 1, flexDirection: "row", gap: 2, width: "100%" });
+    this.controls = new BoxRenderable(ctx, { id: "controls", height: 1, flexDirection: "row", gap: 2 });
     this.controls.add(this.button("previous", icon.previous, "p", () => void model.skip(-1)));
     this.playButton = this.button("play-pause", icon.play, "space", () => void model.act("/playback/toggle"));
     this.controls.add(this.playButton);
@@ -587,11 +590,7 @@ export class PeelUI {
     this.controls.add(new TextRenderable(ctx, { content: " ", width: 1, height: 1 }));
     this.lyricsButton = this.button("lyrics-toggle", icon.lyrics, "y", () => this.toggleLyrics(), colour.faint);
     this.controls.add(this.lyricsButton);
-    // The devices button sits at the right end, under the popup it opens.
-    this.controls.add(new BoxRenderable(ctx, { flexGrow: 1, height: 1 }));
-    this.devicesButton = this.button("devices", icon.devices, "d", () => this.toggleDevices(), colour.faint);
-    this.devicesButton.flexShrink = 0;
-    this.controls.add(this.devicesButton);
+
     deck.add(this.controls);
     this.playerPanel.add(deck); this.root.add(this.playerPanel);
 
