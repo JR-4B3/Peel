@@ -7,7 +7,7 @@ import { DevicePlayer, validHost } from "./remote";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { ensureCider } from "./startup";
-import { checkForUpdate, currentBuild } from "./update";
+import { checkForUpdate, currentBuild, restartCommand } from "./update";
 
 // Peel plays through its own engine. PEEL_PLAYER=cider uses Cider instead.
 const useCider = process.env.PEEL_PLAYER === "cider";
@@ -95,19 +95,38 @@ try {
     // shows the result, and choosing another channel checks it at once.
     const updates = (force: boolean) => {
       const channel = model.preferences.channel;
+      model.update = { ...model.update, checking: true }; model.changed();
       void checkForUpdate(channel, force).then(result => {
       if (channel !== model.preferences.channel) return;
-      model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message };
-      if (/is installed\./.test(result.message)) model.status = result.message;
+      const announce = result.ready && result.ready !== model.update.ready;
+      model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message, ready: result.ready, newEngine: result.newEngine };
+      if (announce) model.status = `Peel ${result.ready} is ready. Restart Peel from Settings to start it.`;
       model.changed();
       });
     };
     model.onChannel = () => { model.update = { ...model.update, message: "Checking for updates..." }; model.changed(); updates(true); };
+    model.onCheckUpdate = () => { model.update = { ...model.update, message: "Checking for updates..." }; updates(true); };
+    // A restart keeps this computer's engine, so the new Peel finds the music still playing. This
+    // process waits for the new one, which keeps the engine owned until the new Peel closes.
+    let restartInto: string | undefined;
+    model.onRestart = () => { if (model.update.ready) { restartInto = model.update.ready; renderer.destroy(); } };
+    const restart = async (version: string) => {
+      if (player instanceof DevicePlayer) player.detach();
+      if (process.stdin.isTTY) process.stdin.setRawMode(false);
+      process.stdin.pause();
+      const { cmd, cwd } = restartCommand(version);
+      const child = Bun.spawn(cmd, { cwd, stdio: ["inherit", "inherit", "inherit"], env: process.env });
+      process.exit(await child.exited);
+    };
     updates(false);
     let interval: ReturnType<typeof setInterval> | undefined;
     const ui = new PeelUI(renderer, model, () => { clearInterval(interval); ui.dispose(); renderer.destroy(); });
     // q, Ctrl+C, and closing the terminal window all destroy the renderer. The engine stops with it.
-    renderer.on("destroy", () => { startup.abort(); clearInterval(interval); ui.dispose(); if (!useCider) stopEngine(player as Engine); });
+    renderer.on("destroy", () => {
+      startup.abort(); clearInterval(interval); ui.dispose();
+      if (restartInto) void restart(restartInto).catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); });
+      else if (!useCider) stopEngine(player as Engine);
+    });
     interval = setInterval(() => void model.refresh(), 1000);
     void model.start();
     // Start the player alongside browsing, so it is usually ready by the first song.

@@ -98,7 +98,30 @@ export async function installRelease(release: Release, root: string, status: (te
 }
 
 // Keep installed versions for rollback and for other Peel windows still using them.
-export interface UpdateResult { build?: Build; message: string }
+// ready names an installed version other than the running one, which a restart starts.
+// newEngine says that version's playback engine differs, so restarting it stops the music.
+export interface UpdateResult { build?: Build; message: string; ready?: string; newEngine?: boolean }
+
+// The version <root>/current names when it is not this one. Another Peel window may have installed it.
+export async function readyVersion(dir = appDir): Promise<{ ready?: string; newEngine?: boolean }> {
+  const build = await currentBuild(dir), root = installRoot(dir);
+  if (!build || !root) return {};
+  const ready = (await readFile(join(root, "current"), "utf8").catch(() => "")).trim();
+  if (!ready || ready === build.version || !existsSync(join(root, "versions", ready, "version.json"))) return {};
+  const engine = async (folder: string) => {
+    const hasher = new Bun.CryptoHasher("sha256");
+    for (const name of ["engine.js", "main.js"]) hasher.update(await readFile(join(folder, "engine", name)).catch(() => new Uint8Array()));
+    return hasher.digest("hex");
+  };
+  return { ready, newEngine: await engine(dir) !== await engine(join(root, "versions", ready)) };
+}
+
+// The command that starts the ready version in this terminal, with the same arguments.
+export function restartCommand(version: string, dir = appDir) {
+  const root = installRoot(dir);
+  if (!root) throw new Error("A source folder has no other version to start.");
+  return { cmd: [process.execPath, "src/index.ts", ...process.argv.slice(2)], cwd: join(root, "versions", version) };
+}
 
 // Checks the channel and installs a newer build in the background. A source checkout only reports
 // its version. force skips the six-hour wait, for a channel the listener just chose.
@@ -115,20 +138,20 @@ async function update(channel: Channel, force: boolean, now: number, dir: string
   const label = `Peel ${build.version}`;
   const record = join(root, "update.json");
   const last = await readFile(record, "utf8").then(text => JSON.parse(text) as { checked: number; channel: Channel; running: string; installed?: string; message: string }).catch(() => undefined);
-  if (!force && last && last.channel === channel && last.running === build.version && now - last.checked < checkInterval) return { build, message: last.message };
+  if (!force && last && last.channel === channel && last.running === build.version && now - last.checked < checkInterval) return { build, message: last.message, ...await readyVersion(dir) };
   let message: string;
   try {
     const release = await latestRelease(channel);
     await installRelease(release, root);
     if (release.version === build.version) message = `${label}, the newest ${channel} build.`;
     else {
-      message = `Peel ${release.version} is installed. It starts the next time you open Peel.`;
+      message = `Peel ${release.version} is installed. Restart Peel from Settings, or it starts the next time you open Peel.`;
     }
   } catch (error) {
     message = `${label}. Could not update: ${error instanceof Error ? error.message : String(error)} Peel tries again later.`;
   }
   await saveJson("update.json", { checked: now, channel, running: build.version, message }, root).catch(() => {});
-  return { build, message };
+  return { build, message, ...await readyVersion(dir) };
 }
 
 // bun src/update.ts install [--channel nightly] [--root <folder>]: installs the newest release

@@ -1009,9 +1009,19 @@ export class PeelUI {
       },
       {
         id: "channel", lead: icon.update, name: "Updates", right: stable ? "Stable" : "Nightly",
-        description: update.message || (stable ? "Tested releases." : "Each night's build with the newest features. It can break."),
+        description: stable ? "Tested releases." : "Each night's build with the newest features. It can break.",
         activate: () => void model.setPreference({ channel: stable ? "nightly" : "stable" },
           stable ? "Updates: Nightly. Peel checks for the newest nightly build now." : "Updates: Stable. Peel checks for the newest stable release now."),
+      },
+      update.ready ? {
+        id: "update", lead: icon.update, name: "Restart to update", right: update.ready,
+        description: update.newEngine ? "The music stops and the queue clears, because the playback engine restarts too."
+          : "Restarts Peel in this window. The music keeps playing and the queue stays.",
+        activate: () => model.onRestart(),
+      } : {
+        id: "update", lead: icon.update, name: "Check for updates", right: update.checking ? "Checking..." : update.version ?? "",
+        description: update.message || "Peel checks every six hours and installs updates in the background.",
+        activate: () => { if (!update.checking) model.onCheckUpdate(); },
       },
       {
         id: "hearts", lead: icon.heart, leadColour: colour.heart, name: "Hearts in Favourite Songs", right: hearts ? "Shown" : "Hidden",
@@ -1128,8 +1138,9 @@ export class PeelUI {
     else if (key.name === "r") action = () => void model.act("/playback/repeat/toggle");
     else if (key.name === "m" && model.more) action = () => void model.load(true);
     if (action) { key.preventDefault(); key.stopPropagation(); action(); }
-    // Moving the highlight between a song and an album changes the keys that apply.
-    this.drawHints();
+    // Moving the highlight between a song and an album changes the keys that apply. Quitting
+    // and restarting have already destroyed the hints by now.
+    if (!this.disposed) this.drawHints();
   }
 
   dispose() {
