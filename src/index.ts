@@ -73,11 +73,15 @@ try {
     model.wake = wake;
     // Updates install in the background and start the next time Peel opens. The settings page
     // shows the result, and choosing another channel checks it at once.
-    const updates = (force: boolean) => void checkForUpdate(model.preferences.channel, force).then(result => {
+    const updates = (force: boolean) => {
+      const channel = model.preferences.channel;
+      void checkForUpdate(channel, force).then(result => {
+      if (channel !== model.preferences.channel) return;
       model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message };
       if (/is installed\./.test(result.message)) model.status = result.message;
       model.changed();
-    });
+      });
+    };
     model.onChannel = () => { model.update = { ...model.update, message: "Checking for updates..." }; model.changed(); updates(true); };
     updates(false);
     let interval: ReturnType<typeof setInterval> | undefined;
