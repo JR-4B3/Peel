@@ -1,0 +1,6 @@
+# Left out of release archives. Peel runs from src, engine, scripts, and assets.
+/.github export-ignore
+/tests export-ignore
+/docs export-ignore
+/mobile export-ignore
+.gitattributes export-ignore

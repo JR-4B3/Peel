@@ -44,4 +44,7 @@ export const icon = {
   left: "\u{F0141}",
   right: "\u{F0142}",
   lyrics: "\u{F036C}",
+  settings: "\u{F0493}",
+  quality: "\u{F062E}",
+  update: "\u{F06B0}",
 };

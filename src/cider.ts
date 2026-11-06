@@ -65,6 +65,8 @@ export class Cider implements Player {
   async queuePosition(): Promise<{ position: number; total: number }> { return (await this.request("/queue/position")).data; }
   async command(path: string, body: unknown = {}, method = "POST") {
     if (path === "/playback/play-item" || path === "/playback/play-collection" || path === "/queue/jump") this.starts++;
+    // Peel names the song a rating is meant for. Cider rates the playing song and cannot check it.
+    if (path === "/library/now-playing/rating" && body && typeof body === "object") { const { id: _, ...rest } = body as Record<string, unknown>; body = rest; }
     await this.request(path, body, method);
   }
 

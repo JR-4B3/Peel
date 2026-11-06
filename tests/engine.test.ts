@@ -121,9 +121,50 @@ test("a restarted engine's new key is read again", async () => {
   expect(calls.map(call => call.method)).toEqual(["next", "previous"]);
 });
 
+test("the engine reads and changes a library favourite through its library ID despite a catalog link", async () => {
+  const { engine, music } = await musicKit();
+  music.nowPlayingItem = { id: "i.creep", title: "Creep", artistName: "fakemink", playParams: { catalogId: "catalog.creep" } };
+  let value = 1;
+  const paths: string[] = [];
+  music.api = { music: async (path: string, _query: unknown, options?: any) => {
+    paths.push(path);
+    if (options?.fetchOptions) {
+      value = options.fetchOptions.method === "DELETE" ? 0 : 1;
+      return {};
+    }
+    return { data: { data: path.endsWith("library-songs") && value ? [{ attributes: { value } }] : [] } };
+  } };
+  expect(await engine.rating()).toBe(1);
+  await engine.rate(0, "i.creep");
+  expect(await engine.rating()).toBe(0);
+  expect(engine.state().playback.nowPlaying.inFavorites).toBe(false);
+  await engine.rate(1, "i.creep");
+  expect(await engine.rating()).toBe(1);
+  expect(engine.state().playback.nowPlaying.inFavorites).toBe(true);
+  expect(paths.every(path => path.startsWith("/v1/me/ratings/library-songs"))).toBe(true);
+});
+
 test("Peel hashes the engine's files the way the engine does", async () => {
   const { createHash } = await import("node:crypto");
   const read = (name: string) => Bun.file(new URL(`../engine/${name}`, import.meta.url)).bytes();
   const expected = createHash("sha256").update(await read("engine.js")).update(await read("main.js")).digest("hex");
   expect(await engineVersion()).toBe(expected);
+});
+
+test("the engine rates only the song Peel names, so a song that changed in between is not rated", async () => {
+  const { engine, music } = await musicKit();
+  const rated: string[] = [];
+  music.nowPlayingItem = { id: "i.now", attributes: {} };
+  music.api = { music: async (path: string) => { rated.push(path); return { data: { data: [] } }; } };
+  await expect(engine.rate(1, "i.other")).rejects.toThrow("changed");
+  expect(rated).toEqual([]);
+  await engine.rate(1, "i.now");
+  expect(rated).toEqual(["/v1/me/ratings/library-songs/i.now"]);
+});
+
+test("the engine switches MusicKit's stream between 256 and 64 kbps", async () => {
+  const { engine, music } = await musicKit();
+  expect(engine.quality("standard")).toBe(64);
+  expect(music.bitrate).toBe(64);
+  expect(engine.quality("high")).toBe(256);
 });

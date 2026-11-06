@@ -1,6 +1,6 @@
 # Peel
 
-Peel is an OpenTUI interface for Apple Music on Linux. Cider handles sign-in and audio playback. Peel reads search, your library, Home, and artist pages from Apple Music directly, so they appear while Cider is still starting. It uses Cider's local API for playback and the token of Apple's own web player for the library, so it does not need a separate Apple developer membership. You need Cider and an Apple Music subscription.
+Peel is an OpenTUI interface for Apple Music on Linux, macOS, and Windows. It plays music through its own engine, a hidden MusicKit JS player in castlabs' Electron. Peel reads search, your library, Home, and artist pages from Apple Music directly, so they appear while the engine is still starting. It uses the token of Apple's own web player, so it does not need a separate Apple developer membership. You need an Apple Music subscription. Cider can play instead of the engine.
 
 The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34ccfee77448`:
 
@@ -19,7 +19,7 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 
 ## Run
 
-Install [Bun](https://bun.sh) and Cider on the playback PC. Sign in to Apple Music in Cider once. Then:
+Peel runs on Linux, macOS, and Windows, on x64 and arm64 processors. Install [Bun](https://bun.sh), then run these in this folder:
 
 ```sh
 bun install --frozen-lockfile
@@ -27,13 +27,62 @@ bun run connect
 bun start
 ```
 
-For a `peel` command and a Peel entry in your application menu, run `bash scripts/install-local.sh` on the playback PC. Then use `peel --connect` and `peel`, or open Peel from the application menu. The launcher is installed to `~/.local/bin` and runs this checkout. The application entry opens the interface in Ghostty when available, then Alacritty or Konsole, otherwise your desktop's default terminal.
+The first `bun run connect` downloads Peel's playback engine for your system, about 110 MB, and checks it against its published checksums. It then starts the engine, which opens Apple's sign-in window. Sign in there once. Peel saves the Apple Music user token in its settings folder.
 
-Approve Peel's request in Cider. Peel requests playback, queue, library, audio, and account permissions. The account permission lets Peel copy Cider's Apple Music user token, which Peel uses to read your library from Apple. It does not request your Apple password. Cider's token is saved to `~/.config/peel/auth.json` and the Apple Music user token to `~/.config/peel/apple.json`, both with private file permissions. If you connected Peel before it read the library directly, run `bun run connect` once more to grant the account permission. Until then, Peel reads the library through Cider, so it appears once Cider has started. `peel --connect` opens Cider from its tray, so the approval dialog is visible even when Cider was hidden. `APPLE_MUSIC_USER_TOKEN` overrides the saved user token.
+### Windows and macOS
+
+On Windows and macOS, Widevine plays music only in a player signed through castlabs' EVS service. Peel downloads a copy of castlabs' Electron that its maintainer has already signed, from the `engine-v44.5.1+wvcus` release, so you need no castlabs account.
+
+To publish that release for a new Electron version, the maintainer runs `bun scripts/sign-engine.ts` once on a Mac and once on Windows. The script describes what it needs. It prints how long the signature stays valid. Publish again before that date. Peel compares its signed copy with the release's checksums once a day and downloads a renewed copy by itself. If the download fails, Peel keeps the copy it has.
+
+Only one publication can change the release at a time. The script holds a `publishing.lock` file on the release while it runs. It also stops without uploading if it cannot read the checksums already published. If a publication stopped without finishing, delete `publishing.lock` from the release before running it again.
+
+### Linux
+
+The engine runs on glibc distributions, such as Ubuntu, Debian, Fedora, Nobara, Arch, and openSUSE. castlabs does not build Electron for musl, so Alpine is not supported. NixOS needs nix-ld or another way to run downloaded binaries. Peel unpacks the engine itself, so it needs no unzip tool. On a desktop with a systemd user manager, the engine runs as the `peel-engine` user unit. Otherwise it runs as a detached process and writes its output to `engine.log` in its profile folder.
+
+### Launcher and menu entry
+
+- Linux: `bash scripts/install-local.sh` installs `~/.local/bin/peel` and an application menu entry. The entry opens Peel in Ghostty when available, then kitty, Alacritty, or Konsole, otherwise in your desktop's default terminal.
+- macOS: `bash scripts/install-local.sh` installs `~/.local/bin/peel` and `~/Applications/Peel.app`. The app opens Peel in Ghostty when installed, otherwise in Terminal. Add `~/.local/bin` to your PATH to use the `peel` command.
+- Windows: `powershell -ExecutionPolicy Bypass -File scripts\install-local.ps1` installs `peel.cmd` in `%LOCALAPPDATA%\Peel\bin`, adds that folder to your PATH, and adds Peel to the Start menu. The Start menu entry opens Peel in Windows Terminal when it is installed.
+
+Each launcher runs this checkout. Then use `peel --connect` and `peel`, or open Peel from the menu.
+
+### Release installs and updates
+
+`bun src/update.ts install` installs the newest stable release and the same launcher and menu entry, but the launcher runs the release rather than this checkout. Add `--channel nightly` for the nightly build. Releases go to `~/.local/share/peel` on Linux, `~/Library/Application Support/Peel` on macOS, and `%LOCALAPPDATA%\Peel` on Windows. Every version there shares one engine download.
+
+A release install checks its channel when Peel opens, at most every six hours. A newer build downloads, is checked against its published checksum, and installs beside the running one. It starts the next time you open Peel, and the version before it stays until the following update. The Settings page shows the result. `peel --version` prints the running build.
+
+| Channel | What it gets |
+| --- | --- |
+| Stable | Releases tagged `v<version>`, which pass the tests on Linux, macOS, and Windows. |
+| Nightly | `main` as of each night it changed, after the same tests. It has the newest features and can break. |
+
+A source checkout like this one updates through git and does not update itself.
+
+### Where Peel keeps its files
+
+| System | Settings and sign-in | Cache | Engine profile |
+| --- | --- | --- | --- |
+| Linux | `~/.config/peel` | `~/.cache/peel` | `~/.config/peel-engine` |
+| macOS | `~/Library/Application Support/peel` | `~/Library/Caches/peel` | `~/Library/Application Support/peel-engine` |
+| Windows | `%APPDATA%\peel` | `%LOCALAPPDATA%\peel` | `%LOCALAPPDATA%\peel-engine` |
+
+On Linux, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` move these folders. On every system, `PEEL_CONFIG_DIR`, `PEEL_CACHE_DIR`, and `PEEL_ENGINE_HOME` override them directly.
+
+Quitting Peel releases the engine, which quits once no other Peel uses it. If the terminal closes before Peel can release it, the engine finds within a second that no Peel is using it and quits. `bun run engine` runs the engine in the terminal with its log visible.
+
+### Cider instead of the engine
+
+With `PEEL_PLAYER=cider`, Peel plays through Cider. Install Cider and sign in to Apple Music there once. On Linux, Peel starts Cider and hides its window. On macOS and Windows, open Cider before Peel.
+
+Approve Peel's request in Cider. Peel requests playback, queue, library, audio, and account permissions. The account permission lets Peel copy Cider's Apple Music user token, which Peel uses to read your library from Apple. It does not request your Apple password. Cider's token is saved to `auth.json` and the Apple Music user token to `apple.json` in Peel's settings folder. On Linux and macOS, both files are readable only by you. If you connected Peel before it read the library directly, run `bun run connect` once more to grant the account permission. Until then, Peel reads the library through Cider, so it appears once Cider has started. `peel --connect` opens Cider from its tray, so the approval dialog is visible even when Cider was hidden. `APPLE_MUSIC_USER_TOKEN` overrides the saved user token.
 
 If the consent request times out or Cider closes the connection, run `bun run connect` again and approve the dialog promptly. Existing application tokens can also be supplied through `CIDER_API_TOKEN`. Generate one in Cider's external application access settings.
 
-Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font symbols, which Ghostty includes. Other terminals need a Nerd Font. Covers use the kitty graphics protocol in Ghostty and kitty. Other terminals show covers as coloured blocks. Peel does not paint a background, so the terminal's own background and transparency show through. Its colours match the DankMaterialShell palette used by Ghostty and Niri on the main PC. Mouse interaction requires a terminal that forwards mouse events. Shift-click behaviour for selecting terminal text depends on your terminal.
+Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font symbols, which Ghostty includes. Other terminals, including Windows Terminal and macOS Terminal, need a Nerd Font. Covers use the kitty graphics protocol in Ghostty and kitty. Other terminals show covers as coloured blocks. Peel does not paint a background, so the terminal's own background and transparency show through. Its colours match the DankMaterialShell palette used by Ghostty and Niri on the main PC. Mouse interaction requires a terminal that forwards mouse events. Shift-click behaviour for selecting terminal text depends on your terminal.
 
 ## Controls
 
@@ -70,7 +119,7 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Leave search | Escape | Select a sidebar entry |
 | Help / quit | `?` / `q`, or Ctrl+C | Keyboard |
 
-The bottom right of the window lists the keys for what has focus, such as play next, move, and remove on a queued song. `?` lists the other keys that apply on the current screen. It leaves out keys already shown beside a button, such as the player's, and filter and sort keys outside song lists. Plain playback shortcut letters remain text while the search input has focus. Quitting Peel with `q` or Ctrl+C, or closing its window, stops Peel's playback engine and the music. With `PEEL_PLAYER=cider`, quitting leaves Cider playing.
+The bottom right of the window lists the keys for what has focus, such as play next, move, and remove on a queued song. `?` lists the other keys that apply on the current screen. It leaves out keys already shown beside a button, such as the player's, and filter and sort keys outside song lists. Plain playback shortcut letters remain text while the search input has focus. Quitting Peel with `q` or Ctrl+C, or closing its window, stops Peel's playback engine and the music, unless another Peel, for example one opened over SSH, still uses the engine. The engine then keeps playing until the last Peel closes. With `PEEL_PLAYER=cider`, quitting leaves Cider playing.
 
 Selecting a song in a playlist or album starts that song directly, then adds its collection and restores its position in the displayed order. Cider adds only the first hundred songs of a collection, so a song further down starts at once and the next hundred loaded songs are queued after it in the background. The songs before it are not queued then, and selecting another song stops the queueing. The collection's first song never starts as an intermediate step. Next and Previous continue through the collection. A double-click on the same song starts it once. Shuffle can change the order afterwards. Manual Next and Previous still change tracks in repeat-one mode and preserve the repeat setting.
 
@@ -88,13 +137,19 @@ Filtering, sorting, or narrowing to favourites first loads the rest of the list,
 
 ## Settings
 
-Every song in Favourite Songs is a favourite, so its rows show no heart. Set `"heartsInFavourites": true` in `~/.config/peel/layout.json` to show them, then restart Peel.
+Settings, at the end of the sidebar, lists these. Enter switches the highlighted one, and Peel saves it in `layout.json` in its settings folder.
 
-Sidebar changes save to `~/.config/peel/layout.json`. Home is always first and cannot be moved or hidden. `XDG_CONFIG_HOME` selects another configuration root, and `PEEL_CONFIG_DIR` overrides Peel's directory directly. `CIDER_API_BASE` defaults to `http://127.0.0.1:10767`.
+| Setting | Choices |
+| --- | --- |
+| Audio quality | High, AAC at 256 kbps, or Standard, AAC at 64 kbps, which uses a quarter of the data. With Cider, Cider's own settings choose. Hi-Res Lossless is not available in Peel yet. |
+| Updates | Stable or Nightly. Choosing one checks it at once. |
+| Hearts in Favourite Songs | Every song in Favourite Songs is a favourite, so its rows show no heart unless this is on. |
 
-Peel keeps Home's shelves and downloaded covers in `~/.cache/peel`. `XDG_CACHE_HOME` and `PEEL_CACHE_DIR` change that location. New releases come from the latest release of each library artist with Apple's favourite flag, from the last 120 days or not yet released, newest first. Peel checks again after six hours, because the check reads every library artist. Recently played reloads each time Home opens.
+Sidebar changes save to `layout.json` in Peel's settings folder. Home is always first and cannot be moved or hidden. `CIDER_API_BASE` defaults to `http://127.0.0.1:10767`.
 
-Peel targets the v2 API in the installed Cider 4.0.17 build for playback, the queue, and the favourite heart. Everything else comes from `api.music.apple.com`. Peel reads the developer token from the script of Apple's web player at music.apple.com and caches it in `~/.cache/peel/apple-developer-token.json` until a day before it expires. When Apple rejects it, Peel fetches it again once. When Apple rejects the user token, Peel copies a fresh one from Cider if Cider is running. Apple does not document this use of its web player's token, and Apple can change or revoke it. Artist pages use the catalog artist linked to a song or album. Library items without a catalog link, such as uploads, fall back to a search for the artist's name, so a collaboration credit may open the first matching artist. Favourite Songs uses Apple's `favorited` playlist tag, so it also works when that playlist has a translated name. Apple returns a hundred items per request. Lists show the first hundred at once and load the next hundreds in the background, up to 500. Past that, each move near the end of the list loads another hundred.
+Peel keeps Home's shelves and downloaded covers in its cache folder. New releases come from the latest release of each library artist with Apple's favourite flag, from the last 120 days or not yet released, newest first. Peel checks again after six hours, because the check reads every library artist. Recently played reloads each time Home opens.
+
+Peel targets the v2 API in the installed Cider 4.0.17 build for playback, the queue, and the favourite heart. Everything else comes from `api.music.apple.com`. Peel reads the developer token from the script of Apple's web player at music.apple.com and caches it in `apple-developer-token.json` in its cache folder until a day before it expires. When Apple rejects it, Peel fetches it again once. When Apple rejects the user token, Peel copies a fresh one from Cider if Cider is running. Apple does not document this use of its web player's token, and Apple can change or revoke it. Artist pages use the catalog artist linked to a song or album. Library items without a catalog link, such as uploads, fall back to a search for the artist's name, so a collaboration credit may open the first matching artist. Favourite Songs uses Apple's `favorited` playlist tag, so it also works when that playlist has a translated name. Apple returns a hundred items per request. Lists show the first hundred at once and load the next hundreds in the background, up to 500. Past that, each move near the end of the list loads another hundred.
 
 Cider must keep running. Replacing its interface does not remove the playback engine's resource use. Playback format and subscription restrictions remain those of the running Cider engine.
 
@@ -111,6 +166,17 @@ On main's Niri desktop, Peel installs a startup rule before launching Cider. The
 Initial sign-in and `peel --connect` keep Cider visible so you can approve access. The tray icon must be enabled for automatic hiding. If hiding fails, Peel reports the problem and still connects to playback. You can also use **Hide** in Cider's tray menu. Closing Cider with **Close to Tray** disabled quits its engine. The hidden window still contains the playback engine; this setup is not a separate headless audio service.
 
 The main PC's desktop has a saved notification rule that mutes Cider popups. Other applications keep their existing notification settings.
+
+## Releases and CI
+
+GitHub Actions runs the type check and tests on Linux, macOS, and Windows for every pull request and every push to `main` (`.github/workflows/ci.yml`). GitHub's standard runners cost nothing for a public repository.
+
+- Nightly (`nightly.yml`) runs at 02:17 UTC. When `main` has new commits, it runs the tests and publishes `main` as the `nightly` prerelease. Start it from the Actions tab to build at once.
+- Release (`release.yml`) runs when you push a tag such as `v0.2.0`. It runs the tests and publishes the stable release. The tag must match the version in `package.json`.
+
+Both publish the same three files: `peel.tar.gz`, `SHASUMS256.txt`, and `version.json`. `bun scripts/package.ts --channel nightly` builds them locally. One archive serves every system, because Peel runs on Bun and each machine installs its own native packages after unpacking. A feature written in `src/` therefore works on every system without a separate build. Only the playback engine differs per system, and Peel downloads the right one itself.
+
+GitHub turns off scheduled workflows in a repository without activity for 60 days. A push or a manual run turns the nightly back on.
 
 ## Verification
 
