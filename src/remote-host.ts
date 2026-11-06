@@ -4,10 +4,12 @@ import { Engine, ensureEngine } from "./engine";
 
 // The SSH helper uses its own PID on the host. Client PIDs never enter the host's owner list.
 export async function serveRemote(lines: AsyncIterable<string>, reply: (value: unknown) => void, engine = new Engine(), ready: () => Promise<void> = () => ensureEngine(engine, text => reply({ status: text }))) {
+  // Attach before startup awaits, because readline otherwise drops early SSH requests.
+  const input = lines[Symbol.asyncIterator]();
   await ready();
   await engine.send("/retain", {});
   try {
-    for await (const line of lines) {
+    for await (const line of { [Symbol.asyncIterator]: () => input }) {
       let id: number | undefined;
       try {
         if (line.length > 8 * 1024 * 1024) throw new Error("Request too large");

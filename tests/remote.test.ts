@@ -1,5 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { createTestRenderer } from "@opentui/core/testing";
+import { PassThrough } from "node:stream";
+import { createInterface } from "node:readline";
 import { Engine } from "../src/engine";
 import { validHost } from "../src/remote";
 import { serveRemote } from "../src/remote-host";
@@ -94,4 +96,17 @@ test("settings switch controllers, show the host, and keep the previous target a
   await model.selectOutput("offline");
   expect(model.preferences.remote).toBe("main");
   expect(selected).toEqual(["main", "offline"]);
+});
+
+
+test("the host buffers the first SSH request while its engine starts", async () => {
+  const app = host(), stream = new PassThrough();
+  const lines = createInterface({ input: stream }), replies: any[] = [];
+  let release!: () => void;
+  const starting = new Promise<void>(resolve => { release = resolve; });
+  const serving = serveRemote(lines, reply => replies.push(reply), app.local, () => starting);
+  stream.write('{"id":1,"path":"/state"}\n');
+  await Bun.sleep(5); release();
+  stream.end(); await serving;
+  expect(replies).toMatchObject([{ id: 1, value: { ready: true } }]);
 });
