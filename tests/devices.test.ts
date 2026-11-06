@@ -1,5 +1,6 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtemp, rm } from "node:fs/promises";
+import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { createTestRenderer } from "@opentui/core/testing";
@@ -351,13 +352,14 @@ test("forgetting devices also refuses a handshake that started before", async ()
   const old = mac.network.groupKeys.map(key => ({ ...key }));
   const ephemeral = new Ephemeral(), hello = clientHello(ephemeral, "former-device", "former", old);
   let auth: unknown, closed = false;
-  const socket = new WebSocket(`ws://127.0.0.1:${mac.network.port}`);
-  socket.onopen = () => socket.send(JSON.stringify(hello));
-  socket.onmessage = event => { auth ??= clientFinish(ephemeral, old, hello, JSON.parse(String(event.data))).auth; };
-  socket.onclose = () => { closed = true; };
+  const socket = connect({ host: "127.0.0.1", port: mac.network.port }, () => socket.write(JSON.stringify(hello) + "\n"));
+  socket.setEncoding("utf8");
+  socket.on("data", (data: string) => { auth ??= clientFinish(ephemeral, old, hello, JSON.parse(data.split("\n")[0]!)).auth; });
+  socket.on("close", () => { closed = true; });
+  socket.on("error", () => {});
   await waitFor(() => !!auth, "the server's answer");
   await mac.network.forget();
-  if (!closed) socket.send(JSON.stringify(auth));
+  if (!closed) socket.write(JSON.stringify(auth) + "\n");
   await waitFor(() => closed, "the connection closing");
   expect(mac.network.online("former-device")).toBe(false);
 });
@@ -419,9 +421,11 @@ test("a device found on this network replaces a connection made another way", as
   const sessions = () => [...((mac.network as any).sessions.get(main.network.id) ?? [])].filter((session: any) => !session.closed);
   expect(sessions().map((session: any) => session.peer.address)).toEqual(["127.0.0.1"]);
   // main announces itself on this network at another address, as it would after Tailscale.
+  const other = ownAddresses()[0];
+  if (!other) return;
   (mac.network as any).connecting.clear();
-  (mac.network as any).connect(main.network.id, "localhost", main.network.port, true);
-  await waitFor(() => sessions().length === 1 && sessions()[0].peer.address === "localhost", "the switch");
+  (mac.network as any).connect(main.network.id, other, main.network.port, true);
+  await waitFor(() => sessions().length === 1 && sessions()[0].peer.address === other, "the switch");
   expect(mac.network.online(main.network.id)).toBe(true);
   await mac.network.request(main.network.id, "/call", { method: "pause", args: [] });
 });

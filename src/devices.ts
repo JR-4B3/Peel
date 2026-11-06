@@ -2,14 +2,14 @@ import { createSocket, type Socket } from "node:dgram";
 import { EventEmitter } from "node:events";
 import { randomUUID } from "node:crypto";
 import { hostname, networkInterfaces } from "node:os";
-import type { Server, ServerWebSocket } from "bun";
+import { connect as connectTcp, createServer, type Server, type Socket as TcpSocket } from "node:net";
 import { configDir, readCache, saveJson } from "./config";
 import type { EngineTransport } from "./engine";
 import { Cipher, Ephemeral, checkAuth, clientFinish, clientHello, commitment, keyId, newGroupKey, pairingKeys, serverHello, type GroupKey, type Hello, type PairOffer } from "./link";
 import type { Playback } from "./types";
 
 // Every Peel on the network is a device. Paired devices reach each other directly over an
-// encrypted WebSocket, and find each other through a small UDP broadcast. No device is in
+// encrypted TCP connection, and find each other through a small UDP broadcast. No device is in
 // charge: whichever device plays the music holds the queue, and every Peel controls it.
 
 export const devicePort = Number(process.env.PEEL_DEVICE_PORT ?? 10770);
@@ -192,6 +192,45 @@ class PairingFlow implements Pairing {
   }
 }
 
+// A TCP connection that carries one message per line. Messages are JSON or base64url, which never
+// contain a line break. Peel used WebSockets first, but Bun's WebSocket client on Windows stopped
+// delivering messages partway through a session.
+const maxMessage = 16 * 1024 * 1024;
+class Line {
+  data: SocketData = { stage: "start" };
+  onopen = () => {};
+  onmessage = (_text: string) => {};
+  onclose = () => {};
+  private buffer = "";
+  private ended = false;
+  constructor(private socket: TcpSocket) {
+    socket.setEncoding("utf8");
+    socket.setNoDelay(true);
+    socket.on("connect", () => this.onopen());
+    socket.on("data", (chunk: string) => {
+      if (this.ended) return;
+      this.buffer += chunk;
+      for (let end = this.buffer.indexOf("\n"); end >= 0 && !this.ended; end = this.buffer.indexOf("\n")) {
+        const line = this.buffer.slice(0, end);
+        this.buffer = this.buffer.slice(end + 1);
+        this.onmessage(line);
+      }
+      if (this.buffer.length > maxMessage) this.close();
+    });
+    socket.on("error", () => this.close());
+    socket.on("close", () => { this.ended = true; this.onclose(); });
+  }
+  get remoteAddress() { return (this.socket.remoteAddress ?? "").replace(/^::ffff:/, ""); }
+  send(text: string) { if (!this.ended) this.socket.write(text + "\n"); }
+  // Messages already written still go out, such as a refusal sent just before closing.
+  close() {
+    if (this.ended) return;
+    this.ended = true;
+    this.socket.end();
+    setTimeout(() => this.socket.destroy(), 1000).unref?.();
+  }
+}
+
 type SocketData = { stage: "start" | "auth" | "session" | "pair-reveal" | "pair"; epoch?: number; timer?: ReturnType<typeof setTimeout>; expect?: string; cipher?: Cipher; client?: Hello; session?: Session; ephemeral?: Ephemeral; offer?: PairOffer; pairing?: PairingFlow };
 
 export interface NetworkOptions {
@@ -221,7 +260,7 @@ export class DeviceNetwork extends EventEmitter {
   // device cannot keep a prompt on screen by changing its ID.
   private declined = 0;
   // The incoming pairing being set up, from its first message. Only one at a time.
-  private pairingSocket?: ServerWebSocket<SocketData>;
+  private pairingSocket?: Line;
   // Raised when the group keys change, so a handshake started with the old keys cannot finish.
   private epoch = 0;
   get keyEpoch() { return this.epoch; }
@@ -229,9 +268,9 @@ export class DeviceNetwork extends EventEmitter {
   private attempts = new Map<string, number>();
   private turns = new Map<string, number>();
   private missed = new WeakMap<Session, number>();
-  private sockets = new Set<ServerWebSocket<SocketData>>();
-  private clients = new Set<WebSocket>();
-  private server?: Server<SocketData>;
+  private sockets = new Set<Line>();
+  private clients = new Set<Line>();
+  private server?: Server;
   private socket?: Socket;
   private timers: ReturnType<typeof setInterval>[] = [];
   private stopped = false;
@@ -252,7 +291,7 @@ export class DeviceNetwork extends EventEmitter {
     for (const value of Array.isArray(stored?.known) ? stored.known : []) { const device = readKnown(value); if (device && device.id !== this.id) this.known.set(device.id, device); }
     this.claim = validClaim(stored?.output) ? stored.output : { device: this.id, generation: 0 };
     if (!stored || stored.id !== this.id) await this.persist();
-    this.listen();
+    await this.listen();
     if (this.options.discovery !== false) this.discover();
     const every = this.options.announceEvery ?? 3000;
     this.timers.push(setInterval(() => this.tick(), every));
@@ -497,33 +536,32 @@ export class DeviceNetwork extends EventEmitter {
   // The listening side, on every network address. Another Peel on this computer may already
   // listen, and this one tries again later.
   private listen() {
-    if (this.server || this.stopped) return;
-    try {
-      this.server = Bun.serve<SocketData>({
-        port: this.port, hostname: "0.0.0.0",
-        fetch: (request, server) => server.upgrade(request, { data: { stage: "start" } }) ? undefined : new Response("Peel device port", { status: 426 }),
-        websocket: {
-          maxPayloadLength: 16 * 1024 * 1024, idleTimeout: 120,
-          // A connection that has not finished its handshake in ten seconds is closed. Pairing has its own limit.
-          open: socket => {
-            if (this.sockets.size >= 64) return socket.close();
-            this.sockets.add(socket);
-            socket.data.epoch = this.epoch;
-            socket.data.timer = setTimeout(() => { if (socket.data.stage !== "session" && socket.data.stage !== "pair") socket.close(); }, 10000);
-          },
-          message: (socket, data) => this.incoming(socket, typeof data === "string" ? data : data.toString()),
-          close: socket => {
-            this.sockets.delete(socket); clearTimeout(socket.data.timer);
-            if (this.pairingSocket === socket) this.pairingSocket = undefined;
-            socket.data.session?.end(); socket.data.pairing?.closed();
-          },
-        },
+    if (this.server || this.stopped) return Promise.resolve();
+    const server = this.server = createServer(raw => {
+      const socket = new Line(raw);
+      // A connection that has not finished its handshake in ten seconds is closed. Pairing has its own limit.
+      if (this.sockets.size >= 64 || this.stopped) return socket.close();
+      this.sockets.add(socket);
+      socket.data.epoch = this.epoch;
+      socket.data.timer = setTimeout(() => { if (socket.data.stage !== "session" && socket.data.stage !== "pair") socket.close(); }, 10000);
+      socket.onmessage = data => this.incoming(socket, data);
+      socket.onclose = () => {
+        this.sockets.delete(socket); clearTimeout(socket.data.timer);
+        if (this.pairingSocket === socket) this.pairingSocket = undefined;
+        socket.data.session?.end(); socket.data.pairing?.closed();
+      };
+    });
+    return new Promise<void>(resolve => {
+      server.once("error", () => { server.close(); if (this.server === server) this.server = undefined; resolve(); });
+      server.listen(this.port, "0.0.0.0", () => {
+        const address = server.address();
+        if (address && typeof address === "object") this.port = address.port;
+        resolve();
       });
-      this.port = this.server.port ?? this.port;
-    } catch { this.server = undefined; }
+    });
   }
 
-  private incoming(socket: ServerWebSocket<SocketData>, data: string) {
+  private incoming(socket: Line, data: string) {
     const state = socket.data;
     if (state.stage === "session") return state.session?.receive(data);
     if (state.stage === "pair") return state.pairing?.receive(data);
@@ -585,15 +623,14 @@ export class DeviceNetwork extends EventEmitter {
     for (const [other, started] of this.connecting) if (Date.now() - started > 10000) this.connecting.delete(other);
     this.connecting.set(id, Date.now());
     const groups = this.groupKeys, epoch = this.epoch;
-    let socket: WebSocket;
-    try { socket = new WebSocket(`ws://${address.includes(":") ? `[${address}]` : address}:${port}`); } catch { return; }
+    let socket: Line;
+    try { socket = new Line(connectTcp({ host: address, port })); } catch { return; }
     this.clients.add(socket);
     const ephemeral = new Ephemeral(), hello = clientHello(ephemeral, this.id, this.name, groups);
     let session: Session | undefined;
     const timer = setTimeout(() => { if (!session) socket.close(); }, 6000);
     socket.onopen = () => socket.send(JSON.stringify(hello));
-    socket.onmessage = event => {
-      const data = String(event.data);
+    socket.onmessage = data => {
       if (session) return session.receive(data);
       let server: Hello;
       try { server = JSON.parse(data); } catch { return socket.close(); }
@@ -615,7 +652,6 @@ export class DeviceNetwork extends EventEmitter {
       void this.sync(opened).catch(() => {});
     };
     socket.onclose = () => { clearTimeout(timer); this.clients.delete(socket); session?.end(); };
-    socket.onerror = () => socket.close();
   }
 
   // Starts pairing with a nearby device. Both screens then show the same code.
@@ -623,14 +659,14 @@ export class DeviceNetwork extends EventEmitter {
     const device = this.nearby.get(id);
     if (!device) throw new Error("That device is no longer nearby.");
     if (this.pairing && this.pairing.state !== "done" && this.pairing.state !== "failed") throw new Error("Finish the pairing that is open first.");
-    const socket = new WebSocket(`ws://${device.address}:${device.port}`);
+    const socket = new Line(connectTcp({ host: device.address, port: device.port }));
     const ephemeral = new Ephemeral();
     const offer: PairOffer = { t: "pair", v: 1, id: this.id, name: this.name, commit: commitment(ephemeral) };
     const flow = this.pairing = new PairingFlow(device.id, device.name, false, text => socket.send(text), () => socket.close(), this, device.address);
     let stage: "offer" | "pair" = "offer";
-    socket.onopen = () => socket.send(JSON.stringify(offer));
-    socket.onmessage = event => {
-      const data = String(event.data);
+    let reached = false;
+    socket.onopen = () => { reached = true; socket.send(JSON.stringify(offer)); };
+    socket.onmessage = data => {
       if (stage === "pair") return flow.receive(data);
       let value: any; try { value = JSON.parse(data); } catch { return flow.fail("The other Peel sent an invalid message."); }
       if (value?.t === "error") return flow.fail(typeof value.error === "string" ? value.error : "Pairing failed.");
@@ -641,8 +677,7 @@ export class DeviceNetwork extends EventEmitter {
       stage = "pair";
       flow.ready(derived.code, derived.cipher("initiator"));
     };
-    socket.onclose = () => flow.closed();
-    socket.onerror = () => flow.fail(`Could not reach ${device.name}.`);
+    socket.onclose = () => reached ? flow.closed() : flow.fail(`Could not reach ${device.name}.`);
     this.changed();
     return flow;
   }
@@ -675,6 +710,7 @@ export class DeviceNetwork extends EventEmitter {
     for (const sessions of this.sessions.values()) for (const session of sessions) session.end();
     this.sessions.clear();
     try { this.socket?.close(); } catch {}
-    this.server?.stop(true);
+    this.server?.close();
+    this.server = undefined;
   }
 }

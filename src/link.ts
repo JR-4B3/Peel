@@ -32,7 +32,7 @@ export class Ephemeral {
   }
 }
 
-// AES-256-GCM in each direction, with the message count as nonce. WebSockets keep messages in
+// AES-256-GCM in each direction, with the message count as nonce. TCP keeps messages in
 // order, so a replayed, dropped, or reordered message fails to decrypt and ends the session.
 export class Cipher {
   private sent = 0n;
