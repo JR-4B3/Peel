@@ -2,6 +2,7 @@ import { readFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
+import { cacheDir } from "./config";
 import type { Media, Page, Playback, Player } from "./types";
 
 // Peel's own playback engine in engine/: MusicKit JS in castlabs' Electron. It writes its
@@ -97,7 +98,7 @@ export class Engine implements Player {
       "/playback/repeat/toggle": () => this.call("toggleRepeat"),
       "/queue/jump": () => this.call("jump", body.index),
       "/queue/move": () => this.call("move", body.from, body.to),
-      "/library/now-playing/rating": () => this.call("rate", method === "DELETE" ? 0 : body.rating),
+      "/library/now-playing/rating": () => this.call("rate", method === "DELETE" ? 0 : body.rating, ...(body.id ? [body.id] : [])),
     };
     const removed = method === "DELETE" && path.match(/^\/queue\/items\/(\d+)$/);
     const run = removed ? () => this.call("remove", Number(removed[1])) : commands[path];
@@ -119,8 +120,10 @@ export async function ensureEngine(engine: Engine, status: (text: string) => voi
   }
   if (!current) {
     status("Starting the playback engine...");
-    const environment = ["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
-      .filter(name => process.env[name]).map(name => `--setenv=${name}=${process.env[name]}`);
+    // The engine runs under the user manager, which does not have Peel's environment. It gets
+    // the same profile and cache folders this Peel uses, so both read the same key.json.
+    const environment = [`--setenv=PEEL_ENGINE_HOME=${engineHome}`, `--setenv=PEEL_CACHE_DIR=${cacheDir}`, ...["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]
+      .filter(name => process.env[name]).map(name => `--setenv=${name}=${process.env[name]}`)];
     // The user manager owns the engine, so it outlives Peel's terminal until stopEngine runs.
     // KillMode=mixed sends SIGTERM to Electron's main process only. When Chromium's helper
     // processes get it too, they exit first and Electron crashes with a core dump.

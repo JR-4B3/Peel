@@ -8,7 +8,9 @@ const os = require("node:os");
 const path = require("node:path");
 
 const port = Number(process.env.PEEL_ENGINE_PORT ?? 10768);
-const home = path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "peel-engine");
+// Peel passes the folders for this system. The fallbacks are Linux's.
+const home = process.env.PEEL_ENGINE_HOME ?? path.join(process.env.XDG_CONFIG_HOME ?? path.join(os.homedir(), ".config"), "peel-engine");
+const cacheDir = process.env.PEEL_CACHE_DIR ?? path.join(process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache"), "peel");
 // Apple accepts the web player's token only from music.apple.com. A tiny real page there
 // gives the engine that origin; its content policy allows MusicKit from Apple's CDN.
 const page = "https://music.apple.com/robots.txt";
@@ -29,7 +31,7 @@ function writeJson(name, value) {
 }
 
 async function developerToken() {
-  const cache = path.join(process.env.XDG_CACHE_HOME ?? path.join(os.homedir(), ".cache"), "peel", "apple-developer-token.json");
+  const cache = path.join(cacheDir, "apple-developer-token.json");
   try {
     const cached = JSON.parse(fs.readFileSync(cache, "utf8"));
     if (cached.expires - Date.now() > 86400000) return cached.token;
@@ -43,18 +45,32 @@ async function developerToken() {
   throw new Error("Apple Music's web player script no longer contains its developer token.");
 }
 
+const maxBody = 8 * 1024 * 1024;
+
 // Only the page's player methods can be called, by name, with JSON arguments.
 function serve(window, key) {
   const call = (method, args = []) => {
     if (!/^\w+$/.test(method)) throw new Error("Invalid method");
     return window.webContents.executeJavaScript(`window.peelEngine ? Promise.resolve(window.peelEngine.${method}(...${JSON.stringify(args)})) : { ready: false }`);
   };
-  http.createServer(async (request, response) => {
-    const reply = (status, value) => { response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value ?? null)); };
+  http.createServer((request, response) => {
+    const reply = (status, value) => {
+      if (response.headersSent || response.destroyed) return;
+      response.writeHead(status, { "content-type": "application/json" }); response.end(JSON.stringify(value ?? null));
+    };
+    // A client that disconnects mid-request must not take the engine down with it.
+    handle(request, reply).catch(error => { log(`request failed: ${error?.message ?? error}`); reply(500, { error: "Request failed" }); });
+  }).listen(port, "127.0.0.1", () => log(`listening on 127.0.0.1:${port}`));
+
+  async function handle(request, reply) {
     if (request.headers["x-peel-key"] !== key) return reply(403, { error: "Wrong engine key" });
-    let body = "";
-    for await (const chunk of request) body += chunk;
     try {
+      // Peel's largest request queues a few hundred songs. Anything far larger is refused.
+      let body = "";
+      for await (const chunk of request) {
+        body += chunk;
+        if (body.length > maxBody) return reply(413, { error: "Request too large" });
+      }
       if (request.method === "GET" && request.url === "/state") return reply(200, { ...await call("state"), version });
       if (request.method === "POST" && request.url === "/call") {
         const { method, args } = JSON.parse(body || "{}");
@@ -62,7 +78,7 @@ function serve(window, key) {
       }
       reply(404, { error: "Not found" });
     } catch (error) { reply(500, { error: String(error?.message ?? error) }); }
-  }).listen(port, "127.0.0.1", () => log(`listening on 127.0.0.1:${port}`));
+  }
 }
 
 app.whenReady().then(async () => {

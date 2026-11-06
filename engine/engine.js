@@ -117,8 +117,10 @@
     jump: index => music.changeToMediaAtIndex(index),
     queue: () => ({ position: music.queue.position, items: music.queue.items.map(item => ({ ...describe(item), added: pending().includes(item) })) }),
     rating: async () => await readRating(music.nowPlayingItem) ?? -1,
-    rate: async value => {
+    // Peel names the song it means. A song that changed since then is not rated.
+    rate: async (value, expected) => {
       const item = music.nowPlayingItem, path = ratingPath(item);
+      if (expected && item?.id !== expected) throw new Error("The playing song changed. Nothing was rated.");
       if (!path) throw new Error("This song cannot be rated.");
       const fetchOptions = value ? { method: "PUT", body: JSON.stringify({ type: "rating", attributes: { value } }) } : { method: "DELETE" };
       await music.api.music(path, {}, { fetchOptions });

@@ -127,3 +127,14 @@ test("Peel hashes the engine's files the way the engine does", async () => {
   const expected = createHash("sha256").update(await read("engine.js")).update(await read("main.js")).digest("hex");
   expect(await engineVersion()).toBe(expected);
 });
+
+test("the engine rates only the song Peel names, so a song that changed in between is not rated", async () => {
+  const { engine, music } = await musicKit();
+  const rated: string[] = [];
+  music.nowPlayingItem = { id: "i.now", attributes: {} };
+  music.api = { music: async (path: string) => { rated.push(path); return { data: { data: [] } }; } };
+  await expect(engine.rate(1, "i.other")).rejects.toThrow("changed");
+  expect(rated).toEqual([]);
+  await engine.rate(1, "i.now");
+  expect(rated).toEqual(["/v1/me/ratings/library-songs/i.now"]);
+});
