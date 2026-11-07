@@ -131,7 +131,7 @@ function engineMain(env: Record<string, string>) {
       return require(name);
     },
     process: { env }, __dirname: engineDir, __filename: join(engineDir, "main.js"), console: { log() {} }, Buffer,
-    setInterval: () => ({ unref() {} }), setTimeout, queueMicrotask,
+    setInterval: () => ({ unref() {} }), setTimeout, clearTimeout, queueMicrotask,
   });
   vm.runInContext(source.slice(0, source.indexOf("app.whenReady()")), context);
   return { context, server: () => server!, quits };
@@ -323,23 +323,58 @@ test("a playback command since the failure wins, and the player reloads at most 
   expect(app.done.at(-1)).toContain("failed");
 });
 
-test("a player operation that never finishes holds up the commands behind it for 20 seconds at most", async () => {
+test("a player that stops answering is reloaded with the queue paused, and its old operation can never start the music", async () => {
   const { context, server } = engineMain({});
+  vm.runInContext("stuckAfter = 50", context);
+  // Each reload starts a new page. An operation from an old page that finishes later changes nothing.
+  let page = 0, playing = false, finishOld!: () => void;
   const invoked: string[] = [];
-  let timers = 0;
-  context.setTimeout = (fn: () => void) => { timers++; queueMicrotask(fn); return { unref() {} }; };
-  context.serve({ webContents: { executeJavaScript: async (source: string) => {
-    const method = source.match(/peelEngine\.(\w+)\(/)![1]!;
-    invoked.push(method);
-    if (method === "play") await new Promise(() => {});
+  const old = new Promise<void>(resolve => { finishOld = resolve; });
+  context.serve({ loadURL: async () => { page++; invoked.push("reload"); }, webContents: { executeJavaScript: async (source: string) => {
+    const call = source.match(/peelEngine\.(\w+)\(\.\.\.(.*)\)\s*:/s);
+    if (!call) return;
+    const [, method, args] = call, mine = page;
+    if (method === "state") return { ready: true };
+    if (method === "exportPlayback") return { items: [{ id: "a" }, { id: "b" }], position: 1 };
+    invoked.push(method === "importPlayback" ? `importPlayback cue=${JSON.parse(args)[0].cue}` : method);
+    if (method === "play" && mine === 0) { await old; if (page === mine) playing = true; return null; }
+    if (method === "pause") playing = false;
+    if (method === "next") playing = true;
     return null;
   } } }, "test-key");
   await once(server(), "listening"); cleanup.push(() => server().close());
   const port = (server().address() as net.AddressInfo).port;
   const send = (method: string) => fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method, args: [] }) });
-  void send("play").catch(() => {});
-  const next = await send("next");
-  expect(next.status).toBe(200);
-  expect(invoked).toEqual(["play", "next"]);
-  expect(timers).toBeGreaterThan(0);
+  const [play, next, pause] = [send("play"), send("next"), send("pause")];
+  expect((await play).status).toBe(500);
+  expect((await next).status).toBe(200);
+  expect((await pause).status).toBe(200);
+  finishOld();
+  await Bun.sleep(20);
+  expect(playing).toBe(false);
+  expect(invoked).toEqual(["play", "reload", "volume", "importPlayback cue=true", "next", "pause"]);
+});
+
+test("a recovery whose reloaded player hangs is reloaded again with the queue paused, and later commands still run", async () => {
+  const { context, server } = engineMain({});
+  vm.runInContext("stuckAfter = 50", context);
+  const invoked: string[] = [];
+  context.serve({ loadURL: async () => { invoked.push("reload"); }, webContents: { executeJavaScript: async (source: string) => {
+    const call = source.match(/peelEngine\.(\w+)\(\.\.\.(.*)\)\s*:/s);
+    if (!call) return;
+    const [, method, args] = call;
+    if (method === "state") return { ready: true };
+    if (method === "exportPlayback") return { items: [{ id: "a" }, { id: "b" }], position: 0 };
+    const start = method === "importPlayback" ? JSON.parse(args)[0] : undefined;
+    invoked.push(start ? `importPlayback playing=${start.playing} cue=${start.cue}` : method);
+    // Starting the song again hangs, as it can when Apple's stream still fails.
+    if (start?.playing) await new Promise(() => {});
+    return null;
+  } } }, "test-key");
+  await once(server(), "listening"); cleanup.push(() => server().close());
+  const port = (server().address() as net.AddressInfo).port;
+  vm.runInContext("recover({ position: 1, time: 30 })", context);
+  const pause = await fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method: "pause", args: [] }) });
+  expect(pause.status).toBe(200);
+  expect(invoked).toEqual(["reload", "volume", "importPlayback playing=true cue=undefined", "reload", "volume", "importPlayback playing=false cue=true", "pause"]);
 });

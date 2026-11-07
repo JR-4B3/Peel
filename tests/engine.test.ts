@@ -299,3 +299,16 @@ test("a failure to load audio while playing asks to continue at the same place, 
   music.emit("mediaPlaybackError", { errorCode: "NETWORK_ERROR", message: "" });
   expect(recoveries()).toHaveLength(2);
 });
+
+test("a failure after a pause, a stop, or a move to another device does not ask to start the music again", async () => {
+  for (const after of ["pause", "stop", "toggle", "importPlayback"] as const) {
+    const { engine, music, logs } = await musicKit();
+    await engine.play([song("c1"), song("c2")], 0);
+    Object.assign(music, { playbackState: 2, currentPlaybackTime: 50, currentPlaybackDuration: 200, pause: async () => {}, stop: async () => {}, play: async () => {}, seekToTime: async () => {} });
+    music.emit("playbackTimeDidChange");
+    if (after === "importPlayback") await engine.importPlayback({ items: [song("x")], position: 0, playing: false, cue: true });
+    else await engine[after]();
+    music.emit("mediaPlaybackError", { errorCode: "MEDIA_SESSION", message: "loadSegmentError" });
+    expect(logs.filter(text => text.startsWith("peel:recover"))).toEqual([]);
+  }
+});

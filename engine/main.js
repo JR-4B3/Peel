@@ -72,6 +72,8 @@ const playbackMethods = new Set(["pause", "stop", "resume", "toggle", "next", "p
 let lastCommand = 0;
 let recover = () => {};
 let volume = readJson("volume.json", { volume: 0.5 }).volume;
+// How long a player operation may take before the player counts as stuck.
+let stuckAfter = 20000;
 
 // Loads the player page with Peel's engine in it. A player that failed is loaded anew, which gives
 // MusicKit a fresh audio element and DRM session.
@@ -83,18 +85,42 @@ async function load(window) {
 // Only the page's player methods can be called, by name, with JSON arguments.
 function serve(window, key) {
   let calling = Promise.resolve();
+  const evaluate = (method, args = []) => window.webContents.executeJavaScript(`Promise.resolve().then(() => window.peelEngine ? window.peelEngine.${method}(...${JSON.stringify(args)}) : { ready: false })`);
+  // Loads a fresh player page and gives it the listener's volume and a queue. Anything the old page
+  // was still doing ends with it, so it can never change playback later.
+  const reload = async start => {
+    await load(window);
+    for (const until = Date.now() + 30000; !(await evaluate("state"))?.ready;) {
+      if (Date.now() > until) throw new Error("the reloaded player did not become ready");
+      await new Promise(resolve => setTimeout(resolve, 200));
+    }
+    await evaluate("volume", [volume]);
+    if (start?.items?.length) await evaluate("importPlayback", [start]);
+  };
+  // A player operation that has not finished after stuckAfter, such as starting a song Apple cannot
+  // stream, means the player hangs. It is reloaded with the queue paused at the same song, and the
+  // commands behind the operation run on the fresh player.
+  const limited = operation => new Promise((resolve, reject) => {
+    let settled = false;
+    const finish = (done, value) => { if (!settled) { settled = true; clearTimeout(timer); done(value); } };
+    const timer = setTimeout(async () => {
+      if (settled) return;
+      settled = true;
+      log("the player stopped answering; reloading it");
+      const queue = await Promise.race([evaluate("exportPlayback"), new Promise(resolve => setTimeout(resolve, 2000))]).catch(() => undefined);
+      await reload(queue && { ...queue, playing: false, cue: true }).catch(error => log(`could not reload the player: ${error?.message ?? error}`));
+      reject(new Error("The player stopped answering and was reloaded. Press play to continue."));
+    }, stuckAfter);
+    operation.then(value => finish(resolve, value), error => finish(reject, error));
+  });
   const call = (method, args = []) => {
     if (!/^\w+$/.test(method)) throw new Error("Invalid method");
-    const run = () => evaluate(method, args);
-    if (method === "state") return run();
+    if (method === "state") return evaluate(method, args);
     if (playbackMethods.has(method)) lastCommand = Date.now();
-    const result = calling.catch(() => {}).then(run);
-    // A player operation that never finishes, such as starting a song Apple cannot stream, holds up
-    // the commands behind it for 20 seconds at most, so Next and Pause still work.
-    calling = Promise.race([result, new Promise(resolve => setTimeout(resolve, 20000).unref?.())]);
+    const result = calling.catch(() => {}).then(() => limited(evaluate(method, args)));
+    calling = result;
     return result;
   };
-  const evaluate = (method, args = []) => window.webContents.executeJavaScript(`Promise.resolve().then(() => window.peelEngine ? window.peelEngine.${method}(...${JSON.stringify(args)}) : { ready: false })`);
   // Continues after a failure to load audio, at most three times in ten minutes. Commands wait
   // behind it, and a command sent since the failure wins over it.
   const recoveries = [];
@@ -111,13 +137,7 @@ function serve(window, key) {
       if (!queue?.items?.[position]) return;
       recoveries.push(failed);
       log(`reloading the player to continue song ${position + 1} at ${Math.round(time)}s`);
-      await load(window);
-      for (const until = Date.now() + 30000; !(await evaluate("state"))?.ready;) {
-        if (Date.now() > until) throw new Error("the reloaded player did not become ready");
-        await new Promise(resolve => setTimeout(resolve, 200));
-      }
-      await evaluate("volume", [volume]);
-      await evaluate("importPlayback", [{ ...queue, position, time, playing: true }]);
+      await limited(reload({ ...queue, position, time, playing: true }));
     }).catch(error => log(`could not continue playback: ${error?.message ?? error}`)).finally(() => { recovering = false; });
   };
   http.createServer((request, response) => {

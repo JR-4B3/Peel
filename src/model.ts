@@ -89,6 +89,8 @@ export class Model extends EventEmitter {
   // command at most, which uses the newest value when it runs, so a burst of key presses never
   // turns into minutes of old commands.
   private waiting = new Map<string, { value: number; promise: Promise<boolean> }>();
+  // The target of a seek or volume change still running, so the next press builds on it.
+  private running = new Map<string, number>();
   private queueEdits = 0;
   // Counts queue reads and edits. A read shows its answer only if nothing newer started meanwhile.
   private queueRevision = 0;
@@ -605,14 +607,16 @@ export class Model extends EventEmitter {
 
   private async repeat(times: number, command: () => Promise<void>) { for (let i = 0; i < times; i++) await command(); }
 
-  // Adds a press to the command of its kind that is still waiting, or queues a new one.
-  private combine(kind: string, press: (value?: number) => number, run: (value: number) => Promise<void>) {
+  // Adds a press to the command of its kind that is still waiting, or queues a new one. With target,
+  // a new command builds on the one still running, whose result Peel has not read back yet.
+  private combine(kind: string, press: (value?: number) => number, run: (value: number) => Promise<void>, target = false) {
     const waiting = this.waiting.get(kind);
     if (waiting) { waiting.value = press(waiting.value); return waiting.promise; }
-    const entry = { value: press(), promise: Promise.resolve(false) };
+    const entry = { value: press(target ? this.running.get(kind) : undefined), promise: Promise.resolve(false) };
     this.waiting.set(kind, entry);
     const done = () => { if (this.waiting.get(kind) === entry) this.waiting.delete(kind); };
-    entry.promise = this.execute(async () => { done(); await run(entry.value); }).finally(done);
+    const finished = () => { done(); if (this.running.get(kind) === entry.value) this.running.delete(kind); };
+    entry.promise = this.execute(async () => { done(); if (target) this.running.set(kind, entry.value); await run(entry.value); }).finally(finished);
     return entry.promise;
   }
 
@@ -639,23 +643,24 @@ export class Model extends EventEmitter {
     const maximum = this.playback.time.duration, song = this.songKey();
     if (!(maximum > 0)) return Promise.resolve(false);
     return this.combine("seek", (position = this.playback.time.currentTime) => Math.min(maximum, Math.max(0, target(position))),
-      async position => { if (this.songKey() === song) await this.player.command("/playback/seek", { position }); });
+      async position => { if (this.songKey() === song) await this.player.command("/playback/seek", { position }); }, true);
   }
   volume(delta: number) {
-    return this.combine("volume", (volume = this.playback.volume) => Math.min(1, Math.max(0, volume + delta)), volume => this.player.command("/audio/volume", { volume }, "PATCH"));
+    return this.combine("volume", (volume = this.playback.volume) => Math.min(1, Math.max(0, volume + delta)), volume => this.player.command("/audio/volume", { volume }, "PATCH"), true);
   }
 
   // Skips add up while they wait: three presses of Next skip three songs, and Next then Previous
-  // skip none.
+  // skip none. Several skips are one jump, so a burst of presses is one command, not one per press.
   skip(direction: -1 | 1) {
     return this.combine("skip", (count = 0) => count + direction, async count => {
+      const mode = this.playback.repeatMode;
       if (!count) return;
-      if (this.playback.repeatMode !== "one") return this.repeat(Math.abs(count), () => this.player.command(count > 0 ? "/playback/next" : "/playback/previous", count < 0 ? { force: true } : {}));
-      // Cider's ordinary Next can repeat the current song in repeat-one mode. An explicit queue
-      // jump skips without changing the listener's repeat setting.
+      // Cider's ordinary Next can repeat the current song in repeat-one mode, so that mode jumps too.
+      if (Math.abs(count) === 1 && mode !== "one") return this.player.command(count > 0 ? "/playback/next" : "/playback/previous", count < 0 ? { force: true } : {});
       const queue = await this.player.queuePosition();
       if (queue.total < 2) return;
-      await this.player.command("/queue/jump", { index: ((queue.position + count) % queue.total + queue.total) % queue.total });
+      const index = mode === "none" ? Math.min(queue.total - 1, Math.max(0, queue.position + count)) : ((queue.position + count) % queue.total + queue.total) % queue.total;
+      if (index !== queue.position) await this.player.command("/queue/jump", { index });
     });
   }
 

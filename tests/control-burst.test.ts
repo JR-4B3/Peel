@@ -45,14 +45,15 @@ test("twenty seek presses during a slow seek run as one more seek, at the sum of
   expect(app.calls.map(call => [call.method, call.args[0]])).toEqual([["seek", 20], ["seek", 0]]);
 });
 
-test("waiting skips add up, and Previous then Next skip nothing", async () => {
+test("waiting skips add up into one jump, and Previous then Next skip nothing", async () => {
   const app = controller();
   const first = app.model.act("/playback/pause");
   await app.firstStarted;
   const pending = [app.model.skip(1), app.model.skip(1), app.model.skip(1), app.model.skip(-1)];
   app.release();
   await Promise.all([first, ...pending]);
-  expect(app.calls.map(call => call.method)).toEqual(["pause", "next", "next"]);
+  // Two skips are one jump, two songs ahead.
+  expect(app.calls.map(call => [call.method, call.args[0]])).toEqual([["pause", undefined], ["jump", 2]]);
   const again = controller();
   const busy = again.model.act("/playback/pause");
   await again.firstStarted;
@@ -109,4 +110,34 @@ test("a failed command does not stop later presses from running", async () => {
   expect(await first).toBe(false);
   expect(await app.model.seek(10)).toBe(true);
   expect(app.calls.map(call => call.method)).toEqual(["seek", "seek"]);
+});
+
+test("twenty Next presses during a slow command are one jump, so a later Pause is not held up", async () => {
+  const app = controller();
+  const first = app.model.act("/playback/pause");
+  await app.firstStarted;
+  const presses = Array.from({ length: 20 }, () => app.model.skip(1));
+  const pause = app.model.act("/playback/pause");
+  app.release();
+  await Promise.all([first, ...presses, pause]);
+  // The queue has five songs, so twenty skips stop at the last one.
+  expect(app.calls.map(call => [call.method, call.args[0]])).toEqual([["pause", undefined], ["jump", 4], ["pause", undefined]]);
+});
+
+test("a seek or volume press builds on the change still running", async () => {
+  const app = controller();
+  const first = app.model.seek(10);
+  await app.firstStarted;
+  const second = app.model.seek(10), louder = [app.model.volume(0.05)];
+  app.release();
+  await Promise.all([first, second, ...louder]);
+  expect(app.calls.filter(call => call.method === "seek").map(call => call.args[0])).toEqual([40, 50]);
+  const again = controller();
+  const busy = again.model.volume(0.05);
+  await again.firstStarted;
+  const next = again.model.volume(0.05);
+  again.release();
+  await Promise.all([busy, next]);
+  expect(again.calls[0]!.args[0]).toBeCloseTo(0.55);
+  expect(again.calls[1]!.args[0]).toBeCloseTo(0.6);
 });

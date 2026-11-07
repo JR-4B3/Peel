@@ -111,11 +111,13 @@
     },
     tokens: () => ({ userToken: music.musicUserToken, storefront: music.storefrontId }),
     failed: text => { notice = text; },
-    pause: () => music.pause(),
+    // A pause, a stop, or a move to another device means the listener stopped this music, so a
+    // failure that arrives afterwards does not start it again.
+    pause: () => { last = undefined; return music.pause(); },
     // Ends playback here and gives up Apple's stream, after the music moved to another device.
-    stop: () => music.stop(),
+    stop: () => { last = undefined; return music.stop(); },
     resume: () => music.play(),
-    toggle: () => music.playbackState === 2 ? music.pause() : music.play(),
+    toggle: () => { if (music.playbackState !== 2) return music.play(); last = undefined; return music.pause(); },
     next: () => music.skipToNextItem(),
     previous: () => music.skipToPreviousItem(),
     seek: position => music.seekToTime(position),
@@ -186,7 +188,9 @@
     },
     // Replaces this device's queue with one exported from another device. The volume stays this
     // device's own. A paused queue starts muted to reach its position, then pauses.
-    importPlayback: async ({ items = [], position = 0, added: marks = [], time = 0, playing = false, repeatMode = "none", shuffleMode = false } = {}) => {
+    // With cue, the queue is only set, as after reloading a player that stopped answering.
+    importPlayback: async ({ items = [], position = 0, added: marks = [], time = 0, playing = false, repeatMode = "none", shuffleMode = false, cue = false } = {}) => {
+      last = undefined;
       added = new WeakMap();
       if (!items.length) { await music.stop?.(); return; }
       const start = Math.min(Math.max(0, position), items.length - 1);
@@ -208,6 +212,7 @@
       const target = matched ? sources.findIndex(index => index >= start) : music.queue.position;
       music.queue.items.forEach((item, index) => { const source = matched ? sources[index] : index; if (marks.includes(source) && items[source]) added.set(item, items[source]); });
       music.repeatMode = Math.max(0, repeats.indexOf(repeatMode));
+      if (cue) return;
       const volume = music.volume;
       if (!playing) music.volume = 0;
       try {
@@ -249,7 +254,7 @@
     music.addEventListener("mediaPlaybackError", event => {
       const code = event?.errorCode ?? event?.name ?? "", text = event?.message ?? event?.description ?? "";
       log(`playback error ${code} ${text}`.trim());
-      if (code !== "NETWORK_ERROR" && text !== "loadSegmentError" || !last || Date.now() - last.at > 5000) return;
+      if (code !== "NETWORK_ERROR" && text !== "loadSegmentError" || !last || Date.now() - last.at > 2500) return;
       const ended = last.duration > 0 && last.time >= last.duration - 2, count = music.queue.items.length;
       const position = !ended || music.repeatMode === 1 ? last.position : music.repeatMode === 2 ? (last.position + 1) % count : last.position + 1;
       if (position < count) console.log(`peel:recover ${JSON.stringify({ position, time: ended ? 0 : last.time })}`);
