@@ -86,16 +86,22 @@ async function load(window) {
 function serve(window, key) {
   let calling = Promise.resolve();
   const evaluate = (method, args = []) => window.webContents.executeJavaScript(`Promise.resolve().then(() => window.peelEngine ? window.peelEngine.${method}(...${JSON.stringify(args)}) : { ready: false })`);
+  const within = (promise, milliseconds) => Promise.race([promise, new Promise(resolve => setTimeout(resolve, milliseconds))]);
+  // Counts player pages. Work started for an older page stops at its next step, so it can never
+  // act on the page that replaced it.
+  let generation = 0;
   // Loads a fresh player page and gives it the listener's volume and a queue. Anything the old page
   // was still doing ends with it, so it can never change playback later.
   const reload = async start => {
+    const mine = ++generation;
     await load(window);
     for (const until = Date.now() + 30000; !(await evaluate("state"))?.ready;) {
+      if (mine !== generation) return;
       if (Date.now() > until) throw new Error("the reloaded player did not become ready");
       await new Promise(resolve => setTimeout(resolve, 200));
     }
-    await evaluate("volume", [volume]);
-    if (start?.items?.length) await evaluate("importPlayback", [start]);
+    if (mine === generation) await evaluate("volume", [volume]);
+    if (mine === generation && start?.items?.length) await evaluate("importPlayback", [start]);
   };
   // A player operation that has not finished after stuckAfter, such as starting a song Apple cannot
   // stream, means the player hangs. It is reloaded with the queue paused at the same song, and the
@@ -107,8 +113,9 @@ function serve(window, key) {
       if (settled) return;
       settled = true;
       log("the player stopped answering; reloading it");
-      const queue = await Promise.race([evaluate("exportPlayback"), new Promise(resolve => setTimeout(resolve, 2000))]).catch(() => undefined);
-      await reload(queue && { ...queue, playing: false, cue: true }).catch(error => log(`could not reload the player: ${error?.message ?? error}`));
+      // Reading the queue and reloading are bounded too, so the commands behind always run.
+      const queue = await within(evaluate("exportPlayback").catch(() => undefined), 2000);
+      await within(reload(queue && { ...queue, playing: false, cue: true }), stuckAfter).catch(error => log(`could not reload the player: ${error?.message ?? error}`));
       reject(new Error("The player stopped answering and was reloaded. Press play to continue."));
     }, stuckAfter);
     operation.then(value => finish(resolve, value), error => finish(reject, error));
@@ -129,16 +136,17 @@ function serve(window, key) {
     if (recovering) return;
     recovering = true;
     const failed = Date.now();
-    calling = calling.catch(() => {}).then(async () => {
+    // The whole recovery is one bounded player operation.
+    calling = calling.catch(() => {}).then(() => limited((async () => {
       if (lastCommand >= failed) return;
       while (recoveries.length && failed - recoveries[0] > 10 * 60 * 1000) recoveries.shift();
       if (recoveries.length >= 3) return void await evaluate("failed", ["Playback stopped after repeated network errors. Press play to try again."]);
-      const queue = await evaluate("exportPlayback");
-      if (!queue?.items?.[position]) return;
+      const mine = generation, queue = await evaluate("exportPlayback");
+      if (mine !== generation || !queue?.items?.[position]) return;
       recoveries.push(failed);
       log(`reloading the player to continue song ${position + 1} at ${Math.round(time)}s`);
-      await limited(reload({ ...queue, position, time, playing: true }));
-    }).catch(error => log(`could not continue playback: ${error?.message ?? error}`)).finally(() => { recovering = false; });
+      await reload({ ...queue, position, time, playing: true });
+    })())).catch(error => log(`could not continue playback: ${error?.message ?? error}`)).finally(() => { recovering = false; });
   };
   http.createServer((request, response) => {
     const reply = (status, value) => {

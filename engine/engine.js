@@ -11,7 +11,11 @@
   let notice;
   // Peel reads the state every second, and MusicKit does not always report time changes, so both
   // remember where music plays.
-  const remember = () => { if (music?.playbackState === 2) last = { position: music.queue.position, time: music.currentPlaybackTime ?? 0, duration: music.currentPlaybackDuration ?? 0, at: Date.now() }; };
+  // Only music the listener wants playing counts. MusicKit can still report playing for a moment
+  // after a pause, and a paused import plays muted to reach its position.
+  let wanted = false;
+  const want = value => { wanted = value; if (!value) last = undefined; };
+  const remember = () => { if (wanted && music?.playbackState === 2) last = { position: music.queue.position, time: music.currentPlaybackTime ?? 0, duration: music.currentPlaybackDuration ?? 0, at: Date.now() }; };
   // The playing song's rating. A song shows as a favourite or not only once Apple has answered.
   let rated = { id: "", value: undefined, checked: 0 };
   // The queue entries the listener added, mapped to the Peel songs they came from. The rest of
@@ -113,11 +117,11 @@
     failed: text => { notice = text; },
     // A pause, a stop, or a move to another device means the listener stopped this music, so a
     // failure that arrives afterwards does not start it again.
-    pause: () => { last = undefined; return music.pause(); },
+    pause: () => { want(false); return music.pause(); },
     // Ends playback here and gives up Apple's stream, after the music moved to another device.
-    stop: () => { last = undefined; return music.stop(); },
-    resume: () => music.play(),
-    toggle: () => { if (music.playbackState !== 2) return music.play(); last = undefined; return music.pause(); },
+    stop: () => { want(false); return music.stop(); },
+    resume: () => { want(true); return music.play(); },
+    toggle: () => { const playing = music.playbackState === 2; want(!playing); return playing ? music.pause() : music.play(); },
     next: () => music.skipToNextItem(),
     previous: () => music.skipToPreviousItem(),
     seek: position => music.seekToTime(position),
@@ -128,6 +132,7 @@
     // A song inside its collection: the whole list is queued, starting at the selected song.
     // Songs the listener added and has not heard yet stay queued after it.
     play: async (items, index = 0) => {
+      want(true);
       const waiting = pending().map(item => added.get(item));
       added = new WeakMap();
       await music.setQueue({ items: items.map(resource), startWith: index, startPlaying: true });
@@ -137,6 +142,7 @@
     // songs and before the rest of the collection. Songs added while nothing is queued start playing.
     enqueue: async (items, next) => {
       if (!music.queue.items.length) {
+        want(true);
         await music.setQueue({ items: items.map(resource), startPlaying: true });
         music.queue.items.slice(1).forEach((item, index) => added.set(item, items[index + 1]));
         return;
@@ -165,6 +171,7 @@
       if (index > music.queue.position) music.queue.spliceQueueItems(index, 1);
     },
     jump: async (index, expected) => {
+      want(true);
       if (expected && music.queue.items[index]?.id !== expected) throw new Error("The queue changed on another controller. Try again.");
       await music.changeToMediaAtIndex(index);
     },
@@ -190,7 +197,7 @@
     // device's own. A paused queue starts muted to reach its position, then pauses.
     // With cue, the queue is only set, as after reloading a player that stopped answering.
     importPlayback: async ({ items = [], position = 0, added: marks = [], time = 0, playing = false, repeatMode = "none", shuffleMode = false, cue = false } = {}) => {
-      last = undefined;
+      want(false);
       added = new WeakMap();
       if (!items.length) { await music.stop?.(); return; }
       const start = Math.min(Math.max(0, position), items.length - 1);
@@ -219,6 +226,7 @@
         if (target >= 0 && target !== music.queue.position) await music.changeToMediaAtIndex(target);
         // The song to start with was left out, so its position does not apply to the next one.
         if (matched && sources[target] !== start) time = 0;
+        want(playing);
         await music.play();
         if (time > 1) await music.seekToTime(time);
         if (!playing) await music.pause();

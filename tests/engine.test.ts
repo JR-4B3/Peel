@@ -312,3 +312,24 @@ test("a failure after a pause, a stop, or a move to another device does not ask 
     expect(logs.filter(text => text.startsWith("peel:recover"))).toEqual([]);
   }
 });
+
+test("a pause counts at once, even while MusicKit still reports playing, and a paused import never counts", async () => {
+  for (const pause of ["pause", "stop", "toggle"] as const) {
+    const { engine, music, logs } = await musicKit();
+    Object.assign(music, { pause: async () => {}, stop: async () => {}, play: async () => { music.playbackState = 2; }, seekToTime: async () => {} });
+    await engine.play([song("c1"), song("c2")], 0);
+    Object.assign(music, { playbackState: 2, currentPlaybackTime: 50, currentPlaybackDuration: 200 });
+    engine.state();
+    await engine[pause]();
+    // MusicKit still says playing, and Peel reads the state.
+    engine.state(); music.emit("playbackTimeDidChange");
+    music.emit("mediaPlaybackError", { errorCode: "MEDIA_SESSION", message: "loadSegmentError" });
+    expect(logs.filter(text => text.startsWith("peel:recover"))).toEqual([]);
+  }
+  const { engine, music, logs } = await musicKit();
+  Object.assign(music, { pause: async () => {}, play: async () => { music.playbackState = 2; }, seekToTime: async () => {}, currentPlaybackTime: 30, currentPlaybackDuration: 200 });
+  await engine.importPlayback({ items: [song("c1")], position: 0, time: 30, playing: false });
+  engine.state(); music.emit("playbackTimeDidChange");
+  music.emit("mediaPlaybackError", { errorCode: "MEDIA_SESSION", message: "loadSegmentError" });
+  expect(logs.filter(text => text.startsWith("peel:recover"))).toEqual([]);
+});

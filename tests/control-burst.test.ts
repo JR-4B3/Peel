@@ -32,7 +32,7 @@ function controller() {
   });
   const model = new Model(api.library, player);
   model.connected = true; model.playback = structuredClone(playback);
-  return { model, calls, firstStarted, release: () => release(), failFirst: () => { fail = true; } };
+  return { model, calls, playback, firstStarted, release: () => release(), failFirst: () => { fail = true; } };
 }
 
 test("twenty seek presses during a slow seek run as one more seek, at the sum of the presses", async () => {
@@ -140,4 +140,17 @@ test("a seek or volume press builds on the change still running", async () => {
   await Promise.all([busy, next]);
   expect(again.calls[0]!.args[0]).toBeCloseTo(0.55);
   expect(again.calls[1]!.args[0]).toBeCloseTo(0.6);
+});
+
+test("a seek target for one song never carries over to the next song", async () => {
+  const app = controller();
+  const first = app.model.seek(10);
+  await app.firstStarted;
+  // Another song starts at five seconds while the first seek still runs.
+  app.playback.nowPlaying = { name: "Second", playParams: { id: "second" } }; app.playback.time.currentTime = 5;
+  app.model.playback = structuredClone(app.playback);
+  const second = app.model.seek(10);
+  app.release();
+  await Promise.all([first, second]);
+  expect(app.calls.map(call => call.args[0])).toEqual([40, 15]);
 });

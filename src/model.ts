@@ -642,7 +642,8 @@ export class Model extends EventEmitter {
   private seekBy(target: (position: number) => number) {
     const maximum = this.playback.time.duration, song = this.songKey();
     if (!(maximum > 0)) return Promise.resolve(false);
-    return this.combine("seek", (position = this.playback.time.currentTime) => Math.min(maximum, Math.max(0, target(position))),
+    // Seek targets belong to their song, so a target for one song never carries over to the next.
+    return this.combine(`seek:${song}`, (position = this.playback.time.currentTime) => Math.min(maximum, Math.max(0, target(position))),
       async position => { if (this.songKey() === song) await this.player.command("/playback/seek", { position }); }, true);
   }
   volume(delta: number) {
