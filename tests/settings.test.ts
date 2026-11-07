@@ -13,11 +13,13 @@ import { fixture } from "./fixture";
 const cleanup: (() => unknown)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 
-async function settings(engine: boolean) {
+async function settings(engine: boolean, lossless = false) {
   const api = fixture(); cleanup.push(() => api.server.stop(true));
   const qualities: string[] = [];
   // The fixture plays through Cider. Peel's engine also sets the stream quality.
   if (engine) (api.player as any).setQuality = async (quality: string) => { qualities.push(quality); };
+  // A hi-res host, on this computer or another, reports that it plays lossless.
+  if (lossless) (api.player as any).lossless = true;
   const app = await createTestRenderer({ width: 120, height: 36 }); cleanup.push(() => app.renderer.destroy());
   const saved: Preferences[] = [];
   const model = new Model(api.library, api.player, structuredClone(defaults), async value => { saved.push(structuredClone(value)); });
@@ -58,6 +60,35 @@ test("with Cider, the quality setting points to Cider and changes nothing", asyn
   await Bun.sleep(20);
   expect(app.saved).toEqual([]);
   expect(app.model.status).toContain("Cider");
+});
+
+test("with hi-res, the quality setting shows lossless and changes nothing", async () => {
+  const app = await settings(true, true);
+  const frame = app.captureCharFrame();
+  expect(frame).toContain("Hi-Res Lossless");
+  expect(frame).not.toContain("256 kbps");
+  app.mockInput.pressEnter();
+  await Bun.sleep(20); await app.flush();
+  expect(app.saved).toEqual([]);
+  // Only the saved quality the player gets when it connects, which a lossless player ignores.
+  expect(app.qualities).toEqual(["high"]);
+  expect(app.model.status).toContain("lossless");
+});
+
+test("the engine client follows the backend that answers", async () => {
+  const { Engine } = await import("../src/engine");
+  let version = "hires";
+  const calls: unknown[] = [];
+  const engine = new Engine(undefined, async (path, body) => { if (path === "/state") return { ready: true, signIn: false, version }; calls.push(body); return null; });
+  await engine.state();
+  expect(engine.lossless).toBe(true);
+  await engine.setQuality("standard");
+  expect(calls).toEqual([]);
+  version = "web-engine-hash";
+  await engine.state();
+  expect(engine.lossless).toBe(false);
+  await engine.setQuality("standard");
+  expect(calls).toEqual([{ method: "quality", args: ["standard"] }]);
 });
 
 test("a started engine gets the saved quality", async () => {

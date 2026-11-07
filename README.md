@@ -17,6 +17,7 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 - Mouse clicks and keyboard shortcuts control the same actions.
 - `y` shows the playing song's lyrics, beside the songs in wide windows and in their place otherwise.
 - Every Peel on the same network is a device, like Spotify Connect. `d` opens a small popup above the player that lists them. Choosing one moves the music there. See [Devices](#devices).
+- On Linux, Peel plays Hi-Res Lossless through Apple Music's Android app in a slimmed Waydroid, up to 24-bit/192 kHz. See [Hi-res playback](#hi-res-playback).
 
 ## Run
 
@@ -65,6 +66,14 @@ A release install checks its channel when Peel opens, at most every six hours. A
 
 A source checkout like this one updates through git and does not update itself.
 
+### Hi-res playback
+
+Apple's web player, and so Peel's engine, streams AAC. Hi-Res Lossless is decrypted only inside Apple's own apps. On Linux, [hires/](hires/README.md) runs Apple Music's Android app in a slimmed Waydroid on an invisible display, and its audio reaches PipeWire unchanged. Set it up once as `hires/README.md` describes, which needs sudo once.
+
+Once `peel-hires setup` has passed its tests, Peel plays through Android by itself. The web engine does not start, which saves its memory. `PEEL_PLAYER=web` plays through the web engine instead. Search, the library, remote control, and moving music between devices work the same. A small host process, the `peel-hires-host` user unit, speaks the engine's protocol to Peel and controls Apple Music's media session through a controller that `peel-hires controller` starts inside Android. Commands take a few milliseconds, and a new queue starts in about 50 ms once Android runs. The first start boots Android, which takes about 37 seconds, because releases leave out SystemUI (see hires/README.md).
+
+Android mixes at each song's own rate, from 44.1 to 192 kHz, so every song reaches PipeWire unchanged. That needs the rate helper, which `sudo hires/install.sh $USER` installs; without it Android mixes at 192 kHz and upsamples other songs. The volume control sets Android's media volume in 1% steps. Any volume below 100% scales the samples, wherever it happens: in Android, in Peel, or in PipeWire. Only a DAC or amplifier with its own volume control leaves them unchanged, so keep Peel at 100% when that matters. A song that is only in your library, because Apple took it out of its catalog, plays as the catalog's recording with the same title, artist and length when there is one; otherwise it is skipped. The web engine still renews Peel's Apple sign-in when Apple rejects it.
+
 ### Where Peel keeps its files
 
 | System | Settings and sign-in | Cache | Engine profile |
@@ -103,6 +112,7 @@ Use a terminal of at least 48 columns and 24 rows. Peel's icons are Nerd Font sy
 | Jump through a long song list | Page Up / Page Down, Home / End | Scroll, three songs at a time |
 | Back from an album, playlist, or artist | Escape or Backspace | Back |
 | Show the cover large, the open album's or else the playing song's | `c`. Escape or `c` closes it | The cover beside an album's name or in the player |
+| Show the playing song's lyrics | `y`. On narrow windows Escape closes them too | The microphone in the player |
 | Favourite the current song | `f` | Heart |
 | Favourite the open album | `l` | Favourite, beside Play |
 | Add the highlighted song, album, or playlist to the queue, after the songs already added | `e` | |
@@ -129,6 +139,8 @@ The bottom right of the window lists the keys for what has focus, such as play n
 Selecting a song in a playlist or album starts that song directly, then adds its collection and restores its position in the displayed order. Cider adds only the first hundred songs of a collection, so a song further down starts at once and the next hundred loaded songs are queued after it in the background. The songs before it are not queued then, and selecting another song stops the queueing. The collection's first song never starts as an intermediate step. Next and Previous continue through the collection. A double-click on the same song starts it once. Shuffle can change the order afterwards. Manual Next and Previous still change tracks in repeat-one mode and preserve the repeat setting.
 
 Left and Right move between covers on Home, Albums, Artists, and artist pages, and seek in song lists. On Home and artist pages, each row scrolls sideways. Click the arrows beside a row's title to page through it. On an artist page, Down from the last top song moves into the album rows, and Up from the first row returns to the songs.
+
+Lyrics follow the song line by line. Peel uses Apple Music's time-synced lyrics, and LRCLIB's when Apple has none. Lyrics without timing scroll with the song's progress. Windows at least 110 columns wide show them beside the music; narrower windows show them in its place. Peel fetches lyrics only while the pane is open and redraws it only when the sung line changes, so a closed pane costs nothing.
 
 Apple Music does not report how often you played a song, so an artist page shows Apple's top songs for that artist, its most played songs across Apple Music. Selecting one plays that song. Search shows up to three matching artists above the songs and albums.
 

@@ -286,7 +286,15 @@ export class Engine implements Player {
   }
 
   private call(method: string, ...args: unknown[]) { return this.send("/call", { method, args }); }
-  state(): Promise<State> { return this.send("/state"); }
+  // Whether the player that answered last plays Apple's lossless stream. The hi-res host says so
+  // in its state, whether it runs on this computer, a paired device, or an SSH host. Apple Music's
+  // Android app then chooses the quality, and Peel's AAC setting does not apply.
+  lossless = false;
+  async state(): Promise<State> {
+    const state: State = await this.send("/state");
+    this.lossless = state?.version === "hires";
+    return state;
+  }
   async quit() { await this.send("/quit", {}, false); }
   async release() { await this.send("/release", {}, false); }
 
@@ -297,7 +305,7 @@ export class Engine implements Player {
   }
 
   appleTokens(): Promise<{ userToken: string; storefront?: string }> { return this.call("tokens"); }
-  async setQuality(quality: "high" | "standard") { await this.call("quality", quality); }
+  async setQuality(quality: "high" | "standard") { if (!this.lossless) await this.call("quality", quality); }
   async rating(): Promise<number> { return await this.call("rating") ?? 0; }
 
   // The songs the listener added that have not played yet. The rest of the playing collection is not listed.

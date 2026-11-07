@@ -1,6 +1,7 @@
 import { existsSync } from "node:fs";
 import { createInterface } from "node:readline";
 import { Engine, ensureEngine } from "./engine";
+import { Hires, ensureHires, hiresSelected } from "./hires";
 
 // The SSH helper uses its own PID on the host. Client PIDs never enter the host's owner list.
 // While the helper runs, the host's engine keeps playing. Once the controller and every Peel on
@@ -35,6 +36,10 @@ export async function runRemoteHost() {
     }
   }
   const lines = createInterface({ input: process.stdin });
-  try { await serveRemote(lines, value => process.stdout.write(JSON.stringify(value) + "\n")); }
+  const reply = (value: unknown) => process.stdout.write(JSON.stringify(value) + "\n");
+  // The host's own player: hi-res where its pipeline is installed, otherwise the web engine.
+  const hires = hiresSelected();
+  const engine = hires ? new Hires() : new Engine();
+  try { await serveRemote(lines, reply, engine, () => (hires ? ensureHires : ensureEngine)(engine, text => reply({ status: text }))); }
   finally { lines.close(); }
 }

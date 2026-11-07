@@ -3,6 +3,7 @@ import { AppleMusic, type AppleOptions } from "./apple";
 import { Cider } from "./cider";
 import { cacheDir, readAppleSignIn, readCache, readPreferences, readToken, saveJson } from "./config";
 import { Engine, ensureEngine, stopEngine } from "./engine";
+import { Hires, ensureHires, hiresSelected } from "./hires";
 import { DevicePlayer, validHost } from "./remote";
 import { DeviceNetwork } from "./devices";
 import { Model } from "./model";
@@ -10,19 +11,21 @@ import { PeelUI } from "./ui";
 import { ensureCider } from "./startup";
 import { checkForUpdate, currentBuild, readyVersion, restartCommand } from "./update";
 
-// Peel plays through its own engine. PEEL_PLAYER=cider uses Cider instead.
+// Peel plays through its own engine. PEEL_PLAYER=cider uses Cider instead. Where the hi-res
+// pipeline (hires/) is installed, Apple Music's Android app plays in hi-res unless PEEL_PLAYER=web.
 const useCider = process.env.PEEL_PLAYER === "cider";
+const useHires = hiresSelected();
 
 try {
   if (process.argv.includes("--remote-host")) {
     await (await import("./remote-host")).runRemoteHost();
   } else if (process.argv.includes("--stop-host")) {
-    await new Engine().quit();
+    await Promise.allSettled([new Engine().quit(), new Hires().quit()]);
   } else if (process.argv.includes("--version")) {
     const build = await currentBuild();
     console.log(build ? `Peel ${build.version} (${build.channel}, ${build.commit.slice(0, 7)}, built ${build.date})` : "Peel from a source folder");
   } else if (process.argv.includes("--help")) {
-    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\n\nSet PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
+    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\n\nWhere hi-res (hires/) is installed, Peel plays through it. Set PEEL_PLAYER=web for the web engine,\nor PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
   } else if (process.argv.includes("--connect") && useCider) {
     await ensureCider(new Cider().base, "", false, console.log);
     console.log("Approve Peel's access request in Cider. Waiting up to two minutes...");
@@ -67,7 +70,7 @@ try {
       };
       wake = () => ensureCider(cider.base, token, true, status, startup.signal);
     } else {
-      const engine = player = new DevicePlayer(preferences.remote, status);
+      const engine = player = useHires ? new DevicePlayer(preferences.remote, status, new Hires(), ensureHires) : new DevicePlayer(preferences.remote, status);
       // Without a saved sign-in, Peel waits for the engine, which has one.
       options = {};
       wake = () => engine.ensure(startup.signal);
@@ -76,8 +79,20 @@ try {
     const library = new AppleMusic(signIn.userToken, {
       ...options, storefront: signIn.storefront,
       renewUser: async () => {
-        if (!useCider) await model.ensurePlayback();
-        const fresh = await player.appleTokens();
+        // The hi-res player signs in inside Android and has no token for Peel. This computer's web
+        // engine renews it then, also when the player is a hi-res host reached over SSH. An engine
+        // started only for this is released afterwards; one that was running keeps running.
+        const viaWebEngine = async () => {
+          const web = new Engine(), running = await web.state().then(() => true, () => false);
+          try { await ensureEngine(web, status, startup.signal); return await web.appleTokens(); }
+          finally { if (!running) stopEngine(web); }
+        };
+        let fresh: { userToken: string; storefront?: string };
+        if (useHires) fresh = await viaWebEngine();
+        else {
+          if (!useCider) await model.ensurePlayback();
+          fresh = await player.appleTokens().catch(error => useCider ? Promise.reject(error) : viaWebEngine());
+        }
         await saveJson("apple.json", fresh);
         return fresh.userToken;
       },

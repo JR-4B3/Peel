@@ -1,0 +1,7 @@
+[Unit]
+Description=Health check for Peel's hi-res Android
+
+[Service]
+Type=oneshot
+ExecStart=%h/.local/bin/peel-hires watchdog
+Nice=10
