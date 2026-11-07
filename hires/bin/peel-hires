@@ -186,8 +186,18 @@ latest() { root latest || die "could not read Waydroid's image list"; }
 # Waydroid, LXC or kernel update can break playback without the images changing.
 host_versions() { { waydroid --version; lxc-start --version; uname -r; } 2>/dev/null | tr '\n' ' '; }
 
-# Hash of everything a release is built from besides the images, so changes to any of it rebuild.
-inputs_hash() { cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$HIRES/android/audio_hw.c" "$HIRES/android/build-hal.sh" "$HIRES/android/control/RateServe.java" | sha256sum | cut -c1-8; }
+# Everything a release is built from besides the images. The root helper builds the release, so a
+# new helper, which may add to releases, counts too. The update compares a hash of these files to
+# decide whether to build; cmd_build hashes what they compile to, to name the release.
+build_sources() {
+  echo "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$HIRES/android/audio_hw.c" \
+    "$HIRES/android/build-hal.sh" "$HIRES/android/control/RateServe.java" "$ROOT_HELPER"
+}
+# A missing or unreadable file hashes differently from its content, so it never matches by mistake.
+inputs_hash() {
+  local f
+  for f in $(build_sources); do printf '%s ' "$f"; sha256sum < "$f" 2>/dev/null || echo missing; done | sha256sum | cut -c1-8
+}
 
 build_hal() {  # prints the directory holding the two driver builds for the current source
   local h; h=$(sha256sum "$HIRES/android/audio_hw.c" "$HIRES/android/build-hal.sh" | sha256sum | cut -c1-12)
@@ -228,6 +238,7 @@ cmd_build() {
 
 # Switches to a release. It becomes the fallback once Android has booted on it, unless
 # --no-confirm leaves that to the caller (the update confirms only after the tests pass).
+# Returns 75 without changing anything while music plays, unless --force.
 cmd_activate() {
   local id=${1:?usage: peel-hires activate <release-id> [--force] [--no-confirm]} force="" confirm=1 arg
   for arg in "${@:2}"; do case $arg in --force) force=1 ;; --no-confirm) confirm="" ;; esac; done
@@ -248,11 +259,32 @@ settle_container() {  # waits until the restarted container and its network are 
   sleep 2
 }
 
+# Manual rollback, one step: to the last confirmed release, or from it to the one before.
 cmd_rollback() {
   cmd_session stop
   root rollback >&2 || die "rollback failed"
   settle_container
   cmd_session start
+}
+
+# After a failed update: back to exactly the release that was current before it, which the
+# update had confirmed. The root helper may already have restored it when activation failed;
+# then only the session starts again. The confirmed and fallback records stay as they were.
+restore_release() {
+  local want=$1 now
+  now=$(root list | sed -n 's/^current=//p'); now=${now:-stock}
+  if [ "$now" != "$want" ]; then
+    cmd_session stop
+    root activate "$want" >&2 || die "switching back to $want failed"
+    settle_container
+  fi
+  session_running || cmd_session start
+}
+
+# True when music started and an update that was not forced should wait for the next run.
+postpone() {
+  [ "$1" != --force ] && apple_playing || return 1
+  log "music is playing; trying again later"
 }
 
 # --- Apple Music app ------------------------------------------------------------------------
@@ -504,10 +536,29 @@ apple_ready() {
   grep -q '^apple_installed=1$' <<<"$p" && grep -q '^apple_subscription=1$' <<<"$p"
 }
 
+# What setup needs before it changes anything. Each missing piece is named, so setup stops with a
+# precise error instead of waiting for an Android that cannot boot.
+preflight() {
+  local missing=() c
+  [ "$(uname -m)" = x86_64 ] || die "hi-res needs an x86_64 PC: Waydroid's images and Apple Music's Android app are x86_64 builds"
+  for c in waydroid lxc-start adb mkfs.erofs python3 curl unzip git tar flock pactl java keytool; do
+    command -v "$c" >/dev/null || missing+=("$c")
+  done
+  [ -x /usr/bin/weston ] || missing+=(/usr/bin/weston)
+  if command -v java >/dev/null && ! java -m jdk.compiler/com.sun.tools.javac.Main -version >/dev/null 2>&1; then missing+=("a JDK 17 or later with javac"); fi
+  [ ${#missing[@]} = 0 ] || die "missing: ${missing[*]}. On Fedora, sudo hires/install.sh \"\$USER\" installs them. Elsewhere, install them with your distribution's packages (see hires/README.md)."
+  [ -f /var/lib/waydroid/waydroid.cfg ] || die "Waydroid is not initialized. Run: sudo waydroid init -s VANILLA (sudo hires/install.sh does this)"
+  systemctl -q is-active waydroid-container || die "Waydroid's container is not running. Run: sudo systemctl enable --now waydroid-container"
+  sudo -n "$ROOT_HELPER" list >/dev/null 2>&1 || die "the root helper is not installed. Run: sudo hires/install.sh \"\$USER\""
+  [ -f "${XDG_CONFIG_HOME:-$HOME/.config}/systemd/user/peel-hires-session@.service" ] || die "the user units are not installed. Run: hires/install.sh --user"
+}
+
 # First-time setup, in the order the tests need: a release that boots, Apple Music installed
-# on it, sign-in, then a full update that tests the release and confirms it.
+# on it, sign-in, then a full update that tests the release and confirms it. Peel plays through
+# hi-res by itself once that update passes.
 cmd_setup() {
   local id cur
+  preflight
   session_running || cmd_session start
   id=$(cmd_build) || die "building the first release failed"
   cur=$(root list | sed -n 's/^current=//p')
@@ -528,7 +579,7 @@ cmd_update() {
   # Who runs the update, for `peel-hires wait` and anyone checking by hand.
   echo $$ > "$STATE/update.pid"
   trap 'rm -f "$STATE/update.pid"' EXIT
-  if apple_playing && [ "$force" != --force ]; then log "music is playing; trying again later"; return 75; fi
+  if postpone "$force"; then return 75; fi
   local key; key="$(latest | awk '{print $2}' | tr '\n' ' ')$(inputs_hash) $(host_versions | sha256sum | cut -c1-8)"
   if [ "$force" = --force ] || [ "$(cat "$STATE/seen" 2>/dev/null)" != "$key" ]; then
     session_running || cmd_session start
@@ -538,14 +589,18 @@ cmd_update() {
     fi
     id=$(cmd_build) || { notify "Peel hi-res" "Building the update failed"; run_agent "build failed"; return 1; }
     cur=$(root list | sed -n 's/^current=//p'); cur=${cur:-stock}
+    # Music may have started during the build. Switching or testing would stop it, so an update
+    # that was not forced waits for its next run. cmd_activate checks again just before it switches.
+    if postpone "$force"; then return 75; fi
     # A plain subshell, not an if condition, so set -e stops it at the first failure.
     set +e
-    ( set -e; [ "$id" = "$cur" ] || cmd_activate "$id" --force --no-confirm; cmd_test; root confirm >&2 )
+    ( set -e; [ "$id" = "$cur" ] || cmd_activate "$id" $force --no-confirm; cmd_test; root confirm >&2 )
     rc=$?
     set -e
+    if [ "$rc" = 75 ]; then return 75; fi
     if [ "$rc" != 0 ]; then
-      log "release $id failed; switching back to the last confirmed release"
-      if [ "$id" != "$cur" ]; then cmd_rollback || log "switching back failed; run: peel-hires rollback"; fi
+      log "release $id failed; switching back to $cur"
+      ( restore_release "$cur" ) || log "switching back failed; run: peel-hires activate $cur"
       notify "Peel hi-res update failed" "Kept $cur. Report: $STATE/reports/last.json"
       run_agent "tests failed on release $id"
       return 1
@@ -556,6 +611,7 @@ cmd_update() {
   else
     log "images, inputs and host software unchanged"
   fi
+  postpone "$force" && return 75
   update_apple
   trim_android
 }
@@ -682,6 +738,7 @@ case "${1:-help}" in
   test)     cmd_test ;;
   update)   shift; cmd_update "$@" ;;
   setup)    cmd_setup ;;
+  preflight) preflight; log "ready for setup" ;;
   watchdog) cmd_watchdog ;;
   prune)    cmd_prune ;;
   trim)     trim_android ;;
@@ -697,6 +754,7 @@ peel-hires: Apple Music in hi-res through a slimmed Waydroid
 
   status              releases, Android state, last test, memory
   setup               first run: build and start a release, install Apple Music, sign in, test
+  preflight           check what setup needs, without changing anything
   update [--force]    check for new images and Apple Music, rebuild, test, keep or roll back
   build               build a release from the newest Waydroid images (no switch)
   activate ID         switch to a release; it becomes the fallback once Android boots on it

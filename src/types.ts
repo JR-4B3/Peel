@@ -85,6 +85,8 @@ export interface Player {
   command(path: string, body?: unknown, method?: string): Promise<void>;
   // Peel's engine can change its stream quality. Cider sets quality in its own settings.
   setQuality?(quality: "high" | "standard"): Promise<void>;
+  // True while the player plays Apple's lossless stream, whose quality Peel does not choose.
+  readonly lossless?: boolean;
 }
 
 export function media(item: Record<string, any>, type = "songs"): Media {

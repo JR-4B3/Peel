@@ -14,7 +14,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { AppleMusic } from "./apple";
-import { readAppleSignIn, systemDir } from "./config";
+import { cacheDir, configDir, readAppleSignIn, systemDir } from "./config";
 import { Engine, systemdSession } from "./engine";
 import type { Media, Playback } from "./types";
 
@@ -32,12 +32,20 @@ export function hiresCommand(): string[] | undefined {
   return existsSync(installed) ? [installed] : undefined;
 }
 
-// Hi-res plays wherever the hi-res pipeline is installed, unless PEEL_PLAYER chooses another player.
+// Setup is complete once a release has passed the full tests: `peel-hires update` then records it
+// in its state folder. Until then the pipeline may be installed but cannot play yet.
+export function hiresSetUp() {
+  const state = process.env.XDG_STATE_HOME || join(homedir(), ".local/state");
+  return existsSync(join(state, "peel-hires", "seen"));
+}
+
+// Hi-res plays wherever the hi-res pipeline is installed and set up, unless PEEL_PLAYER chooses
+// another player.
 export function hiresSelected() {
   const choice = process.env.PEEL_PLAYER;
   if (choice === "hires") return true;
   if (choice && choice !== "auto") return false;
-  return !!hiresCommand();
+  return !!hiresCommand() && hiresSetUp();
 }
 
 // The web engine's client, pointed at the hi-res host.
@@ -69,10 +77,13 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
 async function launchHost() {
   // The host runs this file alone, without the interface's modules, in Bun's low-memory mode.
   const args = [process.execPath, "--smol", fileURLToPath(import.meta.url), "--hires-host"];
-  const environment: Record<string, string> = { PEEL_OWNER: String(process.pid) };
+  // The host uses the folders this Peel resolved, so it writes its key where this Peel reads it.
+  // systemd's user manager has its own environment and would otherwise use its defaults.
+  const environment: Record<string, string> = { PEEL_OWNER: String(process.pid), PEEL_HIRES_HOME: hiresHome, PEEL_CONFIG_DIR: configDir, PEEL_CACHE_DIR: cacheDir };
   if (systemdSession()) {
     const settings = Object.entries(environment).map(([name, value]) => `--setenv=${name}=${value}`);
-    for (const name of ["PATH", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "PEEL_CONFIG_DIR", "PEEL_CACHE_DIR", "PEEL_HIRES_HOME", "PEEL_HIRES_PORT", "PEEL_HIRES_COMMAND"]) if (process.env[name]) settings.push(`--setenv=${name}=${process.env[name]}`);
+    // peel-hires reads the XDG folders for its own cache, state and settings.
+    for (const name of ["PATH", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "PEEL_HIRES_PORT", "PEEL_HIRES_COMMAND", "APPLE_MUSIC_API_BASE"]) if (process.env[name]) settings.push(`--setenv=${name}=${process.env[name]}`);
     const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-hires-host", ...settings, "--", ...args], { stdout: "ignore", stderr: "pipe" });
     if (await child.exited !== 0) {
       const active = Bun.spawn(["systemctl", "--user", "is-active", "--quiet", "peel-hires-host.service"]);
@@ -96,11 +107,21 @@ const repeats = ["none", "one", "all"] as const;
 interface Control { state?: number; position?: number; item?: number; title?: string; artist?: string; album?: string; id?: string; duration?: number; error?: string }
 interface Entry { queueId: number; song: Media; added: boolean }
 
+// A command that changes the queue or the playing song, sent when the connection closed or the
+// controller did not answer. Android may or may not have applied it, so it is not sent again: the
+// caller reads Apple Music's state to see whether it took effect.
+export class Uncertain extends Error {}
+// Commands that set a value, or only read, have the same effect when Android receives them twice.
+const repeatable = new Set(["ping", "state", "queue", "volume", "repeat", "shuffle", "autoplay", "seek", "pause", "stop", "play", "skip"]);
+
 // One line-based connection to the controller in Android. Requests go one at a time.
 class Controller {
   private socket?: Awaited<ReturnType<typeof Bun.connect>>;
   private waiting: ((line: string) => void)[] = [];
-  private buffer = "";
+  // Bytes become text only as whole lines, so a character split between packets stays whole.
+  private buffer = Buffer.alloc(0);
+  // Each connection's events count only while it is the current one.
+  private generation = 0;
   private chain: Promise<unknown> = Promise.resolve();
   private access?: { host: string; port: number; key: string };
   error?: string;
@@ -114,35 +135,47 @@ class Controller {
     const [output, failure, code] = await Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text(), run.exited]);
     if (code !== 0) throw new Error(failure.trim().split("\n").pop()?.replace(/^peel-hires: /, "") || "peel-hires controller failed.");
     this.access = JSON.parse(output.trim().split("\n").pop()!);
+    const generation = ++this.generation;
+    const current = () => generation === this.generation;
+    this.buffer = Buffer.alloc(0);
     this.socket = await Bun.connect({
       hostname: this.access!.host, port: this.access!.port,
       socket: {
         data: (_socket, data) => {
-          this.buffer += data.toString();
+          if (!current()) return;
+          this.buffer = Buffer.concat([this.buffer, data]);
           let end;
-          while ((end = this.buffer.indexOf("\n")) >= 0) { const line = this.buffer.slice(0, end); this.buffer = this.buffer.slice(end + 1); this.waiting.shift()?.(line); }
+          while ((end = this.buffer.indexOf(10)) >= 0) {
+            const line = this.buffer.subarray(0, end).toString("utf8");
+            this.buffer = this.buffer.subarray(end + 1);
+            this.waiting.shift()?.(line);
+          }
         },
-        close: () => this.drop(),
-        error: () => this.drop(),
+        close: () => { if (current()) this.drop(); },
+        error: () => { if (current()) this.drop(); },
       },
     });
   }
 
   private drop() {
-    this.socket = undefined; this.buffer = "";
+    this.socket = undefined; this.buffer = Buffer.alloc(0); this.generation++;
     for (const resolve of this.waiting.splice(0)) resolve('{"error":"closed"}');
   }
 
-  // Sends one command and returns the controller's answer. A lost connection is made once more.
+  // Sends one command and returns the controller's answer. A lost connection is made once more
+  // for a command that is safe to repeat. Any other command throws Uncertain instead.
   request(command: string): Promise<any> {
+    const safe = repeatable.has(command.split(" ")[0]!);
+    const uncertain = () => new Uncertain(`Apple Music may not have received "${command.split(" ")[0]}".`);
     const run = async (retry: boolean): Promise<any> => {
       await this.connect();
       const answer = await new Promise<string>((resolve, reject) => {
         this.waiting.push(resolve);
         this.socket!.write(`${this.access!.key} ${command}\n`);
-        setTimeout(() => reject(new Error("Apple Music did not answer.")), 10000).unref();
+        setTimeout(() => reject(safe ? new Error("Apple Music did not answer.") : uncertain()), 10000).unref();
       }).catch(error => { this.socket?.end(); this.drop(); throw error; });
       const value = JSON.parse(answer);
+      if (value?.error === "closed" && !safe) throw uncertain();
       if (value?.error === "closed" && retry) return run(false);
       if (value?.error === "no-session" && retry) {
         // Apple Music's playback service is not running. A pause key starts it without playing.
@@ -248,9 +281,11 @@ export async function runHiresHost() {
   async function step(command: string, done: (state: Control, before: Control) => boolean, failure = "Apple Music did not respond. Try again.") {
     await read().catch(() => {});
     const before = { ...current };
-    await control.request(command);
+    await control.request(command).catch(unless);
     if (!await until(state => done(state, before))) throw new Error(failure);
   }
+  // A command whose answer was lost may still have worked. The check that follows it decides.
+  function unless(error: unknown) { if (!(error instanceof Uncertain)) throw error; }
 
   // A song only in the listener's library, such as one Apple took out of its catalog, has no
   // catalog ID, and Apple Music's Android app plays catalog songs. The catalog often still has
@@ -290,7 +325,8 @@ export async function runHiresHost() {
     return Promise.all(songs.map(async song => catalogOf(song) ? song : { ...song, catalogId: await match(song) }));
   }
 
-  // Replaces the queue with songs and plays the one at index.
+  // Replaces the queue with songs and plays the one at index. A song Apple's catalog lacks is left
+  // out, and the next one plays instead. Returns the index in listed of the song that plays.
   async function playList(listed: Media[], index: number, marks: Set<number> = new Set()) {
     const songs = await playableSongs(listed);
     const playable = songs.map((song, at) => ({ song, at, id: catalogOf(song) })).filter(entry => entry.id);
@@ -298,7 +334,7 @@ export async function runHiresHost() {
     let start = playable.findIndex(entry => entry.at >= index);
     if (start < 0) start = playable.length - 1;
     const previous = current.item;
-    await control.request(`list ${start} ${playable.map(entry => entry.id).join(",")}`);
+    await control.request(`list ${start} ${playable.map(entry => entry.id).join(",")}`).catch(unless);
     await settle(previous, start, playable[start]!.id!);
     // A new queue usually starts by itself, but not always after a pause.
     const running = (state: Control) => state.state === PLAYING || state.state === BUFFERING || state.state === CONNECTING;
@@ -307,12 +343,14 @@ export async function runHiresHost() {
     order = playable.map((_, at) => base + at);
     playable.forEach((entry, at) => entries.set(base + at, { queueId: base + at, song: entry.song, added: marks.has(entry.at) }));
     await sync();
+    return playable[start]!.at;
   }
 
-  // Adds songs after the playing one (next) or after the songs added before.
+  // Adds songs after the playing one (next) or after the songs added before. Succeeds only once
+  // Apple's queue shows every song, each matched to its own new entry.
   async function insert(songs: Media[], next: boolean) {
     const playable = (await playableSongs(songs)).filter(catalogOf);
-    if (!playable.length) return;
+    if (!playable.length) throw new Error(`Apple's catalog no longer has ${songs.length === 1 ? "this song" : "these songs"}, so hi-res cannot queue ${songs.length === 1 ? "it" : "them"}.`);
     const known = new Set(order);
     let target: number | undefined;
     if (!next) {
@@ -321,20 +359,38 @@ export async function runHiresHost() {
       while (last + 1 < order.length && entries.get(order[last + 1]!)?.added) last++;
       if (last > at) target = order[last];
     }
-    await control.request(`add next ${playable.map(catalogOf).join(",")}`);
+    await control.request(`add next ${playable.map(catalogOf).join(",")}`).catch(unless);
     // Apple names the inserted entries in a new batch. They are found in its queue afterwards.
     let fresh: number[] = [];
-    for (const until = Date.now() + 5000; Date.now() < until && fresh.length < playable.length; await sleep(100)) {
+    for (const until = Date.now() + 5000; ; await sleep(100)) {
       await sync();
       fresh = order.filter(id => !known.has(id));
+      if (fresh.length >= playable.length || Date.now() > until) break;
     }
-    fresh.forEach((id, at) => entries.set(id, { queueId: id, song: playable[at]!, added: true }));
+    // Apple may name a song by an equivalent catalog ID. Exactly as many new entries as songs
+    // pair in order. Otherwise each song needs a new entry with its own ID, and the rest of the
+    // new entries, which another controller may have added, keep the queue's own names.
+    const reported = (id: number) => entries.get(id)?.song.catalogId;
+    let pairs: [number, Media][] = [];
+    if (fresh.length === playable.length) pairs = fresh.map((id, at) => [id, playable[at]!]);
+    else {
+      const free = [...fresh];
+      for (const song of playable) {
+        const at = free.findIndex(id => reported(id) === catalogOf(song));
+        if (at >= 0) pairs.push([free.splice(at, 1)[0]!, song]);
+      }
+    }
+    for (const [id, song] of pairs) entries.set(id, { queueId: id, song, added: true });
+    if (pairs.length < playable.length) {
+      throw new Error(pairs.length ? `Apple Music queued ${pairs.length} of ${playable.length} songs. Try again for the rest.`
+        : `Apple Music did not queue ${playable.length === 1 ? "the song" : "the songs"}. Try again.`);
+    }
     // Play later: the new songs move behind the songs added before them, in order.
     if (target !== undefined) {
       let after = target;
-      for (const id of fresh) {
+      for (const [id] of pairs) {
         const behind = after;
-        await control.request(`move ${id} ${behind} 1`);
+        await control.request(`move ${id} ${behind} 1`).catch(unless);
         await syncUntil(() => order.indexOf(id) === order.indexOf(behind) + 1, "Apple Music did not move the added songs.");
         after = id;
       }
@@ -405,8 +461,28 @@ export async function runHiresHost() {
   const setVolume = async (value: number) => {
     volume = Math.min(1, Math.max(0, value));
     await control.request(`volume ${volume}`);
+    muted = false;
     await writeJson("volume.json", { volume });
   };
+
+  // Android's volume is at 0 while muted, and volume keeps the listener's own level for later.
+  let muted = false;
+  async function unmute() { await control.request(`volume ${volume}`); muted = false; }
+  // Stops what plays after a failed command. Without a confirmed pause or stop, Android stays
+  // muted until the next playback command succeeds.
+  async function silence() {
+    wanted = false;
+    for (const command of ["pause", "stop"]) {
+      try {
+        await step(command, stopped);
+        if (muted) await unmute().catch(() => {});
+        return;
+      } catch {}
+    }
+    muted = true;
+    await control.request("volume 0").catch(() => {});
+    notice = "Hi-res playback could not confirm that it stopped, so its volume is off until you play again.";
+  }
 
   const methods: Record<string, (...args: any[]) => unknown> = {
     tokens: () => { throw new Error("The hi-res player has no Apple sign-in."); },
@@ -439,7 +515,8 @@ export async function runHiresHost() {
       wanted = true; notice = undefined;
       const at = position(), waiting = order.slice(at + 1).map(id => entries.get(id)).filter(entry => entry?.added).map(entry => entry!.song);
       await playList(items, index);
-      if (waiting.length) await insert(waiting, true);
+      // The new songs play either way, so a song that could not be queued again is only reported.
+      if (waiting.length) await insert(waiting, true).catch(error => { notice = error instanceof Error ? error.message : String(error); });
     },
     enqueue: async (items: Media[], next: boolean) => {
       if (!order.length || current.item === undefined) {
@@ -454,14 +531,14 @@ export async function runHiresHost() {
       const at = position();
       if (Math.min(from, to) <= at) return;
       const id = order[from]!, beside = order[to]!, after = to > from;
-      await control.request(`move ${id} ${beside} ${after ? 1 : 2}`);
+      await control.request(`move ${id} ${beside} ${after ? 1 : 2}`).catch(unless);
       await syncUntil(() => order.indexOf(id) === order.indexOf(beside) + (after ? 1 : -1), "Apple Music did not move the song.");
     },
     remove: async (index: number, expected?: string) => {
       check(index, expected);
       if (index <= position()) return;
       const id = order[index]!;
-      await control.request(`remove ${id}`);
+      await control.request(`remove ${id}`).catch(unless);
       await syncUntil(() => !order.includes(id), "Apple Music did not remove the song.");
     },
     jump: async (index: number, expected?: string) => {
@@ -481,21 +558,28 @@ export async function runHiresHost() {
       added: order.map((id, index) => index > position() && entries.get(id)?.added ? index : -1).filter(index => index >= 0),
       time: (current.position ?? 0) / 1000, playing: current.state === PLAYING, repeatMode: repeats[repeat], shuffleMode: shuffle,
     }),
-    // Takes over a queue from another device. A paused queue starts silent, seeks, and pauses.
+    // Takes over a queue from another device. A paused queue starts silent, seeks, and pauses, and
+    // its volume returns only once Android confirms the pause. A failed import leaves this device
+    // silent: paused, or muted when even the pause can't be confirmed.
     importPlayback: async ({ items = [], position: start = 0, added = [], time = 0, playing = false, repeatMode = "none", shuffleMode = false } = {}) => {
       wanted = false;
       if (!items.length) { await control.request("stop"); return; }
-      if (!playing) await control.request("volume 0");
       try {
+        if (!playing) { muted = true; await control.request("volume 0"); }
         // The queue arrives in its played order. Shuffle is applied afterwards, as it was there.
         if (shuffle) { shuffle = false; await control.request("shuffle 0"); }
-        await playList(items, start, new Set(added));
-        if (time > 1) await step(`seek ${Math.round(time * 1000)}`, state => Math.abs((state.position ?? 0) - time * 1000) < 1500);
+        const selected = await playList(items, start, new Set(added));
+        // The saved time belongs to the song that played there. A song played in its place starts at 0.
+        if (time > 1 && selected === start) await step(`seek ${Math.round(time * 1000)}`, state => Math.abs((state.position ?? 0) - time * 1000) < 1500);
+        repeat = Math.max(0, repeats.indexOf(repeatMode)); await control.request(`repeat ${repeat}`);
+        if (shuffleMode) await setShuffle(true);
         if (!playing) await step("pause", stopped);
+        if (muted) await unmute();
         wanted = playing;
-      } finally { if (!playing) await control.request(`volume ${volume}`); }
-      repeat = Math.max(0, repeats.indexOf(repeatMode)); await control.request(`repeat ${repeat}`);
-      if (shuffleMode) await setShuffle(true);
+      } catch (error) {
+        await silence();
+        throw error;
+      }
     },
     rating: async () => await readRating(playingSong()) ?? -1,
     rate: async (value: number, expected?: string) => {
@@ -518,10 +602,17 @@ export async function runHiresHost() {
     await control.request("pause").catch(() => {});
     process.exit(0);
   };
+  // A Peel that attaches while the last one leaves keeps the host: ownership is checked again
+  // before the pause and once more before exiting.
+  const quitUnowned = async () => {
+    if (owners.size) return;
+    await control.request("pause").catch(() => {});
+    if (!owners.size) process.exit(0);
+  };
   setInterval(() => {
     if (!owners.size) return;
     for (const pid of owners) if (!alive(pid)) owners.delete(pid);
-    if (!owners.size) void quit();
+    if (!owners.size) void quitUnowned();
   }, 1000).unref();
 
   // Calls run one at a time, as in the web engine.
@@ -531,8 +622,14 @@ export async function runHiresHost() {
     if (!run) return Promise.reject(new Error(`Hi-res playback has no method ${method}.`));
     const result = calling.catch(() => {}).then(async () => {
       busy++;
-      try { const value = await run(...args); if (playbackMethods.has(method)) await read().catch(() => {}); return value; }
-      finally { busy--; }
+      try {
+        const value = await run(...args);
+        if (playbackMethods.has(method)) await read().catch(() => {});
+        // A playback command that worked hands control back to the listener, so a volume muted
+        // after a failure returns.
+        if (muted && playbackMethods.has(method) && method !== "importPlayback") await unmute().catch(() => {});
+        return value;
+      } finally { busy--; }
     });
     calling = result;
     return result;
@@ -549,7 +646,7 @@ export async function runHiresHost() {
       const path = new URL(request.url).pathname;
       if (request.method === "POST" && path === "/release") {
         if (known) owners.delete(owner);
-        if (!owners.size) setTimeout(() => void quit(), 10);
+        if (!owners.size) setTimeout(() => void quitUnowned(), 10);
         return reply(200, null);
       }
       if (known) owners.add(owner);

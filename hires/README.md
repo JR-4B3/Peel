@@ -6,15 +6,19 @@ This directory holds the pipeline that builds, tests and updates that Android.
 
 ## Setup (once)
 
-On the machine that plays the music:
+Hi-res needs an x86_64 PC with Linux, systemd and PipeWire, because Waydroid's images and Apple Music's Android app are x86_64 builds. On the machine that plays the music:
 
 ```sh
-sudo hires/install.sh "$USER"   # root helper + a sudoers rule that allows only that helper
+sudo hires/install.sh "$USER"   # packages, stock Waydroid, root helper, a sudoers rule for only that helper
 hires/install.sh --user         # peel-hires CLI, systemd units, PipeWire sample rates
 peel-hires setup                # first release, Apple Music, sign-in, then the full test
 ```
 
-`peel-hires setup` starts Android on the invisible display, builds and switches to the first release, and installs Apple Music. It then shows Apple Music once for sign-in and hides it again, and finally runs `peel-hires update --force`, which tests the release and keeps it. Until Apple Music is installed and signed in, `peel-hires update` stops with a notification instead of testing and switching back.
+`sudo hires/install.sh` installs the commands the pipeline runs with `dnf` on Fedora and its derivatives: Waydroid, LXC, erofs-utils, Weston, android-tools, a JDK with `javac` and `keytool` (java-21-openjdk-devel), python3, curl, unzip, git, pulseaudio-utils and pipewire-utils. On other distributions it lists the commands that are missing and stops before it changes anything, so install those packages first and run it again. It then initializes stock Waydroid with `waydroid init -s VANILLA` when `/var/lib/waydroid/waydroid.cfg` does not exist yet, which downloads about 1 GB, and enables `waydroid-container`.
+
+`peel-hires setup` first runs `peel-hires preflight`, which checks the architecture, these commands, the JDK, an initialized and running Waydroid, the root helper and the user units. It names whatever is missing and stops before it starts Android or builds anything.
+
+`peel-hires setup` starts Android on the invisible display, builds and switches to the first release, and installs Apple Music. It then shows Apple Music once for sign-in and hides it again, and finally runs `peel-hires update --force`, which tests the release and keeps it. Until Apple Music is installed and signed in, `peel-hires update` stops with a notification instead of testing and switching back. Peel plays through hi-res by itself only once that first update has passed its tests; before that it keeps the web engine, unless `PEEL_PLAYER=hires` asks for hi-res.
 
 Setup authorizes this machine's adb key inside Android through the root helper, because Android's confirmation prompt would appear on the invisible display.
 
@@ -66,7 +70,7 @@ The audio tests play into a temporary silent sink and put Waydroid's streams bac
 
 ## Updates
 
-`peel-hires-update.timer` runs `peel-hires update` daily at 04:30. When Waydroid publishes new images, the manifest, the audio policy or the audio driver changes, or the host's Waydroid, LXC or kernel version changes, it builds a release if needed, switches to it, and runs the tests. If they pass, the release stays; if anything fails, a boot that never finishes included, it switches back and sends a desktop notification. If music is playing (in Android, Peel's engine or Cider), it waits for the next run.
+`peel-hires-update.timer` runs `peel-hires update` daily at 04:30. When Waydroid publishes new images, the manifest, the audio policy, the audio driver, the rate helper or the installed root helper changes, or the host's Waydroid, LXC or kernel version changes, it builds a release if needed, switches to it, and runs the tests. If they pass, the release stays; if anything fails, a boot that never finishes included, it switches back to exactly the release that was current before, and sends a desktop notification. Its confirmed release and fallback stay as they were. If music is playing (in Android, Peel's engine or Cider), it waits for the next run. It checks again after the build, just before it switches, and before it updates Apple Music, so music that started during a build is not interrupted. `peel-hires update --force` switches and tests even while music plays.
 
 After a passing release it updates the Apple Music app and runs the tests again. Android won't downgrade an app without wiping its data, so a bad Apple Music version is reported, not undone. Last, if nothing is playing, it restarts Apple Music and stops Android's background apps (`peel-hires trim`). Apple Music grows from about 115 to 475 MB over a day of use.
 

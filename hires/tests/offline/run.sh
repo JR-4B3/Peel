@@ -11,3 +11,4 @@ sed -n '/^static ssize_t out_write(/,/^static int out_get_render_position(/p' "$
 "${CC:-cc}" -std=gnu11 -Wall -Wno-unused-function -I"$build" "$here/hal-write.c" -o "$build/hal-write" -lpthread
 timeout 10 "$build/hal-write"
 bash "$here/health.sh"
+bash "$here/update.sh"
