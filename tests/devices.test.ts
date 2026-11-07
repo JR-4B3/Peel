@@ -352,7 +352,7 @@ test("a Peel that controls main over SSH follows music another Peel moves to its
   await main.player.playOn(mac.network.id);
   await waitFor(() => mac.player.host === undefined, "the Mac leaving SSH");
   expect(mac.player.peer).toBeUndefined();
-  expect((await mac.player.state()).playback.nowPlaying.name).toBe("24HRS");
+  expect((await mac.player.state()).playback?.nowPlaying?.name).toBe("24HRS");
   expect(mac.fake.state.playing).toBe(true);
 }, 15000);
 
