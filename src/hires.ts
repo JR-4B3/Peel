@@ -252,10 +252,46 @@ export async function runHiresHost() {
     if (!await until(state => done(state, before))) throw new Error(failure);
   }
 
+  // A song only in the listener's library, such as one Apple took out of its catalog, has no
+  // catalog ID, and Apple Music's Android app plays catalog songs. The catalog often still has
+  // the same recording under another ID. A match needs the same title and artist, a length within
+  // two seconds, and, when several remain, the same album; otherwise the song is left out. Found
+  // and confirmed-missing answers are kept for the host's life. A failed search, such as one
+  // Apple refused for too many requests, is asked again next time. At most four run at once.
+  const matches = new Map<string, string | null>();
+  const normal = (text: string) => text.toLowerCase().normalize("NFKD").replace(/[\u0300-\u036f]/g, "").replace(/\s*[([](feat|with|remaster|bonus)[^)\]]*[)\]]/g, "").replace(/[^\p{L}\p{N}]+/gu, " ").trim();
+  const sameArtist = (library: string, catalog: string) => {
+    const a = normal(library), b = normal(catalog);
+    return a.length >= 2 && b.length >= 2 && (a === b || ` ${b} `.includes(` ${a} `) || ` ${a} `.includes(` ${b} `));
+  };
+  let searching = 0;
+  const waiting: (() => void)[] = [];
+  async function match(song: Media): Promise<string | undefined> {
+    if (matches.has(song.id)) return matches.get(song.id) ?? undefined;
+    if (!normal(song.name) || !normal(song.artist)) return undefined;
+    while (searching >= 4) await new Promise<void>(resolve => waiting.push(resolve));
+    searching++;
+    try {
+      const response = await apple.request(`v1/catalog/$STOREFRONT/search?types=songs&limit=10&term=${encodeURIComponent(`${song.name} ${song.artist}`.slice(0, 200))}`);
+      let found: any[] = (response.results?.songs?.data ?? []).filter((item: any) => normal(item.attributes?.name ?? "") === normal(song.name)
+        && sameArtist(song.artist, item.attributes?.artistName ?? "")
+        && (!song.duration || Math.abs((item.attributes?.durationInMillis ?? 0) / 1000 - song.duration) <= 2));
+      if (found.length > 1 && song.album) found = found.filter(item => normal(item.attributes?.albumName ?? "") === normal(song.album));
+      const id = found.length === 1 ? String(found[0].id) : null;
+      matches.set(song.id, id);
+      return id ?? undefined;
+    } catch { return undefined; }
+    finally { searching--; waiting.shift()?.(); }
+  }
+  async function playableSongs(songs: Media[]) {
+    return Promise.all(songs.map(async song => catalogOf(song) ? song : { ...song, catalogId: await match(song) }));
+  }
+
   // Replaces the queue with songs and plays the one at index.
-  async function playList(songs: Media[], index: number, marks: Set<number> = new Set()) {
+  async function playList(listed: Media[], index: number, marks: Set<number> = new Set()) {
+    const songs = await playableSongs(listed);
     const playable = songs.map((song, at) => ({ song, at, id: catalogOf(song) })).filter(entry => entry.id);
-    if (!playable.length) throw new Error("These songs are only in your library, without a catalog version, so hi-res cannot play them.");
+    if (!playable.length) throw new Error("Apple's catalog no longer has these songs, so hi-res cannot play them.");
     let start = playable.findIndex(entry => entry.at >= index);
     if (start < 0) start = playable.length - 1;
     const previous = current.item;
@@ -272,7 +308,7 @@ export async function runHiresHost() {
 
   // Adds songs after the playing one (next) or after the songs added before.
   async function insert(songs: Media[], next: boolean) {
-    const playable = songs.filter(catalogOf);
+    const playable = (await playableSongs(songs)).filter(catalogOf);
     if (!playable.length) return;
     const known = new Set(order);
     let target: number | undefined;
@@ -365,7 +401,7 @@ export async function runHiresHost() {
 
   const setVolume = async (value: number) => {
     volume = Math.min(1, Math.max(0, value));
-    await control.request(`volume ${Math.round(volume * 15)}`);
+    await control.request(`volume ${volume}`);
     await writeJson("volume.json", { volume });
   };
 
@@ -454,7 +490,7 @@ export async function runHiresHost() {
         if (time > 1) await step(`seek ${Math.round(time * 1000)}`, state => Math.abs((state.position ?? 0) - time * 1000) < 1500);
         if (!playing) await step("pause", stopped);
         wanted = playing;
-      } finally { if (!playing) await control.request(`volume ${Math.round(volume * 15)}`); }
+      } finally { if (!playing) await control.request(`volume ${volume}`); }
       repeat = Math.max(0, repeats.indexOf(repeatMode)); await control.request(`repeat ${repeat}`);
       if (shuffleMode) await setShuffle(true);
     },
@@ -540,7 +576,7 @@ export async function runHiresHost() {
       await control.request("autoplay false");
       await control.request("repeat 0");
       await control.request("shuffle 0");
-      await control.request(`volume ${Math.round(volume * 15)}`);
+      await control.request(`volume ${volume}`);
       await read().catch(() => {});
       ready = true; control.error = undefined;
       break;

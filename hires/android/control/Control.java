@@ -32,6 +32,7 @@ public final class Control {
     int port = Integer.parseInt(args[1]);
     String key = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(args[2])), StandardCharsets.UTF_8).trim();
     applePath = args.length > 3 ? args[3] : null;
+    follow();
     // A Looper-less process still receives binder replies, so no main loop is needed.
     try (ServerSocket server = new ServerSocket(port, 4, InetAddress.getByName("0.0.0.0"))) {
       System.out.println("listening " + port);
@@ -93,6 +94,9 @@ public final class Control {
     String[] parts = command.trim().split(" ", 2);
     String name = parts[0], arg = parts.length > 1 ? parts[1] : "";
     if (name.equals("ping")) return "{\"ok\":true}";
+    // rate [hz]: switches the rate Android mixes at, through Peel's rate helper, and answers the
+    // rate it mixes at. Without the helper the rate stays as it is.
+    if (name.equals("rate")) return "{\"rate\":" + (arg.isEmpty() ? Rates.mixer() : Rates.set(Integer.parseInt(arg))) + "}";
     Object c = session(false);
     if (c == null) return "{\"error\":\"no-session\"}";
     try { return apply(c, name, arg); }
@@ -113,8 +117,13 @@ public final class Control {
       case "next": call(c, "next", CALLER); break;
       case "previous": call(c, "previous", CALLER); break;
       case "seek": call(c, "seekTo", CALLER, Long.parseLong(arg)); break;
-      // volume <0..15>: Android's media volume. 15 leaves the samples unchanged.
-      case "volume": call(c, "setVolumeTo", CALLER, CALLER, Integer.parseInt(arg), 0); break;
+      // volume <0..1>: Android's media volume as a share of its steps. Only 1 leaves the samples
+      // unchanged.
+      case "volume": {
+        int max = (Integer) call(call(c, "getVolumeAttributes"), "getMaxVolume");
+        call(c, "setVolumeTo", CALLER, CALLER, (int) Math.round(Math.min(1, Math.max(0, Double.parseDouble(arg))) * max), 0);
+        break;
+      }
       case "uri": call(c, "playFromUri", CALLER, Class.forName("android.net.Uri").getMethod("parse", String.class).invoke(null, arg), null); break;
       case "prepare-uri": call(c, "prepareFromUri", CALLER, Class.forName("android.net.Uri").getMethod("parse", String.class).invoke(null, arg), null); break;
       case "id": call(c, "playFromMediaId", CALLER, arg, null); break;
@@ -281,5 +290,125 @@ public final class Control {
       else out.append(ch);
     }
     return out.append('"').toString();
+  }
+
+  // Makes Android mix at the playing song's own rate. Apple Music logs a song's decoded format when
+  // it prepares the song, about a second ahead, and again when the song starts, and opens a new
+  // audio track at the song change when the format differs. When the playing entry changes, the
+  // rate logged from just before that change on belongs to the new song, and the mixer switches
+  // to it then. The mixer never switches during a song. Without the rate helper, Rates.set changes
+  // nothing.
+  static final java.util.ArrayDeque<long[]> decoded = new java.util.ArrayDeque<>();
+
+  static void follow() {
+    Thread reader = new Thread(() -> {
+      java.util.regex.Pattern format = java.util.regex.Pattern.compile("Decoder output format: .*SampleRate:(\\d+)");
+      while (true) {
+        try {
+          Process logcat = Runtime.getRuntime().exec(new String[] { "logcat", "-v", "brief", "-T", "1", "SVAudioRendererNative:D", "*:S" });
+          try (java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(logcat.getInputStream(), StandardCharsets.UTF_8))) {
+            for (String line; (line = in.readLine()) != null; ) {
+              java.util.regex.Matcher m = format.matcher(line);
+              if (!m.find()) continue;
+              synchronized (decoded) {
+                decoded.addLast(new long[] { System.currentTimeMillis(), Long.parseLong(m.group(1)) });
+                while (decoded.size() > 8) decoded.removeFirst();
+              }
+            }
+          } finally { logcat.destroy(); }
+        } catch (Exception ignored) {}
+        try { Thread.sleep(2000); } catch (InterruptedException stop) { return; }
+      }
+    });
+    reader.setDaemon(true);
+    reader.start();
+    Thread switcher = new Thread(() -> {
+      long item = Long.MIN_VALUE;
+      while (true) {
+        try {
+          Thread.sleep(40);
+          Object c = session(false);
+          Object state = c == null ? null : call(c, "getPlaybackState");
+          if (state == null) continue;
+          long now = (Long) call(state, "getActiveQueueItemId");
+          int code = (Integer) call(state, "getState");
+          if (now == item || !(code == 3 || code == 6 || code == 8)) continue;
+          item = now;
+          long changed = System.currentTimeMillis();
+          int rate = 0;
+          // The song's start line comes a few tens of milliseconds before the change shows, or
+          // shortly after it.
+          for (long until = changed + 1000; rate == 0 && System.currentTimeMillis() < until; Thread.sleep(25)) {
+            synchronized (decoded) {
+              for (long[] entry : decoded) if (entry[0] >= changed - 300) { rate = (int) entry[1]; break; }
+            }
+          }
+          if (rate > 0 && Rates.mixer() != rate) Rates.set(rate);
+        } catch (InterruptedException stop) { return; }
+        catch (Exception retry) { try { Thread.sleep(1000); } catch (InterruptedException stop) { return; } }
+      }
+    });
+    switcher.setDaemon(true);
+    switcher.start();
+  }
+
+  // The rate Android mixes at, and switching it through RateServe, which runs as audioserver.
+  static final class Rates {
+    static final int SAMPLE_RATE = 1 + 2;
+    static int output = -1;
+
+    // The I/O handle of the first mixer output, read from AudioFlinger's dump.
+    static int output() throws Exception {
+      if (output >= 0) return output;
+      Process dump = Runtime.getRuntime().exec(new String[] { "dumpsys", "media.audio_flinger" });
+      try (java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(dump.getInputStream(), StandardCharsets.UTF_8))) {
+        boolean mixer = false;
+        for (String line; (line = in.readLine()) != null; ) {
+          if (line.startsWith("Output thread")) mixer = line.contains("(MIXER)");
+          else if (mixer && line.trim().startsWith("I/O handle:")) return output = Integer.parseInt(line.trim().substring(11).trim());
+        }
+      } finally { dump.destroy(); }
+      throw new IllegalStateException("Android has no mixer output");
+    }
+
+    static int read(int io) throws Exception {
+      Class<?> parcel = Class.forName("android.os.Parcel");
+      Object data = parcel.getMethod("obtain").invoke(null), reply = parcel.getMethod("obtain").invoke(null);
+      try {
+        Object binder = Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "media.audio_flinger");
+        call(data, "writeInterfaceToken", "android.media.IAudioFlingerService");
+        call(data, "writeInt", io);
+        call(binder, "transact", SAMPLE_RATE, data, reply, 0);
+        if ((Integer) call(reply, "readInt") != 0) throw new IllegalStateException("AudioFlinger refused the call");
+        return (Integer) call(reply, "readInt");
+      } finally { call(data, "recycle"); call(reply, "recycle"); }
+    }
+
+    // AudioFlinger answers 0 for an output that no longer exists, for example after audioserver
+    // restarted, so the handle is looked up again then.
+    static synchronized int mixer() throws Exception {
+      try { int rate = read(output()); if (rate > 0) return rate; } catch (Exception stale) {}
+      output = -1;
+      return read(output());
+    }
+
+    static synchronized int set(int rate) throws Exception {
+      if (mixer() == rate) return rate;
+      Object socket = Class.forName("android.net.LocalSocket").getConstructor().newInstance();
+      try {
+        Object address = Class.forName("android.net.LocalSocketAddress").getConstructor(String.class).newInstance("peel-rate");
+        call(socket, "connect", address);
+        call(socket, "setSoTimeout", 3000);
+        OutputStream out = (OutputStream) call(socket, "getOutputStream");
+        out.write((output() + " " + rate + "\n").getBytes(StandardCharsets.UTF_8));
+        out.flush();
+        java.io.InputStream in = (java.io.InputStream) call(socket, "getInputStream");
+        StringBuilder answer = new StringBuilder();
+        for (int b; (b = in.read()) >= 0 && b != '\n' && answer.length() < 16; ) answer.append((char) b);
+        return Integer.parseInt(answer.toString().trim());
+      } catch (Exception missing) {
+        return mixer();
+      } finally { call(socket, "close"); }
+    }
   }
 }

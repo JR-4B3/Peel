@@ -87,7 +87,8 @@ The controller talks to Apple Music's media session through Android's hidden `IS
 | `add <next\|end> <id,...>` | Adds songs after the playing one or at the end |
 | `play`, `pause`, `stop`, `next`, `previous`, `seek <ms>`, `skip <queue id>` | Transport |
 | `move <queue id> <target> <1 after\|2 before>`, `remove <queue id>` | Queue edits |
-| `shuffle <0\|1>`, `repeat <0\|1\|2>`, `autoplay <true\|false>`, `volume <0..15>` | Modes and Android's media volume |
+| `shuffle <0\|1>`, `repeat <0\|1\|2>`, `autoplay <true\|false>`, `volume <0..1>` | Modes and Android's media volume, as a share of its steps |
+| `rate [hz]` | The rate Android mixes at, after switching it through the rate helper |
 
 The controller uses about 42 MB (PSS). Apple Music without its screen uses about 165 MB, against 350 MB once its screen has opened.
 
@@ -95,13 +96,15 @@ The controller uses about 42 MB (PSS). Apple Music without its screen uses about
 
 Turning off Android apps that playback doesn't use saved about 60 MB, but Android then booted 2 seconds slower without a home screen app, and stalled when the persistent Phone app was off. `peel-hires` therefore keeps all apps on, and the nightly trim stops the ones that linger.
 
+Releases leave out SystemUI, the status bars and notifications, which saves about 150 MB. Android then boots in about 37 seconds instead of 11, because its window manager waits for a lock screen that SystemUI would draw until a timeout. Android boots once and then keeps running, so only the first start after the PC starts waits longer. All tests pass without SystemUI. With Apple Music playing, Android uses about 450 to 500 MiB of anonymous and kernel memory.
+
 `peel-hires prune` deletes stock Waydroid's images (2.4 GB) once no release state refers to them, and the image zips in `~/.cache/peel-hires/downloads`, which the root helper keeps its own verified copies of. It and every passing update also remove releases that are neither active, confirmed, nor the fallback.
 
 With `AGENT=claude` in `~/.config/peel-hires/config`, a failed update starts a Claude Code agent with [`agent/repair.md`](agent/repair.md). Its instructions limit it to restoring lines removed in `manifest.conf` and to leaving a passing release active. Those instructions are not a security boundary; the agent can do what the `peel-hires` CLI can, which the root helper bounds as described above. It is off by default.
 
 ## Known limits
 
-- Android's mixer runs at a fixed 192 kHz. Songs at 44.1, 48 or 96 kHz are resampled to it, so only 192 kHz songs are bit-perfect end to end. Apple Music opens a new Android audio track at each song's own rate and format, so the mixer could follow it: AudioFlinger reconfigures a mixer when its output gets `sampling_rate=<hz>` through `setParameters`, and the audio driver would reopen the device at that rate. Android 13 accepts that key only from the audioserver user (`filterReservedParameters`), and the shell user and the audio driver's process (system) are not it. Following each song's rate therefore needs the root helper to start a small helper inside Android as audioserver, which needs sudo to install.
+- Android mixes at the playing song's rate only with the rate helper. Apple Music logs each song's format when it prepares the song, about a second before it plays, and opens a new audio track when the format changes. The controller remembers that rate and, when the playing song changes, asks [`android/control/RateServe.java`](android/control/RateServe.java) to switch the mixer. RateServe runs as audioserver, the only user Android 13 lets change a mixer's rate (`filterReservedParameters`), and calls AudioFlinger's `setParameters` with `sampling_rate`. The audio driver then reopens the device at that rate. The root helper's `rate-helper` verb starts RateServe from the release image; it takes no arguments. A song whose rate differs from the one before may start with a short gap while the device reopens. Without the rate helper, Android mixes at 192 kHz and resamples other songs.
 - Apple allows one stream per account. A test that plays Apple Music stops playback on every other device.
 - Signing in needs the Apple Music window once. Apple can end the session at any time, and then `peel-hires signin` is needed again.
 

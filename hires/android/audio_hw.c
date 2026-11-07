@@ -449,6 +449,28 @@ static int out_set_parameters(struct audio_stream *stream, const char *kvpairs)
         pthread_mutex_unlock(&adev->lock);
     }
 
+    /* Peel: a new sampling rate. AudioFlinger passes it on when Peel's rate helper asks the mixer
+     * to follow the playing song (android/control/RateServe.java). The device closes here and
+     * opens again at that rate with the next write, and AudioFlinger then mixes at it, so the song
+     * is not resampled. */
+    if (str_parms_get_str(parms, AUDIO_PARAMETER_STREAM_SAMPLING_RATE, value, sizeof(value)) >= 0) {
+        unsigned int rate = (unsigned int)atoi(value);
+        if (rate != 44100 && rate != 48000 && rate != 88200 && rate != 96000 && rate != 176400 && rate != 192000) {
+            ret = -EINVAL;
+        } else {
+            pthread_mutex_lock(&adev->lock);
+            pthread_mutex_lock(&out->lock);
+            if (rate != out->config.rate) {
+                if (!out->standby) do_output_standby(out);
+                out->config.rate = rate;
+                ALOGI("out_set_parameters: rate %u", rate);
+            }
+            pthread_mutex_unlock(&out->lock);
+            pthread_mutex_unlock(&adev->lock);
+            ret = 0;
+        }
+    }
+
     str_parms_destroy(parms);
     return ret;
 }

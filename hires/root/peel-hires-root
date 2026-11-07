@@ -26,6 +26,7 @@
 #   probe                              read-only checks inside the running container
 #   logcat [lines]                     the end of Android's log (read-only)
 #   adb-auth                           authorize the caller's adb key inside Android
+#   rate-helper                        start the release's rate helper inside Android as audioserver
 #   prune                              delete stock Waydroid's images once nothing refers to them
 #   list                               releases, current and previous
 set -euo pipefail
@@ -42,6 +43,8 @@ WAYDROID_CFG=$WAYDROID/waydroid.cfg
 SYSTEM_OTA=https://ota.waydro.id/system/lineage/waydroid_x86_64/VANILLA.json
 VENDOR_OTA=https://ota.waydro.id/vendor/waydroid_x86_64/MAINLINE.json
 INPUTS=(manifest.conf audio.primary.waydroid.32.so audio.primary.waydroid.64.so audio_policy_configuration.xml)
+# Optional inputs: a release without them still builds.
+OPTIONAL_INPUTS=(peel-rate.dex)
 
 die() { echo "peel-hires-root: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "must run as root (through sudo)"
@@ -224,6 +227,10 @@ for name, rel in (("audio.primary.waydroid.32.so", "lib/hw/audio.primary.waydroi
                   ("audio.primary.waydroid.64.so", "lib64/hw/audio.primary.waydroid.so"),
                   ("audio_policy_configuration.xml", "etc/audio_policy_configuration.xml")):
     write("vendor", rel, open(os.path.join(inputs, name), "rb").read())
+# Peel's rate helper, which rate-helper starts as audioserver. Like the audio driver, it is the
+# caller's code and runs only inside Android.
+if os.path.exists(os.path.join(inputs, "peel-rate.dex")):
+    write("vendor", "etc/peel-rate.dex", open(os.path.join(inputs, "peel-rate.dex"), "rb").read())
 
 # A 64-bit-only zygote: the primary block of the stock 64/32 configuration.
 stock = read("system", "system/etc/init/hw/init.zygote64_32.rc")
@@ -265,6 +272,11 @@ cmd_repack() {
   for f in "${INPUTS[@]}"; do
     as_caller_read "$inputs/$f" > "$staging/$f" 2>/dev/null || die "cannot read input $f"
     [ -s "$staging/$f" ] || die "input $f is empty"
+  done
+  # A missing optional input is left out. One over 4 MiB is refused rather than cut short.
+  for f in "${OPTIONAL_INPUTS[@]}"; do
+    as_caller_read "$inputs/$f" 4194305 > "$staging/$f" 2>/dev/null && [ -s "$staging/$f" ] || { rm -f "$staging/$f"; continue; }
+    [ "$(stat -c %s "$staging/$f")" -le 4194304 ] || die "input $f is larger than 4 MiB"
   done
   lock
   [ -e "$RELEASES/$id" ] && die "release $id already exists"
@@ -437,9 +449,23 @@ cmd_remove() {
 
 # --- Read-only and Android-side helpers ------------------------------------------------------
 
+# Runs a command inside Android through waydroid shell. LXC gives the descriptors it inherits to
+# the user it attaches as (fchown, mode 600), so it must never inherit the caller's: a caller could
+# pass any file they can open as input or output. Input comes from $1 (a root-owned file, or - for
+# none) and output goes to a root-only file that is printed afterwards. waydroid does not pass the
+# command's exit status on, so callers that need one look for a line the command prints.
+in_android() {  # in_android <input-file|-> <waydroid shell arguments...>
+  local input=$1 out; shift
+  [ "$input" = - ] && input=/dev/null
+  out=$(mktemp "$BUILD/android.XXXXXX")
+  waydroid shell "$@" <"$input" >"$out" 2>&1 || true
+  cat "$out"; rm -f "$out"
+}
+
 cmd_probe() {
-  waydroid status 2>/dev/null | sed -n 's/^Session:\s*/session=/p; s/^Container:\s*/container=/p'
-  waydroid shell -- sh -c '
+  waydroid status 2>/dev/null </dev/null | sed -n 's/^Session:\s*/session=/p; s/^Container:\s*/container=/p'
+  local answer
+  answer=$(in_android - -- sh -c '
     p=/data/data/com.apple.android.music/shared_prefs/com.apple.android.music.playback_preferences.xml
     echo "boot_completed=$(getprop sys.boot_completed)"
     echo "zygote=$(getprop ro.zygote)"
@@ -448,8 +474,8 @@ cmd_probe() {
     echo "apple_subscription=$(grep -o "subscription_status\" value=\"[0-9]*" $p 2>/dev/null | grep -o "[0-9]*$")"
     echo "apple_quality_wifi=$(grep -o "key_wifi_audio_quality\">[A-Z_]*" $p 2>/dev/null | cut -d\> -f2)"
     echo "apple_bitstream_switching=$(grep -o "key_is_bit_stream_switching_enabled\" value=\"[a-z]*" $p 2>/dev/null | grep -o "[a-z]*$")"
-    echo "fake_wifi=$(getprop persist.waydroid.fake_wifi)"
-  ' 2>/dev/null || echo "container=unreachable"
+    echo "fake_wifi=$(getprop persist.waydroid.fake_wifi)"')
+  if grep -q '^boot_completed=' <<<"$answer"; then grep '^[a-z_0-9]*=' <<<"$answer"; else echo "container=unreachable"; fi
   local cg=/sys/fs/cgroup/lxc.payload.waydroid
   if [ -r "$cg/memory.stat" ]; then awk '/^anon |^shmem |^kernel /{printf "mem_%s=%d\n", $1, $2/1048576}' "$cg/memory.stat"; fi
   return 0
@@ -458,19 +484,42 @@ cmd_probe() {
 cmd_logcat() {
   local n=${1:-2000}
   [[ $n =~ ^[0-9]{1,6}$ ]] || die "invalid line count"
-  waydroid shell -- logcat -d -b all -t "$n"
+  in_android - -- logcat -d -b all -t "$n"
 }
 
 cmd_adb_auth() {
-  local key
+  local key file
   # Read once, as the caller, then checked and used as that same text.
   key=$(as_caller_read "$CALLER_HOME/.android/adbkey.pub" 4096 10 2>/dev/null) || die "no readable adb key (run adb once to create it)"
   [[ $key =~ ^QAAAA[A-Za-z0-9+/=]+\ [[:print:]]*$ ]] || die "the adb key does not look like an adb public key"
   lock
-  printf '%s\n' "$key" | waydroid shell -- sh -c 'mkdir -p /data/misc/adb; touch /data/misc/adb/adb_keys; cat > /data/misc/adb/key.new;
+  file=$(mktemp "$BUILD/adbkey.XXXXXX"); printf '%s\n' "$key" > "$file"
+  in_android "$file" -- sh -c 'mkdir -p /data/misc/adb; touch /data/misc/adb/adb_keys; cat > /data/misc/adb/key.new;
     grep -qxF -f /data/misc/adb/key.new /data/misc/adb/adb_keys || cat /data/misc/adb/key.new >> /data/misc/adb/adb_keys
-    rm /data/misc/adb/key.new; chown system:shell /data/misc/adb/adb_keys; chmod 640 /data/misc/adb/adb_keys'
+    rm /data/misc/adb/key.new; chown system:shell /data/misc/adb/adb_keys; chmod 640 /data/misc/adb/adb_keys' >/dev/null
+  rm -f "$file"
   echo "adb key authorized"
+}
+
+# Starts the active release's rate helper (android/control/RateServe.java) inside Android as the
+# audioserver user, the only one Android lets change the rate its mixer runs at, unless it already
+# answers. It takes no arguments and runs only the file the release contains, so it adds nothing a
+# release can't already do: the audio driver it ships runs inside Android as well. It succeeds
+# once the helper listens on its socket.
+cmd_rate_helper() {
+  lock
+  local answer
+  answer=$(in_android - -u 1041 -g 1041 -- /system/bin/sh -c '
+    listening() { grep -q " @peel-rate\$" /proc/net/unix; }
+    [ -f /vendor/etc/peel-rate.dex ] || { echo "result=this release has no rate helper"; exit 0; }
+    if ! listening; then
+      CLASSPATH=/vendor/etc/peel-rate.dex setsid nohup app_process /system/bin --nice-name=peel-rate RateServe >/dev/null 2>&1 </dev/null &
+      i=0; while [ $i -lt 50 ] && ! listening; do sleep 0.1; i=$((i + 1)); done
+    fi
+    if listening; then echo "result=ready"; else echo "result=the rate helper did not start"; fi')
+  local result; result=$(sed -n 's/^result=//p' <<<"$answer" | tail -1)
+  [ "$result" = ready ] || die "${result:-could not reach Android}"
+  echo "rate helper ready"
 }
 
 # Deletes Waydroid's stock images once no state refers to them: releases replace them, and
@@ -508,7 +557,8 @@ case "$verb" in
   probe)    cmd_probe ;;
   logcat)   cmd_logcat "${1:-2000}" ;;
   adb-auth) cmd_adb_auth ;;
+  rate-helper) cmd_rate_helper ;;
   prune)    cmd_prune ;;
   list)     cmd_list ;;
-  *) die "unknown verb '${verb}'. Verbs: latest repack activate confirm rollback remove prune probe logcat adb-auth list" ;;
+  *) die "unknown verb '${verb}'. Verbs: latest repack activate confirm rollback remove prune probe logcat adb-auth rate-helper list" ;;
 esac

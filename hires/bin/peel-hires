@@ -145,8 +145,16 @@ ENABLED_APPS="com.android.launcher3 com.android.settings com.android.providers.c
 apply_android_settings() {
   waydroid prop set persist.waydroid.fake_wifi "$APPLE" 2>/dev/null || true
   waydroid prop set persist.waydroid.suspend false 2>/dev/null || true
-  A shell cmd media_session volume --stream 3 --set 15 >/dev/null 2>&1 || true
+  full_volume
   enable_apps || true
+}
+
+# Sets Android's media volume to its highest step, the only one that leaves samples unchanged.
+# Releases have 100 steps (ro.config.media_vol_steps), stock Android 15.
+full_volume() {
+  local max
+  max=$(A shell cmd media_session volume --stream 3 --get 2>/dev/null | sed -n 's/.*in range \[0\.\.\([0-9]*\)\].*/\1/p' | head -1)
+  A shell cmd media_session volume --stream 3 --set "${max:-15}" >/dev/null 2>&1 || true
 }
 
 # Turns on any of ENABLED_APPS that is off. Fails while the package manager doesn't answer yet.
@@ -179,7 +187,7 @@ latest() { root latest || die "could not read Waydroid's image list"; }
 host_versions() { { waydroid --version; lxc-start --version; uname -r; } 2>/dev/null | tr '\n' ' '; }
 
 # Hash of everything a release is built from besides the images, so changes to any of it rebuild.
-inputs_hash() { cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$HIRES/android/audio_hw.c" "$HIRES/android/build-hal.sh" | sha256sum | cut -c1-8; }
+inputs_hash() { cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$HIRES/android/audio_hw.c" "$HIRES/android/build-hal.sh" "$HIRES/android/control/RateServe.java" | sha256sum | cut -c1-8; }
 
 build_hal() {  # prints the directory holding the two driver builds for the current source
   local h; h=$(sha256sum "$HIRES/android/audio_hw.c" "$HIRES/android/build-hal.sh" | sha256sum | cut -c1-12)
@@ -197,18 +205,20 @@ build_hal() {  # prints the directory holding the two driver builds for the curr
 # Callers run this as `id=$(cmd_build) || ...`, which turns off set -e inside it, so every step
 # checks its own failure.
 cmd_build() {
-  local images hal sys ven id in f
+  local images hal rate sys ven id in f
   images=$(latest) || exit 1
   hal=$(build_hal) || exit 1
+  rate=$(build_dex RateServe) || exit 1
   sys=$(awk '$1=="system"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
   ven=$(awk '$1=="vendor"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
   [ -n "$sys" ] && [ -n "$ven" ] || die "unexpected image list: $images"
-  id="s$sys-v$ven-$(cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so | sha256sum | cut -c1-8)"
+  id="s$sys-v$ven-$(cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$rate" | sha256sum | cut -c1-8)"
   local built; built=$(root list) || die "could not list the releases"
   if grep -q "\"id\":\"$id\"" <<<"$built"; then log "release $id already built"; echo "$id"; return; fi
   # The helper reads these with the user's permissions and fetches and verifies the images itself.
   in="$CACHE/inputs/$id"; rm -rf "$in"; mkdir -p "$in" || die "cannot create $in"
   cp "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$in/" || die "cannot stage the inputs"
+  cp "$rate" "$in/peel-rate.dex" || die "cannot stage the rate helper"
   log "repacking release $id"
   root repack "$in" "$id" >&2 || die "repacking $id failed"
   rm -rf "$in"
@@ -289,10 +299,10 @@ R8_SHA256=f8c762ff84640b10083b934a47278758a7665977e618fab0c927fff00521dea3
 CONTROL_PORT=7845
 CONTROL_STATE=$STATE/controller.json
 
-build_control() {  # prints the path of the compiled controller for the current source
-  local h out r8="$CACHE/bin/r8-$R8_VERSION.jar"
-  h=$(sha256sum "$HIRES/android/control/Control.java" | cut -c1-12)
-  out="$CACHE/control/$h"
+build_dex() {  # build_dex <Name>: prints the path of android/control/<Name>.java compiled for Android
+  local name=$1 h out r8="$CACHE/bin/r8-$R8_VERSION.jar"
+  h=$(sha256sum "$HIRES/android/control/$name.java" | cut -c1-12)
+  out="$CACHE/control/$name-$h"
   [ -f "$out/classes.dex" ] && { echo "$out/classes.dex"; return 0; }
   command -v java >/dev/null || die "building Peel's controller needs Java 17 or later (with javac)"
   if [ ! -f "$r8" ]; then
@@ -303,10 +313,10 @@ build_control() {  # prints the path of the compiled controller for the current 
   fi
   rm -rf "$out.part"; mkdir -p "$out.part/classes"
   # javac searches the working folder for classes, so it runs in the empty build folder.
-  (cd "$out.part" && java -m jdk.compiler/com.sun.tools.javac.Main -source 17 -target 17 -Xlint:-options -cp classes -d classes "$HIRES/android/control/Control.java") >&2 ||
-    die "compiling Peel's controller failed"
+  (cd "$out.part" && java -m jdk.compiler/com.sun.tools.javac.Main -source 17 -target 17 -Xlint:-options -cp classes -d classes "$HIRES/android/control/$name.java") >&2 ||
+    die "compiling $name failed"
   java -cp "$r8" com.android.tools.r8.D8 --release --min-api 30 --output "$out.part" "$out.part"/classes/*.class 2>&1 | grep -v '^Warning' >&2 || true
-  [ -f "$out.part/classes.dex" ] || die "converting Peel's controller failed"
+  [ -f "$out.part/classes.dex" ] || die "converting $name failed"
   rm -rf "$out.part/classes" "$out"; mv "$out.part" "$out"
   echo "$out/classes.dex"
 }
@@ -326,8 +336,9 @@ EOF
 }
 
 # Stops the controller. Peel's host notices the closed connection and starts a new one.
+# It runs in its own process group (setsid), which its logcat reader belongs to as well.
 stop_controller() {
-  A shell 'kill $(cat /data/local/tmp/peel-control.pid 2>/dev/null) 2>/dev/null' >/dev/null 2>&1 || true
+  A shell 'p=$(cat /data/local/tmp/peel-control.pid 2>/dev/null); [ -n "$p" ] && { kill -- -$p 2>/dev/null || kill $p 2>/dev/null; }' >/dev/null 2>&1 || true
   rm -f "$CONTROL_STATE"
 }
 
@@ -338,7 +349,7 @@ apple_apk() { A shell pm path "$APPLE" 2>/dev/null | head -1 | sed 's/^package:/
 # left alone. The controller loads Apple's classes from its APK, so an update replaces it.
 cmd_controller() {
   local host dex build apk=""
-  dex=$(build_control) || exit 1
+  dex=$(build_dex Control) || exit 1
   build=$(basename "$(dirname "$dex")")
   if session_running && adb_connect >/dev/null 2>&1; then apk=$(apple_apk); fi
   if ! control_ping "$build" "$apk"; then
@@ -369,11 +380,15 @@ EOF
     local i; for i in $(seq 50); do control_ping "$build" "$apk" && break; sleep 0.1; done
     control_ping "$build" "$apk" || die "the controller did not start: $(A shell cat /data/local/tmp/peel-control.log 2>/dev/null | tail -3)"
     # The media volume starts at its maximum, the only level that leaves samples unchanged.
-    A shell cmd media_session volume --stream 3 --set 15 >/dev/null 2>&1 || true
+    full_volume
     # Settings and other apps that ran during boot are not needed for playback (about 50 MB).
     A shell am force-stop com.android.settings >/dev/null 2>&1 || true
     A shell am kill-all >/dev/null 2>&1 || true
   fi
+  # The rate helper lets Android mix at each song's own rate. It is started again if it stopped.
+  # It needs a release that contains it and a root helper that can start it (hires/install.sh);
+  # without them Android mixes at 192 kHz.
+  root rate-helper >/dev/null 2>&1 || log "the rate helper is not available; Android mixes at 192 kHz"
   cat "$CONTROL_STATE"
 }
 
