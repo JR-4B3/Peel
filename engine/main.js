@@ -72,6 +72,8 @@ const playbackMethods = new Set(["pause", "stop", "resume", "toggle", "next", "p
 let lastCommand = 0;
 let recover = () => {};
 let volume = readJson("volume.json", { volume: 0.5 }).volume;
+// The stream quality Peel last chose, which a reloaded player gets too.
+let quality;
 // How long a player operation may take before the player counts as stuck.
 let stuckAfter = 20000;
 
@@ -101,6 +103,7 @@ function serve(window, key) {
       await new Promise(resolve => setTimeout(resolve, 200));
     }
     if (mine === generation) await evaluate("volume", [volume]);
+    if (mine === generation && quality) await evaluate("quality", [quality]);
     if (mine === generation && start?.items?.length) await evaluate("importPlayback", [start]);
   };
   // A player operation that has not finished after stuckAfter, such as starting a song Apple cannot
@@ -127,6 +130,7 @@ function serve(window, key) {
     if (!/^\w+$/.test(method)) throw new Error("Invalid method");
     if (method === "state") return evaluate(method, args);
     if (playbackMethods.has(method)) lastCommand = Date.now();
+    if (method === "quality") quality = args[0];
     const result = calling.catch(() => {}).then(() => limited(evaluate(method, args)));
     calling = result;
     return result;

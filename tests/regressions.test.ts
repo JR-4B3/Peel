@@ -461,3 +461,14 @@ test("a reloaded player that hangs too is replaced by an empty one, so its late 
   expect(queue).toEqual(["fresh"]);
   expect(page).toBe(2);
 });
+
+test("a reloaded player gets the stream quality Peel chose", async () => {
+  const app = recovering(); await once(app.server(), "listening"); cleanup.push(() => app.server().close());
+  const port = (app.server().address() as net.AddressInfo).port;
+  await fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method: "quality", args: ["standard"] }) });
+  vm.runInContext("recover({ position: 1, time: 42 })", app.context);
+  await app.settle();
+  const reload = app.done.indexOf("reload");
+  expect(app.done.slice(reload)).toContain('quality ["standard"]');
+  expect(app.done.findIndex((entry, index) => index > reload && entry.startsWith("quality"))).toBeLessThan(app.done.findIndex(entry => entry.startsWith("importPlayback")));
+});
