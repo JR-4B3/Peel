@@ -274,6 +274,8 @@ cmd_apple_update() {
   [ "$cert" = "$APPLE_CERT_SHA256" ] || die "Apple Music $want is not signed by Apple (got '${cert:-none}'); refusing to install"
   A install-multiple -r "$dir/$APPLE.apk" "$dir/config.x86_64.apk" "$dir/config.xhdpi.apk" >/dev/null || die "installing Apple Music $want failed"
   rm -rf "$dir"
+  # The controller loaded the old APK's classes. Peel's host starts a new one when it reconnects.
+  stop_controller
   log "Apple Music updated: ${have:-none} -> $want"
 }
 
@@ -309,12 +311,12 @@ build_control() {  # prints the path of the compiled controller for the current 
   echo "$out/classes.dex"
 }
 
-control_ping() {  # true when the controller in $CONTROL_STATE answers and is build $1
+control_ping() {  # true when the controller in $CONTROL_STATE answers and is build $1 for APK $2
   [ -f "$CONTROL_STATE" ] || return 1
-  python3 - "$CONTROL_STATE" "$1" <<'EOF'
+  python3 - "$CONTROL_STATE" "$1" "$2" <<'EOF'
 import json, socket, sys
 s = json.load(open(sys.argv[1]))
-if s.get("build") != sys.argv[2]: sys.exit(1)
+if s.get("build") != sys.argv[2] or s.get("apk") != sys.argv[3]: sys.exit(1)
 try:
     c = socket.create_connection((s["host"], s["port"]), timeout=2); f = c.makefile("rw")
     f.write(s["key"] + " ping\n"); f.flush()
@@ -323,27 +325,49 @@ except Exception: sys.exit(1)
 EOF
 }
 
+# Stops the controller. Peel's host notices the closed connection and starts a new one.
+stop_controller() {
+  A shell 'kill $(cat /data/local/tmp/peel-control.pid 2>/dev/null) 2>/dev/null' >/dev/null 2>&1 || true
+  rm -f "$CONTROL_STATE"
+}
+
+apple_apk() { A shell pm path "$APPLE" 2>/dev/null | head -1 | sed 's/^package://' | tr -d '\r'; }
+
 # Starts Android when needed and Peel's controller in it, then prints where it listens as JSON:
-# {"host", "port", "key"}. A running Android and controller are left alone.
+# {"host", "port", "key"}. A running controller of this build, for the installed Apple Music, is
+# left alone. The controller loads Apple's classes from its APK, so an update replaces it.
 cmd_controller() {
-  local host dex build
+  local host dex build apk=""
   dex=$(build_control) || exit 1
   build=$(basename "$(dirname "$dex")")
-  if ! control_ping "$build"; then
+  if session_running && adb_connect >/dev/null 2>&1; then apk=$(apple_apk); fi
+  if ! control_ping "$build" "$apk"; then
     session_running && adb_connect && [ "$(ADB_TIMEOUT=5 A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] || cmd_session start
     adb_connect || die "Android is not reachable over adb"
-    local apk key
-    apk=$(A shell pm path "$APPLE" 2>/dev/null | head -1 | sed 's/^package://' | tr -d '\r')
+    apk=$(apple_apk)
     [ -n "$apk" ] || die "Apple Music is not installed; run: peel-hires setup"
-    key=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    # The key reaches Android as a file only the shell user can read, never as an argument.
+    local keyfile="$STATE/controller.key"
+    (umask 077; head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n' > "$keyfile")
     A push "$dex" /data/local/tmp/peel-control.dex >/dev/null || die "could not copy the controller into Android"
+    A push "$keyfile" /data/local/tmp/peel-control.key >/dev/null && A shell chmod 600 /data/local/tmp/peel-control.key ||
+      die "could not copy the controller's key into Android"
     # A controller left from before, whose key Peel no longer has, is stopped first.
-    A shell "kill \$(cat /data/local/tmp/peel-control.pid 2>/dev/null) 2>/dev/null; CLASSPATH=/data/local/tmp/peel-control.dex setsid nohup app_process / Control serve $CONTROL_PORT $key $apk >/data/local/tmp/peel-control.log 2>&1 </dev/null & echo \$! > /data/local/tmp/peel-control.pid" ||
+    stop_controller
+    A shell "CLASSPATH=/data/local/tmp/peel-control.dex setsid nohup app_process / Control serve $CONTROL_PORT /data/local/tmp/peel-control.key $apk >/data/local/tmp/peel-control.log 2>&1 </dev/null & echo \$! > /data/local/tmp/peel-control.pid" ||
       die "could not start the controller"
     host=$(adb_target); host=${host%:*}
-    (umask 077; printf '{"host":"%s","port":%s,"key":"%s","build":"%s"}\n' "$host" "$CONTROL_PORT" "$key" "$build" > "$CONTROL_STATE.tmp" && mv "$CONTROL_STATE.tmp" "$CONTROL_STATE")
-    local i; for i in $(seq 50); do control_ping "$build" && break; sleep 0.1; done
-    control_ping "$build" || die "the controller did not start: $(A shell cat /data/local/tmp/peel-control.log 2>/dev/null | tail -3)"
+    python3 - "$CONTROL_STATE" "$host" "$CONTROL_PORT" "$keyfile" "$build" "$apk" <<'EOF'
+import json, os, sys
+path, host, port, keyfile, build, apk = sys.argv[1:]
+temporary = path + ".tmp"
+fd = os.open(temporary, os.O_WRONLY | os.O_CREAT | os.O_TRUNC, 0o600)
+with os.fdopen(fd, "w") as f: json.dump({"host": host, "port": int(port), "key": open(keyfile).read().strip(), "build": build, "apk": apk}, f)
+os.replace(temporary, path)
+EOF
+    rm -f "$keyfile"
+    local i; for i in $(seq 50); do control_ping "$build" "$apk" && break; sleep 0.1; done
+    control_ping "$build" "$apk" || die "the controller did not start: $(A shell cat /data/local/tmp/peel-control.log 2>/dev/null | tail -3)"
     # The media volume starts at its maximum, the only level that leaves samples unchanged.
     A shell cmd media_session volume --stream 3 --set 15 >/dev/null 2>&1 || true
     # Settings and other apps that ran during boot are not needed for playback (about 50 MB).

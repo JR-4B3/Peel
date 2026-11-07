@@ -79,15 +79,19 @@ try {
     const library = new AppleMusic(signIn.userToken, {
       ...options, storefront: signIn.storefront,
       renewUser: async () => {
-        let fresh: { userToken: string; storefront?: string };
-        if (useHires) {
-          // The hi-res player signs in inside Android. The web engine starts only to renew Peel's sign-in.
-          const web = new Engine();
+        // The hi-res player signs in inside Android and has no token for Peel. This computer's web
+        // engine renews it then, also when the player is a hi-res host reached over SSH. An engine
+        // started only for this is released afterwards; one that was running keeps running.
+        const viaWebEngine = async () => {
+          const web = new Engine(), running = await web.state().then(() => true, () => false);
           await ensureEngine(web, status, startup.signal);
-          try { fresh = await web.appleTokens(); } finally { stopEngine(web); }
-        } else {
+          try { return await web.appleTokens(); } finally { if (!running) stopEngine(web); }
+        };
+        let fresh: { userToken: string; storefront?: string };
+        if (useHires) fresh = await viaWebEngine();
+        else {
           if (!useCider) await model.ensurePlayback();
-          fresh = await player.appleTokens();
+          fresh = await player.appleTokens().catch(error => useCider ? Promise.reject(error) : viaWebEngine());
         }
         await saveJson("apple.json", fresh);
         return fresh.userToken;

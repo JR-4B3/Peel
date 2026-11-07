@@ -196,13 +196,28 @@ export async function runHiresHost() {
     const playing = queue[0]!.queueId, at = order.indexOf(playing);
     order = [...(at >= 0 ? order.slice(0, at) : []), ...queue.map(item => item.queueId)];
     for (const item of queue) if (!entries.has(item.queueId)) entries.set(item.queueId, { queueId: item.queueId, added: false, song: { id: item.id, type: "songs", name: item.title, artist: "", album: "", duration: 0, catalogId: item.id } });
+    // Songs of queues that were replaced are forgotten.
+    const kept = new Set(order);
+    for (const id of entries.keys()) if (!kept.has(id)) entries.delete(id);
+    synced = Date.now();
+  }
+  let synced = 0;
+
+  // Reads Apple's queue until it shows a change, after an edit Apple applies a moment later.
+  async function syncUntil(done: () => boolean, failure: string) {
+    for (const end = Date.now() + 3000; ; await sleep(40)) {
+      await sync();
+      if (done()) return;
+      if (Date.now() > end) throw new Error(failure);
+    }
   }
 
   // Reads what plays. When the playing entry changed, Apple's queue is read again.
   async function read() {
     const before = current.item;
     current = await control.request("state");
-    if (current.item !== before) await sync();
+    // A changed queue Peel did not ask for, such as shuffle, shows within two seconds.
+    if (current.item !== before || Date.now() - synced > 2000) await sync();
     return current;
   }
 
@@ -216,17 +231,20 @@ export async function runHiresHost() {
     }
   }
 
-  // Waits until Apple Music plays an entry that was not playing before, after a new queue.
-  async function settle(previous?: number) {
-    if (!await until(state => state.item !== undefined && state.item !== previous, 8000)) throw new Error("Apple Music did not start the song.");
+  // Waits until Apple Music plays the first song of a new queue: a new, valid entry at the start
+  // index of its batch, or the requested song. Android reports -1 while it has no entry.
+  async function settle(previous: number | undefined, start: number, id: string) {
+    const started = (state: Control) => state.item !== undefined && state.item >= 0 && state.item !== previous && (state.id === id || state.item % 2 ** 32 === start);
+    if (!await until(started, 8000)) throw new Error("Apple Music did not start the song.");
   }
 
-  // Runs a command that changes the playing entry or position, and waits for it to show.
-  async function step(command: string, done: (state: Control, before: Control) => boolean) {
+  // Runs a command that changes the playing entry or position, and waits for it to show. A
+  // change Apple never makes is an error, so a device that moves the music away knows.
+  async function step(command: string, done: (state: Control, before: Control) => boolean, failure = "Apple Music did not respond. Try again.") {
     await read().catch(() => {});
     const before = { ...current };
     await control.request(command);
-    await until(state => done(state, before));
+    if (!await until(state => done(state, before))) throw new Error(failure);
   }
 
   // Replaces the queue with songs and plays the one at index.
@@ -237,7 +255,10 @@ export async function runHiresHost() {
     if (start < 0) start = playable.length - 1;
     const previous = current.item;
     await control.request(`list ${start} ${playable.map(entry => entry.id).join(",")}`);
-    await settle(previous);
+    await settle(previous, start, playable[start]!.id!);
+    // A new queue usually starts by itself, but not always after a pause.
+    const running = (state: Control) => state.state === PLAYING || state.state === BUFFERING || state.state === CONNECTING;
+    if (!running(current)) await step("play", running, "Apple Music did not start the song.");
     const base = current.item! - start;
     order = playable.map((_, at) => base + at);
     playable.forEach((entry, at) => entries.set(base + at, { queueId: base + at, song: entry.song, added: marks.has(entry.at) }));
@@ -267,8 +288,12 @@ export async function runHiresHost() {
     // Play later: the new songs move behind the songs added before them, in order.
     if (target !== undefined) {
       let after = target;
-      for (const id of fresh) { await control.request(`move ${id} ${after} 1`); after = id; }
-      await sync();
+      for (const id of fresh) {
+        const behind = after;
+        await control.request(`move ${id} ${behind} 1`);
+        await syncUntil(() => order.indexOf(id) === order.indexOf(behind) + 1, "Apple Music did not move the added songs.");
+        after = id;
+      }
     }
   }
 
@@ -324,6 +349,15 @@ export async function runHiresHost() {
     };
   }
 
+  // Apple mixes the songs after the playing one when shuffle turns on, and restores their order
+  // when it turns off. The new order shows in its queue a moment later.
+  async function setShuffle(enabled: boolean) {
+    shuffle = enabled;
+    const before = order.join();
+    await control.request(`shuffle ${enabled ? 1 : 0}`);
+    if (order.length - position() > 2) await syncUntil(() => order.join() !== before, "Apple Music did not change shuffle.").catch(() => {});
+  }
+
   const setVolume = async (value: number) => {
     volume = Math.min(1, Math.max(0, value));
     await control.request(`volume ${Math.round(volume * 15)}`);
@@ -351,8 +385,8 @@ export async function runHiresHost() {
       return step(`seek ${target}`, state => Math.abs((state.position ?? 0) - target) < 1500);
     },
     volume: setVolume,
-    shuffle: async (enabled: boolean) => { shuffle = !!enabled; await control.request(`shuffle ${shuffle ? 1 : 0}`); await sync(); },
-    toggleShuffle: async () => { shuffle = !shuffle; await control.request(`shuffle ${shuffle ? 1 : 0}`); await sync(); },
+    shuffle: (enabled: boolean) => setShuffle(!!enabled),
+    toggleShuffle: () => setShuffle(!shuffle),
     toggleRepeat: async () => { repeat = (repeat + 1) % 3; await control.request(`repeat ${repeat}`); },
     // A song inside its collection. Songs added and not heard yet stay queued after it.
     play: async (items: Media[], index = 0) => {
@@ -373,14 +407,16 @@ export async function runHiresHost() {
       check(from, expected); check(to, target);
       const at = position();
       if (Math.min(from, to) <= at) return;
-      await control.request(`move ${order[from]} ${order[to]} ${to > from ? 1 : 2}`);
-      await sync();
+      const id = order[from]!, beside = order[to]!, after = to > from;
+      await control.request(`move ${id} ${beside} ${after ? 1 : 2}`);
+      await syncUntil(() => order.indexOf(id) === order.indexOf(beside) + (after ? 1 : -1), "Apple Music did not move the song.");
     },
     remove: async (index: number, expected?: string) => {
       check(index, expected);
       if (index <= position()) return;
-      await control.request(`remove ${order[index]}`);
-      await sync();
+      const id = order[index]!;
+      await control.request(`remove ${id}`);
+      await syncUntil(() => !order.includes(id), "Apple Music did not remove the song.");
     },
     jump: async (index: number, expected?: string) => {
       check(index, expected);
@@ -405,13 +441,15 @@ export async function runHiresHost() {
       if (!items.length) { await control.request("stop"); return; }
       if (!playing) await control.request("volume 0");
       try {
+        // The queue arrives in its played order. Shuffle is applied afterwards, as it was there.
+        if (shuffle) { shuffle = false; await control.request("shuffle 0"); }
         await playList(items, start, new Set(added));
         if (time > 1) await step(`seek ${Math.round(time * 1000)}`, state => Math.abs((state.position ?? 0) - time * 1000) < 1500);
         if (!playing) await step("pause", state => state.state !== PLAYING);
         wanted = playing;
       } finally { if (!playing) await control.request(`volume ${Math.round(volume * 15)}`); }
       repeat = Math.max(0, repeats.indexOf(repeatMode)); await control.request(`repeat ${repeat}`);
-      if (shuffleMode) { shuffle = true; await control.request("shuffle 1"); await sync(); }
+      if (shuffleMode) await setShuffle(true);
     },
     rating: async () => await readRating(playingSong()) ?? -1,
     rate: async (value: number, expected?: string) => {

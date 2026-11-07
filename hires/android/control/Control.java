@@ -5,8 +5,6 @@
 //
 // Compiled without android.jar, so every Android class is reached through reflection. The hidden
 // interfaces it uses (ISessionManager, ISessionController) are stable from Android 11 to 14.
-import java.io.BufferedReader;
-import java.io.InputStreamReader;
 import java.io.OutputStream;
 import java.lang.reflect.Method;
 import java.net.InetAddress;
@@ -23,42 +21,64 @@ public final class Control {
   static ClassLoader apple;
   static String applePath;
 
+  // serve <port> <key file> <Apple Music APK>: the key arrives in a file only the shell user can
+  // read, because process arguments are visible to every user.
   public static void main(String[] args) throws Exception {
     if (args.length >= 1 && !args[0].equals("serve")) {
-      String path = System.getenv("APPLE_APK");
-      applePath = path;
+      applePath = System.getenv("APPLE_APK");
       System.out.println(run(String.join(" ", args)));
       return;
     }
     int port = Integer.parseInt(args[1]);
-    String key = args[2];
+    String key = new String(java.nio.file.Files.readAllBytes(java.nio.file.Paths.get(args[2])), StandardCharsets.UTF_8).trim();
     applePath = args.length > 3 ? args[3] : null;
     // A Looper-less process still receives binder replies, so no main loop is needed.
     try (ServerSocket server = new ServerSocket(port, 4, InetAddress.getByName("0.0.0.0"))) {
       System.out.println("listening " + port);
       while (true) {
         Socket socket = server.accept();
-        Thread thread = new Thread(() -> serve(socket, key));
+        // Peel needs one connection. A few more cover a reconnect while the old one closes.
+        if (connections.incrementAndGet() > 4) { connections.decrementAndGet(); socket.close(); continue; }
+        Thread thread = new Thread(() -> { try { serve(socket, key); } finally { connections.decrementAndGet(); } });
         thread.setDaemon(true);
         thread.start();
       }
     }
   }
 
+  static final java.util.concurrent.atomic.AtomicInteger connections = new java.util.concurrent.atomic.AtomicInteger();
+  // The longest command is a queue of a few hundred song IDs.
+  static final int MAX_LINE = 256 * 1024;
+
+  // One line, or null at the end. A longer line than MAX_LINE ends the connection.
+  static String line(java.io.InputStream in) throws java.io.IOException {
+    java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
+    for (int b; (b = in.read()) != '\n'; ) {
+      if (b < 0) return bytes.size() > 0 ? bytes.toString("UTF-8") : null;
+      if (bytes.size() >= MAX_LINE) throw new java.io.IOException("line too long");
+      bytes.write(b);
+    }
+    return bytes.toString("UTF-8");
+  }
+
   static void serve(Socket socket, String key) {
     try (Socket s = socket) {
       s.setTcpNoDelay(true);
-      BufferedReader in = new BufferedReader(new InputStreamReader(s.getInputStream(), StandardCharsets.UTF_8));
+      // A client has five seconds to send its first, keyed line. Peel's own stays open.
+      s.setSoTimeout(5000);
+      java.io.InputStream in = new java.io.BufferedInputStream(s.getInputStream());
       OutputStream out = s.getOutputStream();
       String line;
-      while ((line = in.readLine()) != null) {
-        String reply;
+      while ((line = line(in)) != null) {
         int space = line.indexOf(' ');
-        if (space < 0 || !line.substring(0, space).equals(key)) reply = "{\"error\":\"key\"}";
-        else {
-          try { reply = run(line.substring(space + 1)); }
-          catch (Throwable error) { Throwable cause = error.getCause() != null ? error.getCause() : error; reply = "{\"error\":" + quote(String.valueOf(cause)) + "}"; }
+        if (space < 0 || !java.security.MessageDigest.isEqual(line.substring(0, space).getBytes(StandardCharsets.UTF_8), key.getBytes(StandardCharsets.UTF_8))) {
+          out.write("{\"error\":\"key\"}\n".getBytes(StandardCharsets.UTF_8));
+          return;
         }
+        s.setSoTimeout(0);
+        String reply;
+        try { reply = run(line.substring(space + 1)); }
+        catch (Throwable error) { Throwable cause = error.getCause() != null ? error.getCause() : error; reply = "{\"error\":" + quote(String.valueOf(cause)) + "}"; }
         out.write((reply + "\n").getBytes(StandardCharsets.UTF_8));
         out.flush();
       }
