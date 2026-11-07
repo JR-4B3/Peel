@@ -806,8 +806,11 @@ export class Model extends EventEmitter {
     });
   }
 
+  // The music moved away from the SSH host this Peel controlled, so the saved host is cleared.
+  async forgetRemote() { if (this.preferences.remote) await this.persist({ ...this.preferences, remote: undefined }); }
+
   // Another Peel moved the music, or the device that played went offline.
-  retarget(apply: () => string | undefined) { return this.switchTarget(async () => apply()); }
+  retarget(apply: () => string | undefined | Promise<string | undefined>) { return this.switchTarget(async () => apply()); }
 
   private switchTarget(change: () => Promise<string | undefined>) {
     this.commands = this.commands.then(async () => {

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { createInterface } from "node:readline";
 import { Engine, ensureEngine, type EngineTransport } from "./engine";
-import type { DeviceNetwork, LocalPlayer } from "./devices";
+import type { Claim, DeviceNetwork, LocalPlayer } from "./devices";
 
 export function validHost(host: string) {
   return /^[a-zA-Z0-9:][a-zA-Z0-9._@:-]*$/.test(host);
@@ -111,7 +111,29 @@ export class DevicePlayer extends Engine {
   attach(network: DeviceNetwork) {
     this.network = network;
     const follow = () => { if (this.wanted() !== this.peer) this.onRetarget?.(); };
-    network.on("claim", follow); network.on("online", follow); network.on("offline", follow);
+    network.on("claim", (claim: Claim) => { if (this.remote) void this.leaveSsh(claim); else follow(); });
+    network.on("online", follow); network.on("offline", follow);
+  }
+
+  // Set when this Peel stopped controlling its SSH host because the music moved to another engine,
+  // so applyTarget reports the change. onRetarget's caller then clears the saved host.
+  private sshLeft = false;
+
+  // A Peel that controls an SSH host still shows the music that plays. When another Peel moves
+  // the music to a different computer, or it starts on this one, this Peel follows it, as if the
+  // listener had chosen that device. A move to the SSH host's own engine changes nothing here.
+  private async leaveSsh(claim: Claim) {
+    const network = this.network!, remote = this.remote!, here = claim.device === network.id;
+    if (!here && !network.online(claim.device)) return;
+    const [host, claimed] = await Promise.all([
+      remote.request("/state").catch(() => undefined),
+      (here ? this.local.state() : network.request(claim.device, "/state")).catch(() => undefined),
+    ]);
+    if (this.remote !== remote || network.claim !== claim || !claimed?.playback?.nowPlaying) return;
+    if (claimed.instance && claimed.instance === host?.instance) return;
+    this.remote.close(); this.remote = undefined; this.host = undefined;
+    this.peer = this.wanted(); this.sshLeft = true;
+    this.onRetarget?.();
   }
 
   // The device that plays, if this Peel can reach it. Otherwise this computer.
@@ -124,8 +146,9 @@ export class DevicePlayer extends Engine {
 
   // Follows the device that plays. Returns a message when the controlled device changed.
   applyTarget(): string | undefined {
-    const next = this.wanted();
-    if (next === this.peer) return undefined;
+    const next = this.wanted(), left = this.sshLeft;
+    this.sshLeft = false;
+    if (next === this.peer && !left) return undefined;
     const network = this.network!, previous = this.peer;
     this.peer = next;
     if (next) return `Playing on ${network.nameOf(next)}`;

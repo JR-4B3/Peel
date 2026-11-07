@@ -27,10 +27,11 @@ const song = (id: string): Song => ({ id, type: "songs", name: id.toUpperCase(),
 // A stand-in for one computer's engine: a queue, a position, and whether it plays.
 function fakeEngine() {
   const state = { items: [] as Song[], position: 0, time: 0, playing: false, added: [] as number[], calls: [] as string[], started: 0 };
+  const instance = crypto.randomUUID();
   const transport = async (path: string, body?: any) => {
     if (path === "/state") {
       const current = state.items[state.position];
-      return { ready: true, playback: { state: !current ? "stopped" : state.playing ? "playing" : "paused", nowPlaying: current ? { name: current.name, artistName: current.artist, playParams: { id: current.id } } : null,
+      return { ready: true, instance, playback: { state: !current ? "stopped" : state.playing ? "playing" : "paused", nowPlaying: current ? { name: current.name, artistName: current.artist, playParams: { id: current.id } } : null,
         time: { currentTime: state.time, duration: 100 }, volume: 0.5, repeatMode: "none", shuffleMode: false } };
     }
     if (path === "/release") return null;
@@ -331,6 +332,42 @@ test("music started here without a claim, as from a Peel over SSH, makes the oth
   Object.assign(main.fake.state, { items: [song("worth it")], position: 0, playing: true });
   await waitFor(() => main.network.claim.device === main.network.id, "main claiming the music", 8000);
   await waitFor(() => mac.player.peer === main.network.id, "the Mac following main");
+  expect(main.fake.state.playing).toBe(true);
+}, 15000);
+
+// The Mac's Peel controls main over SSH, as after peel --remote main: its requests reach main's
+// engine without the device network.
+function controlOverSsh(computer: Computer, host: Computer) {
+  (computer.player as any).remote = { request: (path: string, body?: any) => (host.fake.engine as any).transport(path, body), close: () => {} };
+  computer.player.host = host.name;
+}
+
+test("a Peel that controls main over SSH follows music another Peel moves to its own computer", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  mac.player.onRetarget = () => { mac.player.applyTarget(); };
+  controlOverSsh(mac, main);
+  await link(mac, main);
+  // main's own Peel moves what it plays to the Mac.
+  Object.assign(main.fake.state, { items: [song("24hrs")], position: 0, playing: true });
+  await main.player.playOn(mac.network.id);
+  await waitFor(() => mac.player.host === undefined, "the Mac leaving SSH");
+  expect(mac.player.peer).toBeUndefined();
+  expect((await mac.player.state()).playback.nowPlaying.name).toBe("24HRS");
+  expect(mac.fake.state.playing).toBe(true);
+}, 15000);
+
+test("a Peel that controls main over SSH stays when the music moves to main itself", async () => {
+  const mac = await computer("Mac"), main = await computer("main"), laptop = await computer("laptop");
+  let retargets = 0;
+  mac.player.onRetarget = () => { retargets++; mac.player.applyTarget(); };
+  controlOverSsh(mac, main);
+  await link(mac, main); await link(main, laptop); await link(mac, laptop);
+  Object.assign(laptop.fake.state, { items: [song("a")], position: 0, playing: true });
+  await laptop.player.playOn(main.network.id);
+  await waitFor(() => mac.network.claim.device === main.network.id, "the Mac hearing main's claim");
+  await Bun.sleep(300);
+  expect(mac.player.host).toBe("main");
+  expect(retargets).toBe(0);
   expect(main.fake.state.playing).toBe(true);
 }, 15000);
 
