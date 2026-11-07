@@ -272,7 +272,10 @@ export async function runHiresHost() {
     while (searching >= 4) await new Promise<void>(resolve => waiting.push(resolve));
     searching++;
     try {
-      const response = await apple.request(`v1/catalog/$STOREFRONT/search?types=songs&limit=10&term=${encodeURIComponent(`${song.name} ${song.artist}`.slice(0, 200))}`);
+      const response = await apple.request(`v1/catalog/$STOREFRONT/search?types=songs&limit=25&term=${encodeURIComponent(`${song.name} ${song.artist}`.slice(0, 200))}`);
+      // More results than one page means a match or a second candidate may be on the next one,
+      // so the answer is neither kept nor trusted.
+      if (response.results?.songs?.next) return undefined;
       let found: any[] = (response.results?.songs?.data ?? []).filter((item: any) => normal(item.attributes?.name ?? "") === normal(song.name)
         && sameArtist(song.artist, item.attributes?.artistName ?? "")
         && (!song.duration || Math.abs((item.attributes?.durationInMillis ?? 0) / 1000 - song.duration) <= 2));

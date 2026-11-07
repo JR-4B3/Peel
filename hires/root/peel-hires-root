@@ -510,7 +510,9 @@ cmd_rate_helper() {
   lock
   local answer
   answer=$(in_android - -u 1041 -g 1041 -- /system/bin/sh -c '
-    listening() { grep -q " @peel-rate\$" /proc/net/unix; }
+    # Ready when the helper process runs and its socket exists. A socket without the helper, or the
+    # helper without its socket, is not.
+    listening() { pidof peel-rate >/dev/null && grep -q " @peel-rate\$" /proc/net/unix; }
     [ -f /vendor/etc/peel-rate.dex ] || { echo "result=this release has no rate helper"; exit 0; }
     if ! listening; then
       CLASSPATH=/vendor/etc/peel-rate.dex setsid nohup app_process /system/bin --nice-name=peel-rate RateServe >/dev/null 2>&1 </dev/null &

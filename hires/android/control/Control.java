@@ -323,7 +323,10 @@ public final class Control {
     reader.setDaemon(true);
     reader.start();
     Thread switcher = new Thread(() -> {
-      long item = Long.MIN_VALUE;
+      // The playing entry, when it started, the rate found for it (0 while looking, -1 for none
+      // found), and when a switch last failed.
+      long item = Long.MIN_VALUE, changed = 0, failed = 0;
+      int rate = 0;
       while (true) {
         try {
           Thread.sleep(40);
@@ -332,18 +335,20 @@ public final class Control {
           if (state == null) continue;
           long now = (Long) call(state, "getActiveQueueItemId");
           int code = (Integer) call(state, "getState");
-          if (now == item || !(code == 3 || code == 6 || code == 8)) continue;
-          item = now;
-          long changed = System.currentTimeMillis();
-          int rate = 0;
-          // The song's start line comes a few tens of milliseconds before the change shows, or
-          // shortly after it.
-          for (long until = changed + 1000; rate == 0 && System.currentTimeMillis() < until; Thread.sleep(25)) {
+          if (!(code == 3 || code == 6 || code == 8)) continue;
+          if (now != item) { item = now; changed = System.currentTimeMillis(); rate = 0; failed = 0; }
+          if (rate == 0) {
+            // The song's start line comes a few tens of milliseconds before the change shows, or
+            // shortly after it. A song that logged none within a second keeps the mixer's rate.
             synchronized (decoded) {
               for (long[] entry : decoded) if (entry[0] >= changed - 300) { rate = (int) entry[1]; break; }
             }
+            if (rate == 0 && System.currentTimeMillis() - changed > 1000) rate = -1;
           }
-          if (rate > 0 && Rates.mixer() != rate) Rates.set(rate);
+          // Tried again every two seconds until the mixer runs at the rate, while the song plays.
+          if (rate > 0 && System.currentTimeMillis() - failed > 2000 && Rates.mixer() != rate) {
+            if (Rates.set(rate) != rate) failed = System.currentTimeMillis();
+          }
         } catch (InterruptedException stop) { return; }
         catch (Exception retry) { try { Thread.sleep(1000); } catch (InterruptedException stop) { return; } }
       }
