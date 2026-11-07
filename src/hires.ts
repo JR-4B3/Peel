@@ -67,7 +67,8 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
 }
 
 async function launchHost() {
-  const args = [process.execPath, fileURLToPath(new URL("./index.ts", import.meta.url)), "--hires-host"];
+  // The host runs this file alone, without the interface's modules, in Bun's low-memory mode.
+  const args = [process.execPath, "--smol", fileURLToPath(import.meta.url), "--hires-host"];
   const environment: Record<string, string> = { PEEL_OWNER: String(process.pid) };
   if (systemdSession()) {
     const settings = Object.entries(environment).map(([name, value]) => `--setenv=${name}=${value}`);
@@ -500,3 +501,5 @@ export async function runHiresHost() {
     }
   }
 }
+
+if (import.meta.main && process.argv.includes("--hires-host")) await runHiresHost();

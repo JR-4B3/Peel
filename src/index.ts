@@ -17,9 +17,7 @@ const useCider = process.env.PEEL_PLAYER === "cider";
 const useHires = hiresSelected();
 
 try {
-  if (process.argv.includes("--hires-host")) {
-    await (await import("./hires")).runHiresHost();
-  } else if (process.argv.includes("--remote-host")) {
+  if (process.argv.includes("--remote-host")) {
     await (await import("./remote-host")).runRemoteHost();
   } else if (process.argv.includes("--stop-host")) {
     await Promise.allSettled([new Engine().quit(), new Hires().quit()]);
