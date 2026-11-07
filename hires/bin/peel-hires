@@ -212,7 +212,8 @@ cmd_build() {
   sys=$(awk '$1=="system"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
   ven=$(awk '$1=="vendor"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
   [ -n "$sys" ] && [ -n "$ven" ] || die "unexpected image list: $images"
-  id="s$sys-v$ven-$(cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$rate" | sha256sum | cut -c1-8)"
+  # The root helper builds the release, so a new helper, which may add to releases, builds anew.
+  id="s$sys-v$ven-$(cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$rate" "$ROOT_HELPER" | sha256sum | cut -c1-8)"
   local built; built=$(root list) || die "could not list the releases"
   if grep -q "\"id\":\"$id\"" <<<"$built"; then log "release $id already built"; echo "$id"; return; fi
   # The helper reads these with the user's permissions and fetches and verifies the images itself.
@@ -435,6 +436,9 @@ t_driver() {
 }
 t_bitperfect() {
   local sig="$CACHE/test/signal-$TEST_RATE-v2.f32" bin="$CACHE/test/aaplay"
+  # The comparison needs unchanged samples, which only full media volume gives. The test plays
+  # into a silent test sink, so full volume is never heard.
+  full_volume
   mkdir -p "$CACHE/test"
   [ -f "$sig" ] || python3 "$HIRES/tests/mk-signal.py" "$sig" 8 "$TEST_RATE"
   if [ ! -x "$bin" ]; then
@@ -463,6 +467,7 @@ t_apple_app() {
 }
 t_apple_play() {
   apple_playing && { echo "skipped: music is playing"; return 0; }
+  full_volume
   python3 "$HIRES/tests/apple-play.py" --adb "$(adb_target)" --rate "$TEST_RATE"
 }
 
@@ -520,6 +525,9 @@ cmd_setup() {
 cmd_update() {
   local force=${1:-} id cur rc
   exec 9>"$STATE/update.lock"; flock -n 9 || die "another update is running"
+  # Who runs the update, for `peel-hires wait` and anyone checking by hand.
+  echo $$ > "$STATE/update.pid"
+  trap 'rm -f "$STATE/update.pid"' EXIT
   if apple_playing && [ "$force" != --force ]; then log "music is playing; trying again later"; return 75; fi
   local key; key="$(latest | awk '{print $2}' | tr '\n' ' ')$(inputs_hash) $(host_versions | sha256sum | cut -c1-8)"
   if [ "$force" = --force ] || [ "$(cat "$STATE/seen" 2>/dev/null)" != "$key" ]; then
@@ -562,6 +570,28 @@ update_apple() {
   [ "$before" = "$after" ] && return 0
   if cmd_test; then notify "Apple Music updated" "$before -> $after passed all tests."
   else notify "Apple Music $after failed the tests" "Android can't downgrade it without wiping its data. Report: $STATE/reports/last.json"; return 1; fi
+}
+
+# Blocks until a running update ends, for at most $1 seconds (default 1800), then prints the last
+# test report. It waits on the update's own lock, so it never mistakes itself for the update.
+# Exits 124 when the update still runs at the timeout.
+cmd_wait() {
+  local timeout=${1:-1800}
+  [[ $timeout =~ ^[0-9]+$ ]] || die "usage: peel-hires wait [seconds]"
+  exec 8>"$STATE/update.lock"
+  if ! flock -w "$timeout" 8; then log "an update is still running (pid $(cat "$STATE/update.pid" 2>/dev/null || echo unknown)) after ${timeout}s"; return 124; fi
+  flock -u 8
+  report_summary
+}
+
+report_summary() {
+  [ -f "$STATE/reports/last.json" ] || { echo "no test report yet"; return 0; }
+  python3 - "$STATE/reports/last.json" <<'EOF'
+import json, sys
+r = json.load(open(sys.argv[1]))
+print(f"last test: release {r['release']}: {'pass' if r['pass'] else 'FAIL'}")
+for t in r["tests"]: print(f"  {'pass' if t['pass'] else 'FAIL'}  {t['name']}" + ("" if t["pass"] else f": {t['detail'].strip().splitlines()[-1][:200]}"))
+EOF
 }
 
 # --- Health -------------------------------------------------------------------------------------
@@ -659,6 +689,7 @@ case "${1:-help}" in
   signin)   cmd_signin ;;
   apple-update) shift; cmd_apple_update "$@" ;;
   controller) cmd_controller ;;
+  wait)     shift; cmd_wait "$@" ;;
   releases) root list ;;
   remove)   shift; root remove "${1:?release id}" ;;
   help|*) cat <<'EOF'
@@ -676,6 +707,7 @@ peel-hires: Apple Music in hi-res through a slimmed Waydroid
   signin              open Apple Music visibly to sign in; hides it again when done
   apple-update        update the Apple Music app (checks Apple's signature)
   controller          start Android and Peel's playback controller if needed; prints where it listens
+  wait [SECONDS]      wait until a running update ends (default 1800 s), then print the last report
   releases, remove ID manage built releases
   prune               delete old releases, stock Waydroid's images and cached image zips
   trim                restart Apple Music and stop background apps, unless music plays
