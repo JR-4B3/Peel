@@ -72,6 +72,25 @@ After a passing release it updates the Apple Music app and runs the tests again.
 
 `peel-hires-watchdog.timer` runs `peel-hires watchdog` every 5 minutes. If Android stops answering over adb, isn't booted, or has no `system_server` in two checks in a row, it restarts the session and sends a notification. It waits while music plays or an update runs.
 
+## Playback from Peel
+
+Peel finds the pipeline through its root helper and then plays through Android instead of its web engine. Peel runs its own copy of `bin/peel-hires`, so the controller always matches the Peel version.
+
+`peel-hires controller` starts Android when it is not running, builds [`android/control/Control.java`](android/control/Control.java) with the host's JDK and Google's D8 (downloaded once and checked against its SHA-256), and starts it inside Android with `app_process` as the shell user. It prints where the controller listens: Android's address, port 7845, and a random key. A running controller of the same build is left alone. A new build replaces it.
+
+The controller talks to Apple Music's media session through Android's hidden `ISessionManager` and `ISessionController` interfaces, which the shell user may use. It plays catalog songs through the commands Apple's own screens use (`ADD_QUEUE_ITEMS` with a queue provider built from Apple's own classes, loaded from its APK), so Apple Music's screen never opens. It answers one command per line over TCP, in about a millisecond:
+
+| Command | Does |
+| --- | --- |
+| `state`, `queue` | What plays, the position and duration, and the queue from the playing entry on |
+| `list <index> <id,...>` | Replaces the queue with these catalog songs and plays the one at index |
+| `add <next\|end> <id,...>` | Adds songs after the playing one or at the end |
+| `play`, `pause`, `stop`, `next`, `previous`, `seek <ms>`, `skip <queue id>` | Transport |
+| `move <queue id> <target> <1 after\|2 before>`, `remove <queue id>` | Queue edits |
+| `shuffle <0\|1>`, `repeat <0\|1\|2>`, `autoplay <true\|false>`, `volume <0..15>` | Modes and Android's media volume |
+
+The controller uses about 42 MB (PSS). Apple Music without its screen uses about 165 MB, against 350 MB once its screen has opened.
+
 ## Memory and disk
 
 Turning off Android apps that playback doesn't use saved about 60 MB, but Android then booted 2 seconds slower without a home screen app, and stalled when the persistent Phone app was off. `peel-hires` therefore keeps all apps on, and the nightly trim stops the ones that linger.
@@ -82,7 +101,7 @@ With `AGENT=claude` in `~/.config/peel-hires/config`, a failed update starts a C
 
 ## Known limits
 
-- Android's mixer runs at a fixed 192 kHz. Songs at 44.1, 48 or 96 kHz are resampled to it, so only 192 kHz songs are bit-perfect end to end. Following each song's rate needs a change in the audio driver.
+- Android's mixer runs at a fixed 192 kHz. Songs at 44.1, 48 or 96 kHz are resampled to it, so only 192 kHz songs are bit-perfect end to end. Apple Music opens a new Android audio track at each song's own rate and format, so the mixer could follow it: AudioFlinger reconfigures a mixer when its output gets `sampling_rate=<hz>` through `setParameters`, and the audio driver would reopen the device at that rate. Android 13 accepts that key only from the audioserver user (`filterReservedParameters`), and the shell user and the audio driver's process (system) are not it. Following each song's rate therefore needs the root helper to start a small helper inside Android as audioserver, which needs sudo to install.
 - Apple allows one stream per account. A test that plays Apple Music stops playback on every other device.
 - Signing in needs the Apple Music window once. Apple can end the session at any time, and then `peel-hires signin` is needed again.
 

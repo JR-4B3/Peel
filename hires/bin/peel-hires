@@ -277,6 +277,82 @@ cmd_apple_update() {
   log "Apple Music updated: ${have:-none} -> $want"
 }
 
+# --- Playback controller ------------------------------------------------------------------------
+
+# Peel controls Apple Music through android/control/Control.java, which runs in Android as the
+# shell user and talks to Apple Music's media session. It is compiled with the host's JDK and
+# Google's D8, which turns Java classes into Android's format.
+R8_VERSION=9.5.29
+R8_SHA256=f8c762ff84640b10083b934a47278758a7665977e618fab0c927fff00521dea3
+CONTROL_PORT=7845
+CONTROL_STATE=$STATE/controller.json
+
+build_control() {  # prints the path of the compiled controller for the current source
+  local h out r8="$CACHE/bin/r8-$R8_VERSION.jar"
+  h=$(sha256sum "$HIRES/android/control/Control.java" | cut -c1-12)
+  out="$CACHE/control/$h"
+  [ -f "$out/classes.dex" ] && { echo "$out/classes.dex"; return 0; }
+  command -v java >/dev/null || die "building Peel's controller needs Java 17 or later (with javac)"
+  if [ ! -f "$r8" ]; then
+    mkdir -p "$CACHE/bin"
+    curl -fsSL -o "$r8.part" "https://dl.google.com/android/maven2/com/android/tools/r8/$R8_VERSION/r8-$R8_VERSION.jar" || die "could not download D8"
+    [ "$(sha256sum "$r8.part" | cut -d' ' -f1)" = "$R8_SHA256" ] || { rm -f "$r8.part"; die "D8 did not match its checksum"; }
+    mv "$r8.part" "$r8"
+  fi
+  rm -rf "$out.part"; mkdir -p "$out.part/classes"
+  # javac searches the working folder for classes, so it runs in the empty build folder.
+  (cd "$out.part" && java -m jdk.compiler/com.sun.tools.javac.Main -source 17 -target 17 -Xlint:-options -cp classes -d classes "$HIRES/android/control/Control.java") >&2 ||
+    die "compiling Peel's controller failed"
+  java -cp "$r8" com.android.tools.r8.D8 --release --min-api 30 --output "$out.part" "$out.part"/classes/*.class 2>&1 | grep -v '^Warning' >&2 || true
+  [ -f "$out.part/classes.dex" ] || die "converting Peel's controller failed"
+  rm -rf "$out.part/classes" "$out"; mv "$out.part" "$out"
+  echo "$out/classes.dex"
+}
+
+control_ping() {  # true when the controller in $CONTROL_STATE answers and is build $1
+  [ -f "$CONTROL_STATE" ] || return 1
+  python3 - "$CONTROL_STATE" "$1" <<'EOF'
+import json, socket, sys
+s = json.load(open(sys.argv[1]))
+if s.get("build") != sys.argv[2]: sys.exit(1)
+try:
+    c = socket.create_connection((s["host"], s["port"]), timeout=2); f = c.makefile("rw")
+    f.write(s["key"] + " ping\n"); f.flush()
+    sys.exit(0 if '"ok"' in f.readline() else 1)
+except Exception: sys.exit(1)
+EOF
+}
+
+# Starts Android when needed and Peel's controller in it, then prints where it listens as JSON:
+# {"host", "port", "key"}. A running Android and controller are left alone.
+cmd_controller() {
+  local host dex build
+  dex=$(build_control) || exit 1
+  build=$(basename "$(dirname "$dex")")
+  if ! control_ping "$build"; then
+    session_running && adb_connect && [ "$(ADB_TIMEOUT=5 A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] || cmd_session start
+    adb_connect || die "Android is not reachable over adb"
+    local apk key
+    apk=$(A shell pm path "$APPLE" 2>/dev/null | head -1 | sed 's/^package://' | tr -d '\r')
+    [ -n "$apk" ] || die "Apple Music is not installed; run: peel-hires setup"
+    key=$(head -c 24 /dev/urandom | od -An -tx1 | tr -d ' \n')
+    A push "$dex" /data/local/tmp/peel-control.dex >/dev/null || die "could not copy the controller into Android"
+    # A controller left from before, whose key Peel no longer has, is stopped first.
+    A shell "kill \$(cat /data/local/tmp/peel-control.pid 2>/dev/null) 2>/dev/null; CLASSPATH=/data/local/tmp/peel-control.dex setsid nohup app_process / Control serve $CONTROL_PORT $key $apk >/data/local/tmp/peel-control.log 2>&1 </dev/null & echo \$! > /data/local/tmp/peel-control.pid" ||
+      die "could not start the controller"
+    host=$(adb_target); host=${host%:*}
+    (umask 077; printf '{"host":"%s","port":%s,"key":"%s","build":"%s"}\n' "$host" "$CONTROL_PORT" "$key" "$build" > "$CONTROL_STATE.tmp" && mv "$CONTROL_STATE.tmp" "$CONTROL_STATE")
+    local i; for i in $(seq 50); do control_ping "$build" && break; sleep 0.1; done
+    control_ping "$build" || die "the controller did not start: $(A shell cat /data/local/tmp/peel-control.log 2>/dev/null | tail -3)"
+    # The media volume starts at its maximum, the only level that leaves samples unchanged.
+    A shell cmd media_session volume --stream 3 --set 15 >/dev/null 2>&1 || true
+    # Settings and other apps that ran during boot are not needed for playback (about 50 MB).
+    A shell am force-stop com.android.settings >/dev/null 2>&1 || true
+    A shell am kill-all >/dev/null 2>&1 || true
+  fi
+  cat "$CONTROL_STATE"
+}
+
 # --- Sign-in ---------------------------------------------------------------------------------
 
 cmd_signin() {
@@ -543,6 +619,7 @@ case "${1:-help}" in
   session)  shift; cmd_session "$@" ;;
   signin)   cmd_signin ;;
   apple-update) shift; cmd_apple_update "$@" ;;
+  controller) cmd_controller ;;
   releases) root list ;;
   remove)   shift; root remove "${1:?release id}" ;;
   help|*) cat <<'EOF'
@@ -559,6 +636,7 @@ peel-hires: Apple Music in hi-res through a slimmed Waydroid
   session start [--visible] | stop | status
   signin              open Apple Music visibly to sign in; hides it again when done
   apple-update        update the Apple Music app (checks Apple's signature)
+  controller          start Android and Peel's playback controller if needed; prints where it listens
   releases, remove ID manage built releases
   prune               delete old releases, stock Waydroid's images and cached image zips
   trim                restart Apple Music and stop background apps, unless music plays

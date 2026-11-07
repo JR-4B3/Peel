@@ -17,7 +17,7 @@ The interface follows the requests in T3 Code thread `4b5b5eca-7ae8-4a44-898d-34
 - Mouse clicks and keyboard shortcuts control the same actions.
 - `y` shows the playing song's lyrics, beside the songs in wide windows and in their place otherwise.
 - Every Peel on the same network is a device, like Spotify Connect. `d` opens a small popup above the player that lists them. Choosing one moves the music there. See [Devices](#devices).
-- Hi-res playback on Linux is in progress. [hires/](hires/README.md) builds and tests a slimmed Waydroid in which Apple Music's Android app plays bit-perfect up to 24-bit/192 kHz. Peel does not play through it yet.
+- On Linux, Peel plays Hi-Res Lossless through Apple Music's Android app in a slimmed Waydroid, up to 24-bit/192 kHz. See [Hi-res playback](#hi-res-playback).
 
 ## Run
 
@@ -65,6 +65,14 @@ A release install checks its channel when Peel opens, at most every six hours. A
 | Nightly | `main` as of each night it changed, after the same tests. It has the newest features and can break. |
 
 A source checkout like this one updates through git and does not update itself.
+
+### Hi-res playback
+
+Apple's web player, and so Peel's engine, streams AAC. Hi-Res Lossless is decrypted only inside Apple's own apps. On Linux, [hires/](hires/README.md) runs Apple Music's Android app in a slimmed Waydroid on an invisible display, and its audio reaches PipeWire unchanged. Set it up once as `hires/README.md` describes, which needs sudo once.
+
+Once the pipeline's root helper is installed, Peel plays through Android by itself. The web engine does not start, which saves its memory. `PEEL_PLAYER=web` plays through the web engine instead. Search, the library, remote control, and moving music between devices work the same. A small host process, the `peel-hires-host` user unit, speaks the engine's protocol to Peel and controls Apple Music's media session through a controller that `peel-hires controller` starts inside Android. Commands take a few milliseconds, and a new queue starts in about 50 ms once Android runs. The first start boots Android, which takes about 12 seconds.
+
+The volume control sets Android's media volume. Only full volume leaves the samples unchanged, so use your amplifier or DAC for volume. Android mixes at a fixed 192 kHz, so 192 kHz songs play bit-perfect and others are upsampled to 192 kHz. Songs whose only copy is in your library, without a catalog version, cannot play in hi-res. The web engine still renews Peel's Apple sign-in when Apple rejects it.
 
 ### Where Peel keeps its files
 
