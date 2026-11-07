@@ -33,7 +33,7 @@ The popups blank the cells under them without painting a background, so the term
 
 Another device can read this computer's engine state and send it playback commands: play, pause, skip, seek, volume, shuffle, repeat, queue edits, ratings, and moving a queue. It cannot read the Apple sign-in, change the stream quality, or stop the engine. Engine requests from another device start this computer's engine when it is not running, as a song chosen here would.
 
-Rapid seek inputs combine into the latest requested position while a seek waits to run. Skipping or choosing another song discards pending seeks for the old song. Playback gestures that wait more than one second behind another command are discarded, so a slow player does not replay old key presses for minutes. The first gesture can still wait for its own engine startup. A running operation finishes before another starts. Queue edits and the pause and resume operations used to coordinate device moves keep their order and do not expire on the host.
+Key presses that wait behind a slow command never pile up. Each kind of control waits as one command at most and runs with everything pressed meanwhile: twenty presses of Left seek back 200 seconds in one command, three presses of Next skip three songs, Previous then Next skip none, and play/pause pressed twice cancels out. Volume presses become one change. A seek meant for a song that is no longer playing is dropped. Other commands, such as queue edits, keep their order.
 
 ## Network use
 

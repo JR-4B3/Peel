@@ -66,9 +66,6 @@ setInterval(() => {
 }, 1000).unref();
 
 const maxBody = 8 * 1024 * 1024;
-// Playback gestures wait at most one second to start. A running operation keeps its lock.
-// Pause and resume also coordinate device moves and must complete even after a long wait.
-const controls = new Set(["toggle", "next", "previous", "jump", "seek", "volume", "shuffle", "toggleShuffle", "toggleRepeat"]);
 
 // Only the page's player methods can be called, by name, with JSON arguments.
 function serve(window, key) {
@@ -77,11 +74,7 @@ function serve(window, key) {
     if (!/^\w+$/.test(method)) throw new Error("Invalid method");
     const run = () => window.webContents.executeJavaScript(`Promise.resolve().then(() => window.peelEngine ? window.peelEngine.${method}(...${JSON.stringify(args)}) : { ready: false })`);
     if (method === "state") return run();
-    const expires = Date.now() + 1000;
-    const result = calling.catch(() => {}).then(() => {
-      if (controls.has(method) && Date.now() > expires) throw new Error("The player was busy. An old playback control was discarded. Try again.");
-      return run();
-    });
+    const result = calling.catch(() => {}).then(run);
     calling = result;
     return result;
   };

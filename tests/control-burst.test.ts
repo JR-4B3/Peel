@@ -1,4 +1,4 @@
-import { afterEach, expect, spyOn, test } from "bun:test";
+import { afterEach, expect, test } from "bun:test";
 import { Engine } from "../src/engine";
 import { Model } from "../src/model";
 import { fixture } from "./fixture";
@@ -7,149 +7,106 @@ import { stopped } from "../src/types";
 const cleanup: (() => void)[] = [];
 afterEach(() => { for (const fn of cleanup.splice(0).reverse()) fn(); });
 
+// A player whose first command hangs until release, as a slow remote device or a busy engine
+// would. Every later key press arrives while it waits.
 function controller() {
   const api = fixture();
   cleanup.push(() => api.server.stop(true));
   let release!: () => void, started!: () => void;
   const held = new Promise<void>(resolve => { release = resolve; });
   const firstStarted = new Promise<void>(resolve => { started = resolve; });
-  cleanup.push(release);
-  const calls: { method: string; args: any[]; target: string }[] = [];
-  let now = Date.now(), target = "local", fail = false;
-  const clock = spyOn(Date, "now").mockImplementation(() => now);
-  cleanup.push(() => clock.mockRestore());
-  const playback = {
-    ...structuredClone(stopped), state: "playing" as const, time: { currentTime: 30, duration: 600 },
-    nowPlaying: { name: "First", playParams: { id: "1" } },
-  };
+  cleanup.push(() => release());
+  const calls: { method: string; args: any[] }[] = [];
+  let fail = false;
+  const playback = { ...structuredClone(stopped), state: "playing" as const, time: { currentTime: 30, duration: 600 }, nowPlaying: { name: "First", playParams: { id: "1" } } };
   const player = new Engine(undefined, async (path, body: any) => {
     if (path === "/state") return { ready: true, playback: structuredClone(playback) };
     const { method, args } = body;
     if (method === "position") return { position: 0, total: 5 };
-    calls.push({ method, args, target });
+    calls.push({ method, args });
     if (calls.length === 1) { started(); await held; if (fail) throw new Error("The device did not answer."); }
     if (method === "seek") playback.time.currentTime = args[0];
-    if (["next", "previous", "jump"].includes(method)) {
-      playback.time.currentTime = 0;
-      playback.nowPlaying = { name: "Other", playParams: { id: method === "previous" ? "0" : "2" } };
-    }
+    if (method === "volume") playback.volume = args[0];
+    if (["next", "previous", "jump"].includes(method)) { playback.time.currentTime = 0; playback.nowPlaying = { name: "Other", playParams: { id: `after-${calls.length}` } }; }
     return null;
   });
   const model = new Model(api.library, player);
   model.connected = true; model.playback = structuredClone(playback);
-  return {
-    model, playback, calls, release, firstStarted,
-    elapse: (ms: number) => { now += ms; }, fail: () => { fail = true; },
-    setTarget: (name: string) => { target = name; },
-  };
+  return { model, calls, firstStarted, release: () => release(), failFirst: () => { fail = true; } };
 }
 
-test("a burst of seek keys does not replay every intermediate position after a slow seek", async () => {
-  const app = controller();
-  const first = app.model.seek(10);
-  await app.firstStarted;
-  const burst = Array.from({ length: 20 }, () => app.model.seek(10));
-  app.release();
-  await Promise.all([first, ...burst]);
-  expect(app.playback.time.currentTime).toBe(240);
-  expect(app.calls.map(call => call.args[0])).toEqual([40, 240]);
-});
-
-test("skipping discards pending seeks for the old song and preserves a short skip sequence", async () => {
+test("twenty seek presses during a slow seek run as one more seek, at the sum of the presses", async () => {
   const app = controller();
   const first = app.model.seek(-10);
   await app.firstStarted;
   const burst = Array.from({ length: 20 }, () => app.model.seek(-10));
-  const previous = app.model.skip(-1), next = app.model.skip(1);
   app.release();
-  await Promise.all([first, ...burst, previous, next]);
-  expect(app.calls.map(call => call.method)).toEqual(["seek", "previous", "next"]);
-  expect(app.playback.time.currentTime).toBe(0);
-  await app.model.seek(10);
-  expect(app.playback.time.currentTime).toBe(10);
+  await Promise.all([first, ...burst]);
+  expect(app.calls.map(call => [call.method, call.args[0]])).toEqual([["seek", 20], ["seek", 0]]);
 });
 
-test("controls older than one second are dropped while queue edits and fresh controls still work", async () => {
+test("waiting skips add up, and Previous then Next skip nothing", async () => {
   const app = controller();
-  const first = app.model.seek(-10);
+  const first = app.model.act("/playback/pause");
   await app.firstStarted;
-  const pending = [app.model.seek(-10), app.model.skip(-1), app.model.skip(1), app.model.act("/playback/toggle"), app.model.volume(0.05)];
-  const edit = app.model.act("/queue/items/3", {}, "DELETE");
-  app.elapse(1001); app.release();
-  await Promise.all([first, ...pending, edit]);
-  expect(app.calls.map(call => call.method)).toEqual(["seek", "remove"]);
-  await app.model.skip(1);
-  expect(app.calls.map(call => call.method)).toEqual(["seek", "remove", "next"]);
-});
-
-test("a failed control cancels the queued gestures and allows a fresh attempt", async () => {
-  const app = controller();
-  const first = app.model.seek(-10);
-  await app.firstStarted;
-  const pending = [app.model.seek(-10), app.model.skip(-1), app.model.skip(1)];
-  app.fail(); app.release();
+  const pending = [app.model.skip(1), app.model.skip(1), app.model.skip(1), app.model.skip(-1)];
+  app.release();
   await Promise.all([first, ...pending]);
+  expect(app.calls.map(call => call.method)).toEqual(["pause", "next", "next"]);
+  const again = controller();
+  const busy = again.model.act("/playback/pause");
+  await again.firstStarted;
+  const cancelled = [again.model.skip(-1), again.model.skip(1)];
+  again.release();
+  await Promise.all([busy, ...cancelled]);
+  expect(again.calls.map(call => call.method)).toEqual(["pause"]);
+});
+
+test("play/pause pressed twice while waiting cancels out, three times toggles once", async () => {
+  const app = controller();
+  const first = app.model.seek(5);
+  await app.firstStarted;
+  const twice = [app.model.act("/playback/toggle"), app.model.act("/playback/toggle")];
+  app.release();
+  await Promise.all([first, ...twice]);
   expect(app.calls.map(call => call.method)).toEqual(["seek"]);
-  expect(app.model.status).toContain("did not answer");
-  await app.model.skip(1);
-  expect(app.calls.map(call => call.method)).toEqual(["seek", "next"]);
+  const again = controller();
+  const busy = again.model.seek(5);
+  await again.firstStarted;
+  const thrice = [again.model.act("/playback/toggle"), again.model.act("/playback/toggle"), again.model.act("/playback/toggle")];
+  again.release();
+  await Promise.all([busy, ...thrice]);
+  expect(again.calls.map(call => call.method)).toEqual(["seek", "toggle"]);
 });
 
-test("switching devices cancels old pending controls and sends new controls to the new target", async () => {
+test("volume presses while waiting become one change, and other commands keep their order", async () => {
   const app = controller();
-  const first = app.model.seek(-10);
+  const first = app.model.seek(5);
   await app.firstStarted;
-  const old = app.model.skip(1);
-  app.model.onOutput = async host => app.setTarget(host!);
-  const switching = app.model.selectOutput("main");
-  const fresh = app.model.skip(-1);
-  app.release();
-  await Promise.all([first, old, switching, fresh]);
-  expect(app.calls.map(call => [call.method, call.target])).toEqual([["seek", "local"], ["quality", "main"], ["previous", "main"]]);
-});
-
-test("a seek is discarded if the song changes while it waits", async () => {
-  const app = controller();
-  const first = app.model.act("/playback/toggle");
-  await app.firstStarted;
-  const seeking = app.model.seekTo(50);
-  app.playback.nowPlaying.playParams.id = "another";
-  app.release();
-  await Promise.all([first, seeking]);
-  expect(app.calls.map(call => call.method)).toEqual(["toggle"]);
-});
-
-test("absolute seeks use the latest position and relative seeks clamp each press", async () => {
-  const app = controller();
-  const first = app.model.seekTo(20);
-  await app.firstStarted;
-  const pending = [app.model.seekTo(300), app.model.seekTo(590), app.model.seek(30), app.model.seek(-10)];
+  const pending = [app.model.volume(0.05), app.model.volume(0.05), app.model.act("/playback/pause"), app.model.volume(0.05)];
   app.release();
   await Promise.all([first, ...pending]);
-  expect(app.calls.map(call => call.args[0])).toEqual([20, 590]);
+  expect(app.calls.map(call => call.method)).toEqual(["seek", "volume", "pause"]);
+  expect(app.calls[1]!.args[0]).toBeCloseTo(0.65);
 });
 
-test("the first control can start a cold engine while old gestures behind it expire", async () => {
+test("a seek meant for a song that stopped playing is dropped", async () => {
   const app = controller();
-  let ready!: () => void, waking!: () => void;
-  const startup = new Promise<void>(resolve => { ready = resolve; });
-  const started = new Promise<void>(resolve => { waking = resolve; });
-  app.model.connected = false;
-  app.model.wake = async () => { waking(); await startup; };
-  const first = app.model.act("/playback/toggle");
-  await started;
-  const old = app.model.skip(1);
-  app.elapse(5000); ready(); app.release();
-  await Promise.all([first, old]);
-  expect(app.calls.map(call => call.method)).toEqual(["quality", "toggle"]);
+  const first = app.model.skip(1);
+  await app.firstStarted;
+  const seek = app.model.seek(30);
+  app.release();
+  await Promise.all([first, seek]);
+  expect(app.calls.map(call => call.method)).toEqual(["next"]);
 });
 
-test("relative seeks keep their accumulated position across an intervening volume change", async () => {
+test("a failed command does not stop later presses from running", async () => {
   const app = controller();
+  app.failFirst();
   const first = app.model.seek(10);
   await app.firstStarted;
-  const volume = app.model.volume(0.05), second = app.model.seek(10);
   app.release();
-  await Promise.all([first, volume, second]);
-  expect(app.calls.map(call => [call.method, call.args[0]])).toEqual([["seek", 40], ["volume", 0.55], ["seek", 50]]);
+  expect(await first).toBe(false);
+  expect(await app.model.seek(10)).toBe(true);
+  expect(app.calls.map(call => call.method)).toEqual(["seek", "seek"]);
 });

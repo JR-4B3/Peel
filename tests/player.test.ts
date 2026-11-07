@@ -219,7 +219,7 @@ describe("the rendered player", () => {
     expect(app.calls.filter(call => call.path === "/audio/volume").at(-1)).toEqual({ path: "/audio/volume", method: "PATCH", body: { volume: 1 } });
   });
 
-  test("seek arrows followed by Previous and Next do not replay the old seeks", async () => {
+  test("a burst of seek arrows runs as one more seek, and Previous then Next cancel out", async () => {
     const app = await setup(120, 36, "favourites");
     let release!: () => void, started!: () => void;
     const held = new Promise<void>(resolve => { release = resolve; });
@@ -238,9 +238,7 @@ describe("the rendered player", () => {
     } finally { release(); }
     // Waiting for a later control also waits for the keyboard commands ahead of it.
     await app.model.volume(0.05);
-    expect(app.calls.filter(call => call.path.startsWith("/playback/")).map(call => call.path)).toEqual([
-      "/playback/seek", "/playback/previous", "/playback/next",
-    ]);
+    expect(app.calls.filter(call => call.path.startsWith("/playback/")).map(call => call.path)).toEqual(["/playback/seek", "/playback/seek"]);
   });
 
   test("the sidebar shows hidden entries only while editing, and Enter shows or hides them", async () => {

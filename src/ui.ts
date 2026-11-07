@@ -929,7 +929,7 @@ export class PeelUI {
     // explains why this computer shows nothing.
     const away = !song && !target ? this.model.devices.find(device => device.output && !device.self && device.paired && !device.online) : undefined;
     this.subtitle.content = away ? `${away.name} plays the music, but this Peel cannot reach it. Press d to see your devices.`
-      : [target ? `On ${target}` : "", song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : this.model.starting ? "Starting the player..." : "Choose a song to start"].filter(Boolean).join("  /  ");
+      : song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : this.model.starting ? "Starting the player..." : "Choose a song to start";
     this.playerCover.setArt(song?.artwork?.url);
     const favourite = this.model.favourite;
     this.favouriteButton.visible = !!song;
