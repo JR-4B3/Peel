@@ -219,7 +219,7 @@
       const target = matched ? sources.findIndex(index => index >= start) : music.queue.position;
       music.queue.items.forEach((item, index) => { const source = matched ? sources[index] : index; if (marks.includes(source) && items[source]) added.set(item, items[source]); });
       music.repeatMode = Math.max(0, repeats.indexOf(repeatMode));
-      if (cue) return;
+      if (cue) { if (shuffleMode) music.shuffleMode = 1; return; }
       const volume = music.volume;
       if (!playing) music.volume = 0;
       try {

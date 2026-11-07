@@ -333,3 +333,10 @@ test("a pause counts at once, even while MusicKit still reports playing, and a p
   music.emit("mediaPlaybackError", { errorCode: "MEDIA_SESSION", message: "loadSegmentError" });
   expect(logs.filter(text => text.startsWith("peel:recover"))).toEqual([]);
 });
+
+test("a queue set again after a stuck player keeps shuffle on", async () => {
+  const { engine, music } = await musicKit();
+  Object.assign(music, { shuffleMode: 0, repeatMode: 0 });
+  await engine.importPlayback({ items: [song("c1"), song("c2")], position: 0, playing: false, cue: true, shuffleMode: true });
+  expect(music.shuffleMode).toBe(1);
+});

@@ -429,5 +429,35 @@ test("a reload that hangs itself still lets the commands behind it run", async (
   const [play, pause] = [send("play"), send("pause")];
   expect((await play).status).toBe(500);
   expect((await pause).status).toBe(200);
-  expect(invoked).toEqual(["play", "volume", "importPlayback", "pause"]);
+  // The fresh player hangs while its queue is set, so an empty one replaces it before Pause runs.
+  expect(invoked).toEqual(["play", "volume", "importPlayback", "volume", "pause"]);
+});
+
+test("a reloaded player that hangs too is replaced by an empty one, so its late queue cannot replace newer music", async () => {
+  const { context, server } = engineMain({});
+  vm.runInContext("stuckAfter = 50", context);
+  // Each page has its own queue. Work for a page that has been replaced changes nothing.
+  let page = 0, queue = ["a", "b"], finishCue!: () => void;
+  const cueHeld = new Promise<void>(resolve => { finishCue = resolve; });
+  context.serve({ loadURL: async () => { page++; queue = []; }, webContents: { executeJavaScript: async (source: string) => {
+    const call = source.match(/peelEngine\.(\w+)\(\.\.\.(.*)\)\s*:/s);
+    if (!call) return;
+    const [, method, args] = call, mine = page;
+    if (method === "state") return { ready: true };
+    if (method === "exportPlayback") return { items: queue.map(id => ({ id })), position: 0 };
+    if (method === "play" && mine === 0) { await new Promise(() => {}); }
+    if (method === "play") { queue = ["fresh"]; return null; }
+    if (method === "importPlayback") { const items = JSON.parse(args)[0].items.map((item: { id: string }) => item.id); await cueHeld; if (page === mine) queue = items; }
+    return null;
+  } } }, "test-key");
+  await once(server(), "listening"); cleanup.push(() => server().close());
+  const port = (server().address() as net.AddressInfo).port;
+  const send = (method: string) => fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method, args: [] }) });
+  const stuck = send("play");
+  expect((await stuck).status).toBe(500);
+  expect((await send("play")).status).toBe(200);
+  // The hung queue import of the first fresh player finishes late.
+  finishCue(); await Bun.sleep(20);
+  expect(queue).toEqual(["fresh"]);
+  expect(page).toBe(2);
 });

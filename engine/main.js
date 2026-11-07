@@ -113,9 +113,12 @@ function serve(window, key) {
       if (settled) return;
       settled = true;
       log("the player stopped answering; reloading it");
-      // Reading the queue and reloading are bounded too, so the commands behind always run.
+      // Reading the queue and reloading are bounded too, so the commands behind always run. If the
+      // fresh player hangs as well, one more is loaded with nothing in it, so nothing left over can
+      // change playback once later commands run. The queue is lost then.
       const queue = await within(evaluate("exportPlayback").catch(() => undefined), 2000);
-      await within(reload(queue && { ...queue, playing: false, cue: true }), stuckAfter).catch(error => log(`could not reload the player: ${error?.message ?? error}`));
+      const restored = await within(reload(queue && { ...queue, playing: false, cue: true }).then(() => true), stuckAfter).catch(() => false);
+      if (!restored) await within(reload(), stuckAfter).catch(error => log(`could not reload the player: ${error?.message ?? error}`));
       reject(new Error("The player stopped answering and was reloaded. Press play to continue."));
     }, stuckAfter);
     operation.then(value => finish(resolve, value), error => finish(reject, error));
