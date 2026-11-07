@@ -335,7 +335,8 @@ public final class Control {
           if (state == null) continue;
           long now = (Long) call(state, "getActiveQueueItemId");
           int code = (Integer) call(state, "getState");
-          if (!(code == 3 || code == 6 || code == 8)) continue;
+          // A new queue starts paused and logs its first song's format then, so the song change is
+          // noticed in any state, and the switch waits until it plays.
           if (now != item) { item = now; changed = System.currentTimeMillis(); rate = 0; failed = 0; }
           if (rate == 0) {
             // The song's start line comes a few tens of milliseconds before the change shows, or
@@ -346,7 +347,7 @@ public final class Control {
             if (rate == 0 && System.currentTimeMillis() - changed > 1000) rate = -1;
           }
           // Tried again every two seconds until the mixer runs at the rate, while the song plays.
-          if (rate > 0 && System.currentTimeMillis() - failed > 2000 && Rates.mixer() != rate) {
+          if ((code == 3 || code == 6 || code == 8) && rate > 0 && System.currentTimeMillis() - failed > 2000 && Rates.mixer() != rate) {
             if (Rates.set(rate) != rate) failed = System.currentTimeMillis();
           }
         } catch (InterruptedException stop) { return; }
