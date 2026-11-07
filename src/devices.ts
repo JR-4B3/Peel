@@ -296,6 +296,8 @@ export interface NetworkOptions {
   announceEvery?: number;
   // Tests run several devices on one computer and reach them at its own addresses.
   allowOwnAddresses?: boolean;
+  // How long a claim stands before music playing here without one takes it over. Tests shorten it.
+  claimSettle?: number;
 }
 
 export class DeviceNetwork extends EventEmitter {
@@ -308,6 +310,9 @@ export class DeviceNetwork extends EventEmitter {
   private known = new Map<string, Known>();
   private nearby = new Map<string, Nearby>();
   private summaries = new Map<string, Summary | undefined>();
+  // When the claim last changed, and whether this computer played at the previous check.
+  private claimChanged = Date.now();
+  private playedBefore = false;
   private sessions = new Map<string, Set<Session>>();
   private connecting = new Map<string, number>();
   // Set when this device declined a pairing. Every request is refused for a while after that, so a
@@ -383,6 +388,7 @@ export class DeviceNetwork extends EventEmitter {
     this.known.clear();
     for (const value of Array.isArray(stored?.known) ? stored.known.slice(0, 64) : []) { const device = readKnown(value); if (device && device.id !== this.id) this.known.set(device.id, device); }
     this.claim = validClaim(stored?.output) ? stored.output : { device: this.id, generation: 0 };
+    this.claimChanged = Date.now();
     if (!stored || stored.id !== this.id) await saveJson("devices.json", { id: this.id, keys: this.groupKeys, known: this.knownList(), output: this.claim }, this.dir).catch(() => {});
   }
 
@@ -428,6 +434,7 @@ export class DeviceNetwork extends EventEmitter {
   // This device's view of who plays moves to device, and every connected device hears about it.
   claimOutput(device: string) {
     this.claim = { device, generation: this.claim.generation + 1 };
+    this.claimChanged = Date.now();
     void this.persist();
     for (const sessions of this.sessions.values()) for (const session of sessions) if (!session.closed) void session.request("claim", { claim: this.claim }).catch(() => {});
     this.emit("claim", this.claim);
@@ -438,6 +445,7 @@ export class DeviceNetwork extends EventEmitter {
     // Generation 0 is every device's own starting point, not a choice anyone made.
     if (!validClaim(claim) || claim.generation < 1 || !newer(claim, this.claim)) return;
     this.claim = { device: claim.device, generation: claim.generation };
+    this.claimChanged = Date.now();
     void this.persist();
     // The music moved to another device, so this one stops.
     if (claim.device !== this.id) void this.options.local.pause().catch(() => {});
@@ -494,6 +502,7 @@ export class DeviceNetwork extends EventEmitter {
     this.groupKeys = [newGroupKey()];
     // A new group starts its claims again, even after a paired device sent a huge generation.
     this.claim = { device: this.id, generation: 1 };
+    this.claimChanged = Date.now();
     await this.persist();
     this.emit("claim", this.claim);
     this.changed();
@@ -602,6 +611,18 @@ export class DeviceNetwork extends EventEmitter {
         if (missed >= 2 && !session.closed) session.end();
       } finally { this.checking.delete(session); }
     }));
+    this.claimUnclaimed(own);
+  }
+
+  // Music can start here without a claim, for example from a Peel that controls this computer over
+  // SSH. Then the other Peels would keep showing the device that played before. This computer
+  // claims the music once it has played at two checks in a row, the device holding the claim does
+  // not play, and the claim has stood for a while, so a handover in progress never bounces back.
+  private claimUnclaimed(own: Summary | undefined) {
+    const playing = own?.state === "playing";
+    const settled = Date.now() - this.claimChanged >= (this.options.claimSettle ?? 10000);
+    if (playing && this.playedBefore && settled && this.claim.device !== this.id && this.summaries.get(this.claim.device)?.state !== "playing") this.claimOutput(this.id);
+    this.playedBefore = playing;
   }
 
   private async sync(session: Session) {

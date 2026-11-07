@@ -50,7 +50,7 @@ function fakeEngine() {
 
 // One computer: its engine, its player, and its place on the network. Devices find each other
 // directly in tests rather than by broadcast.
-async function computer(name: string, announceEvery = 60000) {
+async function computer(name: string, announceEvery = 60000, claimSettle?: number) {
   const dir = await mkdtemp(join(tmpdir(), "peel-devices-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const fake = fakeEngine();
   let failImport = false;
@@ -60,7 +60,7 @@ async function computer(name: string, announceEvery = 60000) {
     return inner(path, body);
   };
   const player = new DevicePlayer(undefined, () => {}, fake.engine, async () => { fake.state.started++; });
-  const network = new DeviceNetwork({ local: player.localPlayer(), dir, name, port: 0, discovery: false, announceEvery, allowOwnAddresses: true });
+  const network = new DeviceNetwork({ local: player.localPlayer(), dir, name, port: 0, discovery: false, announceEvery, allowOwnAddresses: true, claimSettle });
   player.attach(network);
   await network.start();
   cleanup.push(() => network.close());
@@ -319,6 +319,32 @@ test("a favourite set on the playing device replaces an earlier answer, in the p
   expect(model.items[0]!.loved).toBe(!known);
   expect(model.lovedRevision).toBeGreaterThan(revision);
 });
+
+test("music started here without a claim, as from a Peel over SSH, makes the other Peels follow", async () => {
+  const mac = await computer("Mac", 60000, 100), main = await computer("main", 60000, 100);
+  mac.player.onRetarget = () => { mac.player.applyTarget(); };
+  await link(mac, main);
+  // The Mac played last, so every Peel shows the Mac.
+  mac.network.claimOutput(mac.network.id);
+  await waitFor(() => main.network.claim.device === mac.network.id, "main following the Mac");
+  // A Peel on the Mac starts music on main over SSH, straight at main's engine.
+  Object.assign(main.fake.state, { items: [song("worth it")], position: 0, playing: true });
+  await waitFor(() => main.network.claim.device === main.network.id, "main claiming the music", 8000);
+  await waitFor(() => mac.player.peer === main.network.id, "the Mac following main");
+  expect(main.fake.state.playing).toBe(true);
+}, 15000);
+
+test("a device that plays keeps the claim while another one plays too", async () => {
+  const mac = await computer("Mac", 60000, 100), main = await computer("main", 60000, 100);
+  await link(mac, main);
+  Object.assign(mac.fake.state, { items: [song("a")], position: 0, playing: true });
+  mac.network.claimOutput(mac.network.id);
+  await waitFor(() => main.network.claim.device === mac.network.id, "main following the Mac");
+  Object.assign(main.fake.state, { items: [song("b")], position: 0, playing: true });
+  await Bun.sleep(5000);
+  expect(main.network.claim.device).toBe(mac.network.id);
+  expect(mac.fake.state.playing).toBe(true);
+}, 15000);
 
 test("music started after pairing makes the other Peels follow", async () => {
   const mac = await computer("Mac"), main = await computer("main");
