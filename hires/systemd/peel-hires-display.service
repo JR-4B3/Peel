@@ -1,0 +1,8 @@
+[Unit]
+Description=Invisible Wayland display for Peel's hi-res Android
+
+[Service]
+ExecStart=/usr/bin/weston --backend=headless --renderer=gl --socket=peel-hires --width=1080 --height=1920 --no-config --idle-time=0
+# Ready once the socket exists, so the session never starts before its display.
+ExecStartPost=/bin/sh -c 'for i in $(seq 100); do [ -S "$XDG_RUNTIME_DIR/peel-hires" ] && exit 0; sleep 0.1; done; exit 1'
+Restart=on-failure

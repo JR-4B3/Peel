@@ -4,7 +4,8 @@ import { join } from "node:path";
 import { cacheDir } from "./config";
 
 const size = 240;
-const capacity = 150;
+// Decoded covers take about 230 KB each. 64 cover a full grid of tiles and the player.
+const capacity = 64;
 const images = new Map<string, Promise<NativeImage | undefined>>();
 
 // Apple artwork URLs are templates ({w}x{h}bb.{f}) or already sized library URLs.

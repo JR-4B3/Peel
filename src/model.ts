@@ -301,6 +301,8 @@ export class Model extends EventEmitter {
 
   private remember() {
     this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, loading: this.loading, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter });
+    // Each entry keeps its whole list, so only the last 20 pages can be returned to.
+    if (this.history.length > 20) this.history.shift();
     this.filter = unfiltered;
   }
 
