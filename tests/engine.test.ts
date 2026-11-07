@@ -65,7 +65,9 @@ async function musicKit() {
   const music: any = {
     isAuthorized: true, volume: 0.5, items: [] as any[], position: -1,
     get queue() { return { items: music.items, position: music.position, spliceQueueItems: (at: number, count: number, entries: any[] = []) => music.items.splice(at, count, ...entries) }; },
-    addEventListener() {},
+    events: {} as Record<string, ((event?: any) => void)[]>,
+    addEventListener(name: string, fn: (event?: any) => void) { (music.events[name] ??= []).push(fn); },
+    emit(name: string, event?: any) { for (const fn of music.events[name] ?? []) fn(event); },
     async setQueue({ items, startWith = 0 }: any) { music.items = items.map(entry); music.position = startWith; },
     async playAt(at: number, { items }: any) { music.items.splice(at, 0, ...items.map(entry)); },
     async changeToMediaAtIndex(index: number) { music.position = index; },
@@ -73,11 +75,12 @@ async function musicKit() {
   const window: any = { peel: { token: "t", volume: 0.5 } };
   const document = { addEventListener: (name: string, fn: () => unknown) => { listeners[name] = fn; }, createElement: () => ({ dataset: {} }), head: { append() {} } };
   const MusicKit = { configure: async () => music };
-  new Function("window", "document", "MusicKit", "console", await Bun.file(new URL("../engine/engine.js", import.meta.url)).text())(window, document, MusicKit, { log() {} });
+  const logs: string[] = [];
+  new Function("window", "document", "MusicKit", "console", await Bun.file(new URL("../engine/engine.js", import.meta.url)).text())(window, document, MusicKit, { log: (text: string) => logs.push(text) });
   await listeners.musickitloaded!();
   const engine = window.peelEngine;
   const queued = () => engine.queue().items.filter((item: any) => item.added).map((item: any) => item.id);
-  return { engine, music, queued };
+  return { engine, music, queued, logs };
 }
 
 test("added songs wait after the playing song, apart from the rest of the collection", async () => {
@@ -271,4 +274,28 @@ test("the engine lists only the added songs and the queue's place for the networ
   expect(engine.added(0, 100)).toEqual({ more: false, items: [expect.objectContaining({ id: "a1", queueIndex: 1 }), expect.objectContaining({ id: "a2", queueIndex: 2 })] });
   expect(engine.added(1, 1)).toEqual({ more: false, items: [expect.objectContaining({ id: "a2", queueIndex: 2 })] });
   expect(engine.position()).toEqual({ position: 0, total: 5 });
+});
+
+test("a failure to load audio while playing asks to continue at the same place, or with the next song at the end", async () => {
+  const { engine, music, logs } = await musicKit();
+  await engine.play([song("c1"), song("c2"), song("c3")], 0);
+  const recoveries = () => logs.filter(text => text.startsWith("peel:recover")).map(text => JSON.parse(text.slice(13)));
+  const playing = (time: number) => { Object.assign(music, { playbackState: 2, currentPlaybackTime: time, currentPlaybackDuration: 200 }); music.emit("playbackTimeDidChange"); };
+  playing(73);
+  music.emit("mediaPlaybackError", { errorCode: "MEDIA_SESSION", message: "loadSegmentError" });
+  expect(recoveries()).toEqual([{ position: 0, time: 73 }]);
+  playing(199);
+  music.emit("mediaPlaybackError", { errorCode: "MEDIA_SESSION", message: "loadSegmentError" });
+  expect(recoveries().at(-1)).toEqual({ position: 1, time: 0 });
+  // Other errors, and music that was not playing a moment ago, are left alone.
+  music.emit("mediaPlaybackError", { errorCode: "CONTENT_RESTRICTED", message: "" });
+  expect(recoveries()).toHaveLength(2);
+  const now = Date.now;
+  Date.now = () => now() + 10000;
+  try { music.emit("mediaPlaybackError", { errorCode: "NETWORK_ERROR", message: "" }); } finally { Date.now = now; }
+  expect(recoveries()).toHaveLength(2);
+  // The last song failing at its end has nothing to continue with.
+  music.position = 2; playing(199);
+  music.emit("mediaPlaybackError", { errorCode: "NETWORK_ERROR", message: "" });
+  expect(recoveries()).toHaveLength(2);
 });

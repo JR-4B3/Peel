@@ -150,6 +150,9 @@ export class Model extends EventEmitter {
 
   fail(error: unknown) { this.status = error instanceof Error ? error.message : String(error); this.changed(); }
 
+  // The engine's last reason for stopping that the status line showed.
+  private shownError?: string;
+
   // Concurrent callers share one playback request and its result.
   refresh() {
     if (this.switchingOutput) return Promise.resolve();
@@ -168,6 +171,9 @@ export class Model extends EventEmitter {
         // A started or restarted engine plays at its default quality until told otherwise.
         if (recovering) void this.player.setQuality?.(this.preferences.quality).catch(() => {});
         if (recovering && !this.starting) this.status = "Ready to play";
+        // The engine says why playback stopped when it could not continue by itself.
+        if (this.playback.error && this.playback.error !== this.shownError) this.status = this.playback.error;
+        this.shownError = this.playback.error;
         this.changed();
       } catch (error) {
         // Cider not running yet is normal. Losing a working connection is reported.

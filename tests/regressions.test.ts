@@ -131,7 +131,7 @@ function engineMain(env: Record<string, string>) {
       return require(name);
     },
     process: { env }, __dirname: engineDir, __filename: join(engineDir, "main.js"), console: { log() {} }, Buffer,
-    setInterval: () => ({ unref() {} }),
+    setInterval: () => ({ unref() {} }), setTimeout, queueMicrotask,
   });
   vm.runInContext(source.slice(0, source.indexOf("app.whenReady()")), context);
   return { context, server: () => server!, quits };
@@ -276,4 +276,70 @@ test("status polling stays responsive while a host command is waiting", async ()
     const state = await fetch(`http://127.0.0.1:${port}/state`, { headers: { "x-peel-key": "test-key" }, signal: AbortSignal.timeout(1000) });
     expect((await state.json()).ready).toBe(true);
   } finally { unblock(); await command; }
+});
+
+// The engine's main process with a fake player page that records what it was asked to do.
+function recovering() {
+  const { context, server } = engineMain({});
+  const done: string[] = [];
+  let reloads = 0, release!: () => void;
+  const slow = new Promise<void>(resolve => { release = resolve; });
+  const queue = { items: [{ id: "a" }, { id: "b" }, { id: "c" }], position: 1, added: [], time: 0, playing: false };
+  context.serve({ loadURL: async () => { reloads++; done.push("reload"); }, webContents: { executeJavaScript: async (source: string) => {
+    const call = source.match(/peelEngine\.(\w+)\(\.\.\.(.*)\)\s*:/s);
+    if (!call) return;
+    const [, method, args] = call;
+    if (method === "state") return { ready: true };
+    if (method === "exportPlayback") return structuredClone(queue);
+    if (method === "slow") { await slow; return null; }
+    done.push(`${method} ${args}`);
+    return null;
+  } } }, "test-key");
+  const settle = async () => { for (let i = 0; i < 20; i++) await Bun.sleep(5); };
+  return { context, server, done, reloads: () => reloads, settle, release: () => release() };
+}
+
+test("a failure to load audio reloads the player and continues the queue where it stopped", async () => {
+  const app = recovering(); await once(app.server(), "listening"); cleanup.push(() => app.server().close());
+  vm.runInContext("recover({ position: 1, time: 42 })", app.context);
+  await app.settle();
+  expect(app.done[0]).toBe("reload");
+  const imported = JSON.parse(app.done.find(entry => entry.startsWith("importPlayback"))!.slice("importPlayback ".length))[0];
+  expect(imported).toMatchObject({ position: 1, time: 42, playing: true, items: [{ id: "a" }, { id: "b" }, { id: "c" }] });
+});
+
+test("a playback command since the failure wins, and the player reloads at most three times in ten minutes", async () => {
+  const app = recovering(); await once(app.server(), "listening"); cleanup.push(() => app.server().close());
+  const port = (app.server().address() as net.AddressInfo).port;
+  // A slow command keeps the player busy, the failure arrives, then a pause arrives behind it.
+  const busy = fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method: "slow", args: [] }) });
+  await app.settle();
+  vm.runInContext("recover({ position: 0, time: 10 })", app.context);
+  const pause = fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method: "pause", args: [] }) });
+  await app.settle(); app.release(); await busy; await pause; await app.settle();
+  expect(app.reloads()).toBe(0);
+  for (let attempt = 0; attempt < 4; attempt++) { vm.runInContext("recover({ position: 0, time: 10 })", app.context); await app.settle(); }
+  expect(app.reloads()).toBe(3);
+  expect(app.done.at(-1)).toContain("failed");
+});
+
+test("a player operation that never finishes holds up the commands behind it for 20 seconds at most", async () => {
+  const { context, server } = engineMain({});
+  const invoked: string[] = [];
+  let timers = 0;
+  context.setTimeout = (fn: () => void) => { timers++; queueMicrotask(fn); return { unref() {} }; };
+  context.serve({ webContents: { executeJavaScript: async (source: string) => {
+    const method = source.match(/peelEngine\.(\w+)\(/)![1]!;
+    invoked.push(method);
+    if (method === "play") await new Promise(() => {});
+    return null;
+  } } }, "test-key");
+  await once(server(), "listening"); cleanup.push(() => server().close());
+  const port = (server().address() as net.AddressInfo).port;
+  const send = (method: string) => fetch(`http://127.0.0.1:${port}/call`, { method: "POST", headers: { "x-peel-key": "test-key" }, body: JSON.stringify({ method, args: [] }) });
+  void send("play").catch(() => {});
+  const next = await send("next");
+  expect(next.status).toBe(200);
+  expect(invoked).toEqual(["play", "next"]);
+  expect(timers).toBeGreaterThan(0);
 });

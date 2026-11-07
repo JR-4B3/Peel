@@ -29,6 +29,8 @@ export interface Playback {
   repeatMode: "none" | "one" | "all";
   shuffleMode: boolean;
   queueRevision?: string;
+  // Why playback stopped by itself, when the engine could not continue.
+  error?: string;
 }
 
 export interface Page {

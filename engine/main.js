@@ -66,17 +66,59 @@ setInterval(() => {
 }, 1000).unref();
 
 const maxBody = 8 * 1024 * 1024;
+// The last playback command from a Peel, so continuing after a failure never restarts music the
+// listener paused or changed since.
+const playbackMethods = new Set(["pause", "stop", "resume", "toggle", "next", "previous", "seek", "play", "jump", "enqueue", "importPlayback"]);
+let lastCommand = 0;
+let recover = () => {};
+let volume = readJson("volume.json", { volume: 0.5 }).volume;
+
+// Loads the player page with Peel's engine in it. A player that failed is loaded anew, which gives
+// MusicKit a fresh audio element and DRM session.
+async function load(window) {
+  await window.loadURL(page);
+  await window.webContents.executeJavaScript(fs.readFileSync(path.join(__dirname, "engine.js"), "utf8"));
+}
 
 // Only the page's player methods can be called, by name, with JSON arguments.
 function serve(window, key) {
   let calling = Promise.resolve();
   const call = (method, args = []) => {
     if (!/^\w+$/.test(method)) throw new Error("Invalid method");
-    const run = () => window.webContents.executeJavaScript(`Promise.resolve().then(() => window.peelEngine ? window.peelEngine.${method}(...${JSON.stringify(args)}) : { ready: false })`);
+    const run = () => evaluate(method, args);
     if (method === "state") return run();
+    if (playbackMethods.has(method)) lastCommand = Date.now();
     const result = calling.catch(() => {}).then(run);
-    calling = result;
+    // A player operation that never finishes, such as starting a song Apple cannot stream, holds up
+    // the commands behind it for 20 seconds at most, so Next and Pause still work.
+    calling = Promise.race([result, new Promise(resolve => setTimeout(resolve, 20000).unref?.())]);
     return result;
+  };
+  const evaluate = (method, args = []) => window.webContents.executeJavaScript(`Promise.resolve().then(() => window.peelEngine ? window.peelEngine.${method}(...${JSON.stringify(args)}) : { ready: false })`);
+  // Continues after a failure to load audio, at most three times in ten minutes. Commands wait
+  // behind it, and a command sent since the failure wins over it.
+  const recoveries = [];
+  let recovering = false;
+  recover = ({ position, time }) => {
+    if (recovering) return;
+    recovering = true;
+    const failed = Date.now();
+    calling = calling.catch(() => {}).then(async () => {
+      if (lastCommand >= failed) return;
+      while (recoveries.length && failed - recoveries[0] > 10 * 60 * 1000) recoveries.shift();
+      if (recoveries.length >= 3) return void await evaluate("failed", ["Playback stopped after repeated network errors. Press play to try again."]);
+      const queue = await evaluate("exportPlayback");
+      if (!queue?.items?.[position]) return;
+      recoveries.push(failed);
+      log(`reloading the player to continue song ${position + 1} at ${Math.round(time)}s`);
+      await load(window);
+      for (const until = Date.now() + 30000; !(await evaluate("state"))?.ready;) {
+        if (Date.now() > until) throw new Error("the reloaded player did not become ready");
+        await new Promise(resolve => setTimeout(resolve, 200));
+      }
+      await evaluate("volume", [volume]);
+      await evaluate("importPlayback", [{ ...queue, position, time, playing: true }]);
+    }).catch(error => log(`could not continue playback: ${error?.message ?? error}`)).finally(() => { recovering = false; });
   };
   http.createServer((request, response) => {
     const reply = (status, value) => {
@@ -126,7 +168,6 @@ app.whenReady().then(async () => {
   writeJson("key.json", { port, key });
   const engine = session.fromPartition("persist:peel-engine");
   const token = await developerToken();
-  const volume = readJson("volume.json", { volume: 0.5 }).volume;
   const window = new BrowserWindow({
     show: process.env.PEEL_ENGINE_SHOW === "1", width: 480, height: 320,
     webPreferences: { session: engine, autoplayPolicy: "no-user-gesture-required", additionalArguments: [`--peel-token=${token}`, `--peel-volume=${volume}`], preload: path.join(__dirname, "preload.js") },
@@ -139,13 +180,14 @@ app.whenReady().then(async () => {
     const text = event.message ?? "";
     if (!text.startsWith("peel:")) return;
     const volumeChange = text.match(/^peel:volume ([\d.]+)/);
-    if (volumeChange) writeJson("volume.json", { volume: Number(volumeChange[1]) });
+    const recovery = text.match(/^peel:recover (\{.*\})$/);
+    if (volumeChange) { volume = Number(volumeChange[1]); writeJson("volume.json", { volume }); }
+    else if (recovery) { try { recover(JSON.parse(recovery[1])); } catch {} }
     else log(text.slice(5));
   });
   // Closing the hidden window would stop playback; the engine runs until it is stopped.
   window.on("close", event => { if (!quitting) event.preventDefault(); });
-  await window.loadURL(page);
-  await window.webContents.executeJavaScript(fs.readFileSync(path.join(__dirname, "engine.js"), "utf8"));
+  await load(window);
   serve(window, key);
 });
 app.on("window-all-closed", () => {});
