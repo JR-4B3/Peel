@@ -1,4 +1,5 @@
-import { BoxRenderable, TextRenderable, InputRenderable, ImageRenderable, StyledText, t, fg, bold, type CliRenderer, type KeyEvent, type MouseEvent, type RenderContext } from "@opentui/core";
+import { BoxRenderable, TextRenderable, InputRenderable, ImageRenderable, RGBA, StyledText, t, fg, bold, type CliRenderer, type KeyEvent, type MouseEvent, type OptimizedBuffer, type RenderContext } from "@opentui/core";
+import { shortVersion } from "./update";
 import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
 import { cover, largeCover, largeCoverSize } from "./artwork";
@@ -51,6 +52,18 @@ class Cover extends BoxRenderable {
   setSize(width: number, height: number) {
     this.width = width; this.height = height;
     if (this.image) { this.image.width = width; this.image.height = height; }
+  }
+}
+
+// A box over other content that blanks what is under it without painting a background, so the
+// terminal's own background and translucency show through, as everywhere else in Peel.
+const unpainted = RGBA.fromValues(0, 0, 0, 0);
+class ClearBox extends BoxRenderable {
+  protected renderSelf(buffer: OptimizedBuffer) {
+    const ink = RGBA.fromHex(colour.text);
+    for (let y = Math.max(0, this.y); y < Math.min(buffer.height, this.y + this.height); y++)
+      for (let x = Math.max(0, this.x); x < Math.min(buffer.width, this.x + this.width); x++) buffer.setCell(x, y, " ", ink, unpainted);
+    super.renderSelf(buffer);
   }
 }
 
@@ -450,6 +463,16 @@ export class PeelUI {
   private coverView?: BoxRenderable;
   private lyrics: LyricsView;
   private lyricsButton: Button;
+  private devicesButton: Button;
+  // The devices popup above the player, and the pairing prompt.
+  private devicesView?: BoxRenderable;
+  private devicesBackdrop?: BoxRenderable;
+  private devicesList?: ClickList;
+  private devicesKey = "";
+  private focusBefore?: { focus(): void; isDestroyed?: boolean } | null;
+  private pairingView?: BoxRenderable;
+  private pairingKey = "";
+  private forgetAsked = 0;
   // Whether the user wants lyrics. The enlarged cover hides them without changing this.
   private lyricsWanted = false;
   private focusChange = () => {
@@ -553,7 +576,10 @@ export class PeelUI {
     this.title = new TextRenderable(ctx, { id: "now-playing", fg: colour.text, attributes: 1, flexShrink: 1, minWidth: 0, height: 1, truncate: true, selectable: false });
     this.favouriteButton = this.button("favourite", icon.heartOutline, "f", () => void model.toggleFavourite(), colour.faint);
     this.indicator = new TextRenderable(ctx, { id: "playback-indicator", fg: colour.faint, height: 1, flexGrow: 1, minWidth: 0, selectable: false, truncate: true });
-    nowPlaying.add(this.title); nowPlaying.add(this.favouriteButton); nowPlaying.add(this.indicator); deck.add(nowPlaying);
+    // The devices button sits at the top right of the player, under the popup it opens.
+    this.devicesButton = this.button("devices", icon.devices, "d", () => this.toggleDevices(), colour.faint);
+    this.devicesButton.flexShrink = 0;
+    nowPlaying.add(this.title); nowPlaying.add(this.favouriteButton); nowPlaying.add(this.indicator); nowPlaying.add(this.devicesButton); deck.add(nowPlaying);
     this.subtitle = new TextRenderable(ctx, { id: "now-playing-artist", fg: colour.muted, height: 1, width: "100%", truncate: true, selectable: false,
       onMouseDown: event => { const song = model.playing; if (event.button === 0 && song) { event.stopPropagation(); void model.openArtist(song); this.focusContent(); } } });
     deck.add(this.subtitle);
@@ -576,6 +602,7 @@ export class PeelUI {
     this.controls.add(new TextRenderable(ctx, { content: " ", width: 1, height: 1 }));
     this.lyricsButton = this.button("lyrics-toggle", icon.lyrics, "y", () => this.toggleLyrics(), colour.faint);
     this.controls.add(this.lyricsButton);
+
     deck.add(this.controls);
     this.playerPanel.add(deck); this.root.add(this.playerPanel);
 
@@ -730,13 +757,15 @@ export class PeelUI {
   private update() {
     if (this.disposed) return;
     const model = this.model;
+    this.drawDevices();
+    this.drawPairing();
     const display = model.display;
     this.status.content = model.status;
     const artist = display === "sections";
     this.sizeHeader();
     this.trackPanel.title = model.view.startsWith("artist:") ? "Artist" : model.detail ? (model.detail.type.includes("playlist") ? "Playlist" : "Album") : model.title;
     this.arrange(display);
-    this.empty.visible = display === "list" && !model.items.length;
+    this.empty.visible = display === "list" && !model.items.length && model.view !== "settings";
     this.empty.content = model.loading ? "Loading..." : model.view === "queue" && !model.connected ? "The player is not running yet. The queue starts with your first song."
       : model.view === "queue" ? "No songs queued. Press e on a song, album, or playlist to add it, or Shift+E to play it next."
       : "Nothing here yet. Search above or choose something on the left.";
@@ -770,7 +799,7 @@ export class PeelUI {
     const sidebarKey = JSON.stringify([nav.map(item => [item.id, item.name, item.hidden]), model.view, editing]);
     if (sidebarKey !== this.lastSidebar) {
       this.lastSidebar = sidebarKey;
-      const glyph = (id: string) => id === "home" ? icon.home : id === "favourites" ? icon.heart : id === "songs" ? icon.songs : id === "albums" ? icon.album : id === "artists" ? icon.artist : id === "queue" ? icon.queue : icon.playlist;
+      const glyph = (id: string) => id === "home" ? icon.home : id === "favourites" ? icon.heart : id === "songs" ? icon.songs : id === "albums" ? icon.album : id === "artists" ? icon.artist : id === "queue" ? icon.queue : id === "settings" ? icon.settings : icon.playlist;
       // Home cannot be hidden, so it keeps its own glyph while editing.
       const editable = (id: string) => editing && id !== "home";
       this.sidebar.setRows(nav.map(item => ({
@@ -796,7 +825,10 @@ export class PeelUI {
     // Loading a page replaces the items array, so comparing the array is enough to notice new songs.
     const rowsKey = JSON.stringify([model.view, playing?.name, playing?.artistName, this.tracks.columns, this.tracks.rowHeight, model.lovedRevision, model.preferences.heartsInFavourites]);
     const shown = model.shown;
-    if (rowsKey !== this.lastRows || shown !== this.lastItems) {
+    if (model.view === "settings") {
+      const rows = this.settingsRows(), key = JSON.stringify(["settings", rows.map(row => [row.id, row.right, row.description])]);
+      if (key !== this.lastRows) { this.lastRows = key; this.lastItems = undefined; this.tracks.setRows(rows); }
+    } else if (rowsKey !== this.lastRows || shown !== this.lastItems) {
       this.lastRows = rowsKey; this.lastItems = shown;
       const digits = String(model.items.length).length;
       this.tracks.setRows(shown.map((item, index) => {
@@ -840,10 +872,16 @@ export class PeelUI {
     if (this.search.focused) pairs.push(["⏎", "search"], ["Esc", "leave"]);
     else if (this.filterInput.focused) pairs.push(["Esc", "clear"]);
     else if (this.sidebar.focused && !this.editingSidebar) pairs.push(["⏎", "open"], ["e", "edit"]);
+    else if (model.view === "settings" && this.tracks.focused) pairs.push(["⏎", "change"]);
     else if (model.view === "queue" && item) pairs.push(["⏎", "play"], ["⇧E", "play next"], ["⇧↑↓", "move"], ["x", "remove"]);
     else if (item?.type.includes("artists")) pairs.push(["⏎", "open"]);
     else if (item) pairs.push(["⏎", /albums|playlists/.test(item.type) ? "open" : "play"], ["e", "add to queue"], ["⇧E", "play next"]);
     else if (this.lyrics.panel.focused) pairs.push(["↑↓", "choose line"], ["⏎", "play from it"], ["h l", "previous/next line"]);
+    if (this.pairingView) { pairs.length = 0; pairs.push(...this.model.pairing?.state === "confirm" ? [["⏎", "pair"], ["Esc", "cancel"]] as [string, string][] : [["Esc", "close"]] as [string, string][]); }
+    else if (this.devicesView) {
+      const row = this.devicesList?.rows[this.devicesList.index];
+      pairs.length = 0; pairs.push(["↑↓", "choose"], ["⏎", row?.right === "Pair" ? "pair" : "play here"], ["Esc", "close"]);
+    }
     if (!more) return pairs;
     pairs.length = 0;
     if (content) {
@@ -859,7 +897,7 @@ export class PeelUI {
     // Narrow windows show the player's buttons without their keys.
     if (this.renderer.terminalWidth < 100) pairs.push(["space", "play"], ["p n", "skip"], ["- +", "volume"], ["f", "favourite"], ["s", "shuffle"], ["r", "repeat"]);
     if (model.detail?.artwork || model.playback.nowPlaying) pairs.push(["c", "cover"]);
-    if (this.renderer.terminalWidth < 100) pairs.push(["y", "lyrics"]);
+    if (this.renderer.terminalWidth < 100) pairs.push(["y", "lyrics"], ["d", "devices"]);
     if (model.view !== "queue") pairs.push(["u", "queue"]);
     pairs.push(["/", "search"], ["Tab", "next panel"]);
     return pairs;
@@ -885,7 +923,13 @@ export class PeelUI {
     const connected = this.model.connected;
     const song = state.nowPlaying;
     this.title.content = song ? song.name ?? "Untitled" : "Nothing playing";
-    this.subtitle.content = song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : this.model.starting ? "Starting the player..." : "Choose a song to start";
+    const target = this.model.target ?? this.model.preferences.remote;
+    this.devicesButton.set(icon.devices, target ? `d  ${target}` : "d", target ? colour.accent : colour.faint);
+    // The device that plays may be out of reach, for example asleep or on another network. Saying so
+    // explains why this computer shows nothing.
+    const away = !song && !target ? this.model.devices.find(device => device.output && !device.self && device.paired && !device.online) : undefined;
+    this.subtitle.content = away ? `${away.name} plays the music, but this Peel cannot reach it. Press d to see your devices.`
+      : song ? [song.artistName, song.albumName].filter(Boolean).join("  /  ") : this.model.starting ? "Starting the player..." : "Choose a song to start";
     this.playerCover.setArt(song?.artwork?.url);
     const favourite = this.model.favourite;
     this.favouriteButton.visible = !!song;
@@ -948,6 +992,117 @@ export class PeelUI {
     sharpen();
   }
 
+  // The devices popup opens above the player's devices button, like a menu. It lists this
+  // computer, paired devices, and nearby ones to pair, and moves the music to the one chosen.
+  private toggleDevices(open = !this.devicesView) {
+    if (!open) return this.closeDevices();
+    if (this.devicesView) return;
+    if (!this.model.onPlayOn) {
+      this.model.status = this.model.player.setQuality ? "Devices are off. Unset PEEL_DEVICES=off to use them." : "Devices need Peel's own player. Unset PEEL_PLAYER=cider to use them.";
+      this.model.changed(); return;
+    }
+    const ctx = this.renderer;
+    this.model.onDevicesOpened?.();
+    this.focusBefore = ctx.currentFocusedRenderable;
+    this.devicesBackdrop = new BoxRenderable(ctx, { id: "devices-backdrop", position: "absolute", left: 0, top: 0, width: "100%", height: "100%", zIndex: 90,
+      onMouseDown: event => { event.stopPropagation(); this.closeDevices(); } });
+    this.devicesView = new ClearBox(ctx, { id: "devices-view", position: "absolute", right: 2, bottom: 7, zIndex: 95, border: true, borderStyle: "rounded", borderColor: colour.accent, title: ` ${icon.devices} Play on `, titleColor: colour.text, bottomTitle: " ↑↓ choose  ⏎ play here  Esc close ", flexDirection: "column",
+      onMouseDown: (event: MouseEvent) => event.stopPropagation() } as any);
+    this.devicesList = new ClickList(ctx, "devices-list", 2);
+    this.devicesList.onSelection = () => this.drawHints();
+    this.devicesView.add(this.devicesList);
+    ctx.root.add(this.devicesBackdrop); ctx.root.add(this.devicesView);
+    this.devicesKey = "";
+    this.drawDevices();
+    // The playing device is highlighted first.
+    const rows = this.devicesList.rows, index = rows.findIndex(row => row.active);
+    if (index > 0) { this.devicesList.index = index; this.devicesList.drawRows(); }
+    this.drawHints();
+  }
+
+  private closeDevices() {
+    if (!this.devicesView) return;
+    this.devicesView.destroyRecursively(); this.devicesBackdrop?.destroyRecursively();
+    this.devicesView = this.devicesBackdrop = this.devicesList = undefined;
+    const before = this.focusBefore;
+    this.focusBefore = undefined;
+    if (before && !before.isDestroyed) before.focus(); else this.focusContent();
+    this.drawHints();
+  }
+
+  private deviceRows(): Row[] {
+    const model = this.model, rows: Row[] = [];
+    const ssh = model.preferences.remote;
+    for (const device of model.devices) {
+      const summary = device.summary;
+      const controlled = !ssh && (device.self ? !model.target : device.online && model.targetId === device.id);
+      const right = !device.paired ? "Pair" : !device.online ? "Offline" : summary?.state === "playing" ? "Playing" : summary?.state === "paused" ? "Paused" : device.output ? "Selected" : "";
+      const description = !device.paired ? "Nearby. Enter pairs it with this computer."
+        : !device.online ? `Open Peel on ${device.name} to play there.`
+        : summary?.song ? [summary.song, summary.artist].filter(Boolean).join("  /  ")
+        : device.self ? device.note ?? "This computer. Nothing playing." : "Nothing playing";
+      rows.push({
+        id: `device:${device.id}`, lead: !device.paired ? icon.link : controlled ? icon.speaker : icon.laptop,
+        leadColour: controlled ? colour.accent : colour.faint, name: device.self ? `${device.name}  (this computer)` : device.name,
+        faint: device.paired && !device.online, active: controlled, right, description,
+        activate: () => {
+          if (!device.paired) { this.closeDevices(); model.onPair?.(device.id); return; }
+          if (!device.online) { model.status = `Can't reach ${device.name}. Open Peel on ${device.name} and check that it's on the same Wi-Fi.`; model.changed(); return; }
+          this.closeDevices();
+          if (!controlled) void model.playOn(device.id);
+        },
+      });
+    }
+    // SSH hosts stay in Settings. Each device appears once, and Peel chooses how to reach it.
+    return rows;
+  }
+
+  private drawDevices() {
+    const list = this.devicesList, view = this.devicesView;
+    if (!list || !view) return;
+    const rows = this.deviceRows(), key = JSON.stringify(rows.map(row => [row.id, row.name, row.right, row.description, row.active, row.faint]));
+    const width = Math.min(56, this.renderer.terminalWidth - 4);
+    const height = Math.max(4, Math.min(rows.length * 2 + 2, this.renderer.terminalHeight - 10));
+    view.width = width; view.height = height;
+    if (key === this.devicesKey) return;
+    this.devicesKey = key;
+    list.setRows(rows);
+  }
+
+  // Both devices show the same code while pairing. The person checks it matches, then accepts.
+  private drawPairing() {
+    const pairing = this.model.pairing;
+    if (!pairing) { this.closePairing(); return; }
+    const key = JSON.stringify([pairing.id, pairing.state, pairing.code, pairing.message]);
+    if (key === this.pairingKey && this.pairingView) return;
+    this.pairingKey = key;
+    this.closePairing(false);
+    const ctx = this.renderer, width = Math.min(52, ctx.terminalWidth - 4);
+    const view = this.pairingView = new ClearBox(ctx, { id: "pairing-view", position: "absolute", left: Math.max(0, Math.floor((ctx.terminalWidth - width) / 2)), top: Math.max(0, Math.floor(ctx.terminalHeight / 2) - 5),
+      width, height: 9, zIndex: 110, border: true, borderStyle: "rounded", borderColor: colour.accent,
+      title: ` ${icon.link} Pair with ${pairing.name} `, titleColor: colour.text, flexDirection: "column", alignItems: "center", paddingX: 2, paddingY: 1,
+      bottomTitle: pairing.state === "confirm" ? " ⏎ pair  Esc cancel " : pairing.state === "done" || pairing.state === "failed" ? " Esc close " : " Esc cancel " } as any);
+    const line = (content: string | StyledText, colourName = colour.muted, height = 1) => view.add(new TextRenderable(ctx, { content, fg: colourName, width: "100%", textAlign: "center", height, wrapMode: "word", flexShrink: 0, selectable: false } as any));
+    const code = pairing.code ? `${pairing.code.slice(0, 3)} ${pairing.code.slice(3)}` : "";
+    if (pairing.state === "connecting") line(`Connecting to ${pairing.name}...`);
+    else if (pairing.state === "confirm") {
+      line(t`${bold(fg(colour.accent)(code))}`, colour.accent); line("");
+      line(pairing.incoming ? `${pairing.name} wants to pair. You do not type this code. If ${pairing.name} shows the same one, press Enter.`
+        : `You do not type this code. If ${pairing.name} shows the same one, press Enter here and there.`, colour.muted, 3);
+    } else if (pairing.state === "waiting") {
+      line(t`${bold(fg(colour.accent)(code))}`, colour.accent); line("");
+      line(`Waiting for ${pairing.name} to accept...`, colour.muted, 2);
+    } else line(pairing.message ?? "", pairing.state === "done" ? colour.text : colour.muted, 3);
+    ctx.root.add(view);
+    this.drawHints();
+  }
+
+  private closePairing(redraw = true) {
+    if (!this.pairingView) return;
+    this.pairingView.destroyRecursively(); this.pairingView = undefined;
+    if (redraw) { this.pairingKey = ""; this.drawHints(); }
+  }
+
   private closeCover() {
     if (!this.coverView) return false;
     this.coverView.destroyRecursively(); this.coverView = undefined;
@@ -985,7 +1140,73 @@ export class PeelUI {
     void this.model.moveQueued(from, to);
   }
   private editingQueue() { return this.model.view === "queue" && this.tracks.focused && this.model.items.length > 0; }
-  private filterable() { return this.model.display === "list" && this.model.view !== "queue"; }
+  private filterable() { return this.model.display === "list" && this.model.view !== "queue" && this.model.view !== "settings"; }
+
+  // The settings page: one row per setting, its value on the right. Enter switches it.
+  private settingsRows() {
+    const model = this.model, preferences = model.preferences, update = model.update;
+    const engine = !!model.player.setQuality;
+    const high = preferences.quality === "high", stable = preferences.channel === "stable";
+    const hearts = preferences.heartsInFavourites;
+    const rows: Parameters<ClickList["setRows"]>[0] = [
+      {
+        id: "quality", lead: icon.quality, name: "Audio quality", right: !engine ? "Set in Cider" : high ? "High  256 kbps" : "Standard  64 kbps",
+        description: !engine ? "Cider plays the music, so its own settings choose the quality."
+          : "AAC from Apple. Standard uses a quarter of the data. Hi-Res Lossless is not available in Peel yet.",
+        activate: () => {
+          if (!engine) { model.status = "Cider plays the music. Choose its quality in Cider's settings."; model.changed(); return; }
+          void model.setPreference({ quality: high ? "standard" : "high" }, `Audio quality: ${high ? "Standard, 64 kbps" : "High, 256 kbps"}`);
+        },
+      },
+      {
+        id: "channel", lead: icon.update, name: "Updates", right: stable ? "Stable" : "Nightly",
+        description: stable ? "Tested releases." : "Each night's build with the newest features. It can break.",
+        activate: () => void model.setPreference({ channel: stable ? "nightly" : "stable" },
+          stable ? "Updates: Nightly. Peel checks for the newest nightly build now." : "Updates: Stable. Peel checks for the newest stable release now."),
+      },
+      update.ready ? {
+        id: "update", lead: icon.update, name: update.older ? "Restart to switch" : "Restart to update", right: shortVersion(update.ready),
+        description: update.newEngine && model.playsLocally() ? "The music stops and the queue clears, because the playback engine restarts too."
+          : "Restarts Peel in this window. The music keeps playing and the queue stays.",
+        activate: () => model.onRestart(),
+      } : {
+        id: "update", lead: icon.update, name: "Check for updates", right: update.checking ? "Checking..." : update.version ? shortVersion(update.version) : "",
+        description: update.message || "Peel checks every six hours and installs updates in the background.",
+        activate: () => { if (!update.checking) model.onCheckUpdate(); },
+      },
+      {
+        id: "hearts", lead: icon.heart, leadColour: colour.heart, name: "Hearts in Favourite Songs", right: hearts ? "Shown" : "Hidden",
+        description: "Every song in Favourite Songs is a favourite, so its rows show no heart unless this is on.",
+        activate: () => void model.setPreference({ heartsInFavourites: !hearts }, `Hearts in Favourite Songs: ${hearts ? "hidden" : "shown"}`),
+      },
+    ];
+    if (model.onPlayOn) {
+      const paired = model.devices.filter(device => device.paired && !device.self);
+      rows.push({
+        id: "devices", lead: icon.devices, name: "Devices", right: paired.length ? `${paired.filter(device => device.online).length} of ${paired.length} online` : "None paired",
+        description: "Peels on this network. Press d anywhere to choose which one plays, or to pair one.",
+        activate: () => this.toggleDevices(true),
+      });
+      if (paired.length) rows.push({
+        id: "forget-devices", lead: icon.link, name: "Forget paired devices", right: Date.now() - this.forgetAsked < 5000 ? "Press Enter again" : "",
+        description: "This computer leaves its device group. Pair again to control the others.",
+        activate: () => {
+          if (Date.now() - this.forgetAsked > 5000) { this.forgetAsked = Date.now(); model.status = "Press Enter again to forget every paired device on this computer."; model.changed(); return; }
+          this.forgetAsked = 0;
+          void model.onForgetDevices?.().then(() => { model.status = "Forgot the paired devices. Pair again from the devices popup."; model.changed(); }, error => model.fail(error));
+        },
+      });
+    }
+    if (model.onOutput && model.outputTargets.length) rows.push({
+      id: "output", lead: icon.console, name: "Control over SSH", right: preferences.remote ?? "Off",
+      description: "Controls an SSH host's player without moving the music. Add a host with peel --remote <ssh-host>.",
+      activate: () => {
+        const targets = [undefined, ...model.outputTargets];
+        void model.selectOutput(targets[(targets.indexOf(preferences.remote) + 1) % targets.length]);
+      },
+    });
+    return rows;
+  }
 
   private cycleSort() {
     const order = Object.keys(sorts) as Sort[];
@@ -1009,6 +1230,19 @@ export class PeelUI {
     const grid = this.grid.focused;
     let action: (() => void) | undefined;
     if (key.ctrl && key.name === "c") action = this.quit;
+    // The pairing prompt takes the keys, except play/pause.
+    else if (this.pairingView) action = key.name === "space" ? () => void model.act("/playback/toggle")
+      : key.name === "return" ? () => { const pairing = model.pairing; if (pairing?.state === "confirm") pairing.accept(); else if (pairing?.state === "done" || pairing?.state === "failed") pairing.decline(); }
+      : key.name === "escape" ? () => model.pairing?.decline() : () => {};
+    // The devices popup takes the keys that move in it. Playback keys still work under it.
+    else if (this.devicesView && ["up", "down", "j", "k", "return", "escape", "d", "tab", "home", "end"].includes(key.name)) action = () => {
+      const list = this.devicesList!;
+      if (["up", "k"].includes(key.name)) list.move(-1);
+      else if (["down", "j"].includes(key.name)) list.move(1);
+      else if (key.name === "home" || key.name === "end") list.move(key.name === "home" ? -list.rows.length : list.rows.length);
+      else if (key.name === "return") list.activate();
+      else this.closeDevices();
+    };
     // The enlarged cover takes the keys, except play/pause and quit.
     else if (this.coverView) action = key.name === "space" ? () => void model.act("/playback/toggle") : key.name === "q" ? this.quit
       : ["escape", "return", "backspace", "c"].includes(key.name) ? () => this.closeCover() : () => {};
@@ -1055,6 +1289,7 @@ export class PeelUI {
     else if (this.editingQueue() && ["x", "delete"].includes(key.name)) action = () => void this.model.removeQueued(this.tracks.index);
     else if (key.name === "e") action = () => this.enqueue(key.shift);
     else if (key.name === "y") action = () => this.toggleLyrics();
+    else if (key.name === "d" && !key.ctrl) action = () => this.toggleDevices();
     else if (key.name === "u") action = () => { void this.model.open("queue"); this.focusContent(); };
     else if (this.lyrics.panel.focused && ["up", "down", "j", "k"].includes(key.name)) action = () => this.lyrics.move(["up", "k"].includes(key.name) ? -1 : 1);
     else if (this.lyrics.panel.focused && ["pageup", "pagedown", "home", "end"].includes(key.name)) action = () => this.lyrics.move({ pageup: -8, pagedown: 8, home: -1e6, end: 1e6 }[key.name as "home"]);
@@ -1085,14 +1320,17 @@ export class PeelUI {
     else if (key.name === "r") action = () => void model.act("/playback/repeat/toggle");
     else if (key.name === "m" && model.more) action = () => void model.load(true);
     if (action) { key.preventDefault(); key.stopPropagation(); action(); }
-    // Moving the highlight between a song and an album changes the keys that apply.
-    this.drawHints();
+    // Moving the highlight between a song and an album changes the keys that apply. Quitting
+    // and restarting have already destroyed the hints by now.
+    if (!this.disposed) this.drawHints();
   }
 
   dispose() {
     if (this.disposed) return;
     this.disposed = true;
     this.closeCover();
+    this.closeDevices();
+    this.closePairing();
     this.lyrics.dispose();
     this.model.off("change", this.change); this.renderer.off("resize", this.resize); this.renderer.off("focused_renderable", this.focusChange); this.renderer.keyInput.off("keypress", this.key);
     this.root.destroyRecursively();

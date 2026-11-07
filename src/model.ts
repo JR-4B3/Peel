@@ -1,6 +1,11 @@
 import { EventEmitter } from "node:events";
 import type { Preferences } from "./config";
+// What the settings page says about updates. index.ts fills it from src/update.ts.
+// ready names an installed version that a restart starts, older says it is older, and newEngine
+// says its engine differs, which stops the music if this computer plays it.
+export interface UpdateState { version?: string; channel?: string; installed: boolean; message: string; ready?: string; older?: boolean; newEngine?: boolean; checking?: boolean }
 import { defaults } from "./config";
+import type { DeviceView, Pairing } from "./devices";
 import { stopped, type ArtistShelf, type Home, type Library, type Media, type Page, type Playback, type Player } from "./types";
 
 export interface Navigation { id: string; name: string; media?: Media; hidden?: boolean }
@@ -32,7 +37,7 @@ export function parseFilter(text: string) {
   }
   return { words, years, either };
 }
-interface Snapshot { view: string; title: string; items: Media[]; more: boolean; detail?: Media; shelves: ArtistShelf[]; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string }; filter: Filter }
+interface Snapshot { view: string; title: string; items: Media[]; more: boolean; loading: boolean; detail?: Media; shelves: ArtistShelf[]; loader?: (offset: number) => Promise<Page>; collection?: { id: string; type: string }; filter: Filter }
 
 // Case and accents do not matter: "beyonce" finds "Beyoncé".
 const fold = (text: string) => text.normalize("NFD").replace(/\p{Diacritic}/gu, "").toLowerCase();
@@ -43,7 +48,11 @@ const navigationRetry = 10000;
 // Apple returns a hundred items per request. Lists load backgroundLimit items without scrolling.
 const pageSize = 100;
 export const backgroundLimit = 500;
+const keptLists = 40;
+const prefetchedLists = 12;
 const memoryStore: HomeStore = { read: async () => undefined, write: async () => {} };
+// Toggles that repeat after this many presses, so presses still waiting can be counted.
+const cycles: Record<string, number> = { "/playback/toggle": 2, "/playback/shuffle/toggle": 2, "/playback/repeat/toggle": 3 };
 
 export class Model extends EventEmitter {
   playback: Playback = structuredClone(stopped);
@@ -76,12 +85,25 @@ export class Model extends EventEmitter {
   private loads?: Promise<void>;
   private collection?: { id: string; type: string };
   private commands: Promise<unknown> = Promise.resolve();
+  // Presses of one control that wait behind other commands, by kind. Each kind waits as one
+  // command at most, which uses the newest value when it runs, so a burst of key presses never
+  // turns into minutes of old commands.
+  private waiting = new Map<string, { value: number; promise: Promise<boolean> }>();
+  // The target of a seek or volume change still running, so the next press builds on it.
+  private running = new Map<string, number>();
   private queueEdits = 0;
+  // Counts queue reads and edits. A read shows its answer only if nothing newer started meanwhile.
+  private queueRevision = 0;
   private activation?: { key: string; started: number; pending: boolean; promise: Promise<void> };
-  private loved?: { key: string; value: boolean };
+  // The playing song's favourite mark from Apple or from this Peel. A mark set here (local) wins
+  // until the player reports the same, then the player's report wins again.
+  private loved?: { key: string; value: boolean; local?: boolean };
   // Albums' favourite marks by album id, once Apple has answered.
   private albumsLoved = new Map<string, boolean>();
   private homeRead = false;
+  private prefetched = false;
+  // Counts favourite changes, so a slower ratings answer does not undo one.
+  private favouriteEdits = 0;
   releases: Promise<void> = Promise.resolve();
 
   // Starts Cider when it is not running. Tests and custom API addresses need nothing started.
@@ -103,7 +125,7 @@ export class Model extends EventEmitter {
     const entries: Navigation[] = [
       { id: "favourites", name: "Favourite Songs", media: this.playlists.find(p => p.favourite) },
       ...this.playlists.filter(p => !p.favourite).map(p => ({ id: `playlist:${p.id}`, name: p.name, media: p })),
-      { id: "songs", name: "All songs" }, { id: "albums", name: "Albums" }, { id: "artists", name: "Artists" }, { id: "queue", name: "Queue" },
+      { id: "songs", name: "All songs" }, { id: "albums", name: "Albums" }, { id: "artists", name: "Artists" }, { id: "queue", name: "Queue" }, { id: "settings", name: "Settings" },
     ];
     const rank = (id: string) => { const index = this.preferences.order.indexOf(id); return index < 0 ? 1e6 : index; };
     entries.sort((a, b) => rank(a.id) - rank(b.id));
@@ -122,6 +144,7 @@ export class Model extends EventEmitter {
         this.playlists = await this.library.playlists();
         this.browsingReady = true;
         this.changed();
+        if (!this.prefetched) { this.prefetched = true; void this.prefetch(); }
       } catch (error) { this.fail(error); }
       finally { this.navigating = undefined; }
     })();
@@ -129,20 +152,30 @@ export class Model extends EventEmitter {
 
   fail(error: unknown) { this.status = error instanceof Error ? error.message : String(error); this.changed(); }
 
+  // The engine's last reason for stopping that the status line showed.
+  private shownError?: string;
+
   // Concurrent callers share one playback request and its result.
   refresh() {
+    if (this.switchingOutput) return Promise.resolve();
     if (!this.browsingReady && Date.now() - this.navigationTried > navigationRetry) void this.loadNavigation();
     return this.refreshing ??= (async () => {
       try {
-        const playing = this.playback.nowPlaying?.playParams?.id;
+        const playing = this.playback.nowPlaying?.playParams?.id, revision = this.playback.queueRevision;
         this.playback = await this.player.snapshot();
         this.playbackError = undefined;
+        this.followFavourite();
         // A queued song leaves the queue when it starts playing.
-        if (this.view === "queue" && !this.loading && playing !== this.playback.nowPlaying?.playParams?.id) void this.requeue();
+        if (this.view === "queue" && !this.loading && (playing !== this.playback.nowPlaying?.playParams?.id || revision !== this.playback.queueRevision)) void this.requeue();
         void this.lookUpFavourite();
         const recovering = !this.connected;
         this.connected = true;
+        // A started or restarted engine plays at its default quality until told otherwise.
+        if (recovering) void this.player.setQuality?.(this.preferences.quality).catch(() => {});
         if (recovering && !this.starting) this.status = "Ready to play";
+        // The engine says why playback stopped when it could not continue by itself.
+        if (this.playback.error && this.playback.error !== this.shownError) this.status = this.playback.error;
+        this.shownError = this.playback.error;
         this.changed();
       } catch (error) {
         // Cider not running yet is normal. Losing a working connection is reported.
@@ -181,19 +214,50 @@ export class Model extends EventEmitter {
       this.generation++; this.loader = undefined; this.items = []; this.more = false; this.loading = false;
       this.changed(); await this.loadHome(); return;
     }
+    if (id === "settings") {
+      this.generation++; this.loader = undefined; this.items = []; this.more = false; this.loading = false;
+      this.changed(); return;
+    }
     if (id === "favourites" || id.startsWith("playlist:")) {
       if (!navigation?.media) {
         this.generation++; this.items = []; this.more = false; this.loading = false;
         this.status = "No Favourite Songs playlist returned by Apple Music."; this.changed(); return;
       }
-      this.loader = offset => this.library.songs(navigation.media!.id, offset);
       this.collection = { id: navigation.media.id, type: navigation.media.type };
-    } else if (id === "albums") this.loader = offset => this.library.albums(offset);
-    else if (id === "artists") this.loader = offset => this.library.artists(offset);
-    // The queue lives in Cider. Before Cider runs there is nothing queued.
-    else if (id === "queue") this.loader = offset => this.connected ? this.player.queue(offset) : Promise.resolve({ items: [], more: false });
-    else this.loader = offset => this.library.songs(undefined, offset);
+    }
+    this.loader = this.loaderFor(id, navigation);
     await this.load(false);
+  }
+
+  private loaderFor(id: string, navigation?: Navigation): (offset: number) => Promise<Page> {
+    if (navigation?.media) return offset => this.library.songs(navigation.media!.id, offset);
+    if (id === "albums") return offset => this.library.albums(offset);
+    if (id === "artists") return offset => this.library.artists(offset);
+    // The queue lives in Cider. Before Cider runs there is nothing queued.
+    if (id === "queue") return offset => this.connected ? this.player.queue(offset) : Promise.resolve({ items: [], more: false });
+    return offset => this.library.songs(undefined, offset);
+  }
+
+  // Reads the first page of the sidebar's lists once the sidebar has loaded, so even the first
+  // visit to one shows songs at once. The library's own lists come first, then playlists in
+  // sidebar order. Two requests run at a time, so Apple is not flooded.
+  private async prefetch() {
+    const visible = this.entries().map(item => item.id).filter(id => !["queue", "settings"].includes(id));
+    const ids = [...visible.filter(id => !id.startsWith("playlist:")), ...visible.filter(id => id.startsWith("playlist:"))].slice(0, prefetchedLists);
+    const next = async (): Promise<void> => {
+      const id = ids.shift();
+      if (!id) return;
+      const navigation = this.navigation().find(item => item.id === id);
+      if (!this.lists.has(id) && (id !== "favourites" && !id.startsWith("playlist:") || navigation?.media)) {
+        try {
+          const page = await this.loaderFor(id, navigation)(0);
+          // A visit that started meanwhile has newer songs.
+          if (!this.lists.has(id) && page.items.length) this.keep(id, page.items, page.more);
+        } catch {}
+      }
+      return next();
+    };
+    await Promise.all([next(), next()]);
   }
 
   async loadHome(force = false) {
@@ -236,7 +300,7 @@ export class Model extends EventEmitter {
   }
 
   private remember() {
-    this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter });
+    this.history.push({ view: this.view, title: this.title, items: this.items, more: this.more, loading: this.loading, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter });
     this.filter = unfiltered;
   }
 
@@ -282,8 +346,14 @@ export class Model extends EventEmitter {
     this.generation++; this.loading = false;
     ({ view: this.view, title: this.title, items: this.items, more: this.more, detail: this.detail, shelves: this.shelves, loader: this.loader, collection: this.collection, filter: this.filter } = previous);
     this.changed();
-    // Opening the page stopped this list's background loading. It continues where it was.
-    if (this.more && this.items.length < backgroundLimit) void this.load(true, backgroundLimit);
+    // Opening the page stopped this list's loading. A list that was empty or was being refreshed
+    // from the cache loads again, with its kept songs on screen meanwhile. A list already longer
+    // than the cache keeps, or one with nothing kept, continues where it was.
+    const key = this.listKey();
+    if (previous.loading && this.loader && (!this.items.length || key && this.lists.has(key) && this.items.length <= backgroundLimit)) void this.load(false);
+    else if (this.more && this.items.length < backgroundLimit) void this.load(true, backgroundLimit);
+    // A filter needs the whole list, so its loading starts again too.
+    void this.setFilter({});
     return closed;
   }
 
@@ -311,31 +381,63 @@ export class Model extends EventEmitter {
 
   // A list opens with its first page, then keeps loading pages in the background up to
   // backgroundLimit items. Past that, scrolling near the end loads one more page each time.
+  // A list opened before shows its last songs at once while Apple is asked again. The answer
+  // replaces them in one step, and only if something changed.
   load(append: boolean, until = append ? 0 : backgroundLimit) {
     if (!this.loader || append && this.loading) return this.loads ?? Promise.resolve();
-    const generation = ++this.generation, loader = this.loader;
-    if (!append) { this.items = []; this.more = false; }
+    const generation = ++this.generation, loader = this.loader, key = this.listKey();
+    const cached = append || !key ? undefined : this.lists.get(key);
+    if (!append) { this.items = cached?.items ?? []; this.more = cached?.more ?? false; }
+    const target = Math.max(until, cached?.items.length ?? 0);
     this.loading = true; this.changed();
     const loads = this.loads = (async () => {
+      // A list shown from the cache stays until the new answer has as many songs. From then on
+      // the new songs show as they arrive, as in a list opened for the first time.
+      let items = cached ? [] : this.items, more = cached ? false : this.more, live = !cached;
       try {
         do {
-          // The first page comes alone so the list shows at once. Later pages arrive four at a time.
-          const count = this.items.length ? Math.max(1, Math.min(4, Math.ceil((until - this.items.length) / pageSize))) : 1;
-          const results = await Promise.all(Array.from({ length: count }, (_, index) => loader(this.items.length + index * pageSize)));
+          // The first page of a new list comes alone so the list shows at once. A list already on
+          // screen first asks for as many pages as it shows. Later pages arrive four at a time.
+          const count = Math.max(1, Math.min(4, Math.ceil((items.length ? target - items.length : cached?.items.length ?? 0) / pageSize)));
+          const results = await Promise.all(Array.from({ length: count }, (_, index) => loader(items.length + index * pageSize)));
           if (generation !== this.generation) return;
           for (const result of results) {
-            this.items = [...this.items, ...result.items];
-            void this.markLoved(result.items);
-            this.more = result.more;
+            items = [...items, ...result.items];
+            more = result.more;
+            if (live) void this.markLoved(result.items);
             // A short page means the offsets after it are off. The next round starts from here.
             if (!result.more || result.items.length < pageSize) break;
           }
-          this.changed();
-        } while (this.more && this.items.length < until);
-      } catch (error) { if (generation === this.generation) { this.more = false; this.fail(error); } }
+          if (cached && !live && (!more || items.length >= cached.items.length)) {
+            live = true;
+            // Songs still in the list show their earlier favourite marks until Apple answers, so
+            // hearts do not blink. A song favourited elsewhere meanwhile gets its heart then.
+            const loved = new Map(cached.items.map(item => [item.id, item.loved]));
+            for (const item of items) item.loved ??= loved.get(item.id);
+            void this.markLoved(items, true);
+          }
+          if (live) { this.items = items; this.more = more; this.keep(); this.changed(); }
+        } while (more && items.length < target);
+      } catch (error) { if (generation === this.generation) { if (live) this.more = false; this.fail(error); } }
       finally { if (generation === this.generation) { this.loading = false; this.changed(); } }
     })();
     return loads;
+  }
+
+  // Lists shown before, by view, so switching back to one shows it at once. The queue follows
+  // the player and is always read again.
+  private lists = new Map<string, { items: Media[]; more: boolean }>();
+  private listKey() { return this.view === "queue" || this.view === "settings" || this.view === "home" ? undefined : this.view; }
+  // Only the first backgroundLimit songs are kept, so going back to a long list does not read
+  // all of it again. Filtering the list loads the rest, as on a first visit.
+  private keep(key = this.listKey(), items = this.items, more = this.more) {
+    if (!key) return;
+    this.lists.delete(key);
+    // An emptied list must not show its old songs on the next visit.
+    if (!items.length) return;
+    this.lists.set(key, items.length > backgroundLimit ? { items: items.slice(0, backgroundLimit), more: true } : { items, more });
+    // The oldest lists go first once there are many.
+    while (this.lists.size > keptLists) this.lists.delete(this.lists.keys().next().value!);
   }
 
   filter: Filter = unfiltered;
@@ -391,13 +493,16 @@ export class Model extends EventEmitter {
   }
 
   // Marks which songs are favourites, so their rows show a heart. Every song in Favourite Songs is one.
-  private async markLoved(items: Media[]) {
-    const songs = items.filter(item => /songs/.test(item.type) && item.loved === undefined);
+  // Marks shown from an earlier answer are asked again when recheck is set.
+  private async markLoved(items: Media[], recheck = false) {
+    const songs = items.filter(item => /songs/.test(item.type) && (recheck || item.loved === undefined));
     if (!songs.length) return;
     if (this.view === "favourites") { for (const item of songs) item.loved = true; this.lovedRevision++; this.changed(); return; }
+    const edits = this.favouriteEdits;
     try {
       const loved = await this.library.ratings(songs);
-      for (const item of songs) item.loved = loved.has(item.id);
+      // A favourite changed meanwhile may be missing from Apple's answer, so marks already shown stay.
+      for (const item of songs) if (edits === this.favouriteEdits || item.loved === undefined) item.loved = loved.has(item.id);
       this.lovedRevision++; this.changed();
     } catch {}
   }
@@ -419,7 +524,7 @@ export class Model extends EventEmitter {
     this.activation = activation;
     activation.promise = (async () => {
       try {
-        if (item.queueIndex !== undefined) await this.act("/queue/jump", { index: item.queueIndex });
+        if (item.queueIndex !== undefined) await this.act("/queue/jump", { index: item.queueIndex, id: item.id });
         else if (collection && index >= 0) await this.execute(() => this.player.playCollectionTrack(collection, list, index));
         else await this.execute(() => this.player.playItem(item));
       } finally { activation.pending = false; }
@@ -431,10 +536,12 @@ export class Model extends EventEmitter {
   // player would be undone on screen, so the last edit reads it.
   private async requeue() {
     if (this.queueEdits) return;
-    const generation = this.generation;
+    const generation = this.generation, revision = ++this.queueRevision;
     try {
       const page = await this.player.queue(0);
-      if (generation !== this.generation || this.view !== "queue") return;
+      // An edit or a newer read that started meanwhile makes this answer stale. Showing it would
+      // also give the rows queue places that no longer match the player's queue.
+      if (generation !== this.generation || this.view !== "queue" || revision !== this.queueRevision || this.queueEdits) return;
       this.items = page.items; this.more = page.more; this.changed();
     } catch {}
   }
@@ -472,7 +579,7 @@ export class Model extends EventEmitter {
     const places = this.items.map(entry => entry.queueIndex);
     this.items = this.items.toSpliced(from, 1).toSpliced(to, 0, item).map((entry, index) => ({ ...entry, queueIndex: places[index] }));
     this.changed();
-    await this.editQueue(() => this.act("/queue/move", { from: item.queueIndex, to: target.queueIndex }));
+    await this.editQueue(() => this.act("/queue/move", { from: item.queueIndex, to: target.queueIndex, id: item.id, targetId: target.id }));
   }
 
   async removeQueued(index: number) {
@@ -481,17 +588,36 @@ export class Model extends EventEmitter {
     this.items = this.items.toSpliced(index, 1).map(entry => entry.queueIndex! > place ? { ...entry, queueIndex: entry.queueIndex! - 1 } : entry);
     this.status = `Removed from the queue: ${item!.name}`;
     this.changed();
-    await this.editQueue(() => this.act(`/queue/items/${place}`, undefined, "DELETE"));
+    await this.editQueue(() => this.act(`/queue/items/${place}`, { id: item.id }, "DELETE"));
   }
 
   private async editQueue(edit: () => Promise<unknown>) {
-    this.queueEdits++;
+    this.queueEdits++; this.queueRevision++;
     try { await edit(); } finally { this.queueEdits--; }
     await this.requeue();
   }
 
   act(path: string, body: unknown = {}, method = "POST") {
+    if (path === "/playback/seek") return this.seekTo((typeof body === "function" ? body() : body).position);
+    const cycle = cycles[path];
+    // Two presses of play/pause cancel out, so only the presses that change anything run.
+    if (cycle) return this.combine(path, (count = 0) => count + 1, count => count % cycle ? this.repeat(count % cycle, () => this.player.command(path, {}, method)) : Promise.resolve());
     return this.execute(() => this.player.command(path, typeof body === "function" ? body() : body, method));
+  }
+
+  private async repeat(times: number, command: () => Promise<void>) { for (let i = 0; i < times; i++) await command(); }
+
+  // Adds a press to the command of its kind that is still waiting, or queues a new one. With target,
+  // a new command builds on the one still running, whose result Peel has not read back yet.
+  private combine(kind: string, press: (value?: number) => number, run: (value: number) => Promise<void>, target = false) {
+    const waiting = this.waiting.get(kind);
+    if (waiting) { waiting.value = press(waiting.value); return waiting.promise; }
+    const entry = { value: press(target ? this.running.get(kind) : undefined), promise: Promise.resolve(false) };
+    this.waiting.set(kind, entry);
+    const done = () => { if (this.waiting.get(kind) === entry) this.waiting.delete(kind); };
+    const finished = () => { done(); if (this.running.get(kind) === entry.value) this.running.delete(kind); };
+    entry.promise = this.execute(async () => { done(); if (target) this.running.set(kind, entry.value); await run(entry.value); }).finally(finished);
+    return entry.promise;
   }
 
   private async execute(command: () => Promise<void>) {
@@ -509,34 +635,64 @@ export class Model extends EventEmitter {
     return success;
   }
 
-  seek(delta: number) {
-    const maximum = this.playback.time.duration;
-    if (!(maximum > 0)) return Promise.resolve();
-    return this.act("/playback/seek", () => ({ position: Math.min(maximum, Math.max(0, this.playback.time.currentTime + delta)) }));
+  // Seeks are relative to a seek still waiting, so ten presses of Left go back 100 seconds in one
+  // command. A seek meant for a song that has stopped playing is dropped.
+  seek(delta: number) { return this.seekBy(position => position + delta); }
+  seekTo(position: number) { return this.seekBy(() => position); }
+  private seekBy(target: (position: number) => number) {
+    const maximum = this.playback.time.duration, song = this.songKey();
+    if (!(maximum > 0)) return Promise.resolve(false);
+    // Seek targets belong to their song, so a target for one song never carries over to the next.
+    return this.combine(`seek:${song}`, (position = this.playback.time.currentTime) => Math.min(maximum, Math.max(0, target(position))),
+      async position => { if (this.songKey() === song) await this.player.command("/playback/seek", { position }); }, true);
   }
-  volume(delta: number) { return this.act("/audio/volume", () => ({ volume: Math.min(1, Math.max(0, this.playback.volume + delta)) }), "PATCH"); }
+  volume(delta: number) {
+    return this.combine("volume", (volume = this.playback.volume) => Math.min(1, Math.max(0, volume + delta)), volume => this.player.command("/audio/volume", { volume }, "PATCH"), true);
+  }
 
-  async skip(direction: -1 | 1) {
-    if (this.playback.repeatMode !== "one") {
-      return this.act(direction === 1 ? "/playback/next" : "/playback/previous", direction === -1 ? { force: true } : {});
-    }
-    try {
-      // Cider's ordinary Next can repeat the current song in repeat-one mode.
-      // An explicit queue jump skips without changing the user's repeat setting.
+  // Skips add up while they wait: three presses of Next skip three songs, and Next then Previous
+  // skip none. Several skips are one jump, so a burst of presses is one command, not one per press.
+  skip(direction: -1 | 1) {
+    return this.combine("skip", (count = 0) => count + direction, async count => {
+      const mode = this.playback.repeatMode;
+      if (!count) return;
+      // Cider's ordinary Next can repeat the current song in repeat-one mode, so that mode jumps too.
+      if (Math.abs(count) === 1 && mode !== "one") return this.player.command(count > 0 ? "/playback/next" : "/playback/previous", count < 0 ? { force: true } : {});
       const queue = await this.player.queuePosition();
-      if (queue.total < 2) return false;
-      return this.act("/queue/jump", { index: (queue.position + direction + queue.total) % queue.total });
-    } catch (error) { this.fail(error); return false; }
+      if (queue.total < 2) return;
+      const index = mode === "none" ? Math.min(queue.total - 1, Math.max(0, queue.position + count)) : ((queue.position + count) % queue.total + queue.total) % queue.total;
+      if (index !== queue.position) await this.player.command("/queue/jump", { index });
+    });
   }
 
-  // Undefined until Apple has said whether the playing song is a favourite.
+  // Undefined until Apple has said whether the playing song is a favourite. The player's answer
+  // wins, so a favourite set on another device or in another app shows here too.
   get favourite(): boolean | undefined {
-    const key = this.songKey();
-    return this.loved?.key === key ? this.loved.value : this.playback.nowPlaying?.inFavorites;
+    const key = this.songKey(), reported = this.playback.nowPlaying?.inFavorites;
+    return this.loved?.key === key && (this.loved.local || reported === undefined) ? this.loved.value : reported;
   }
 
-  private songKey() {
-    const song = this.playback.nowPlaying;
+  // The rows of the playing song show the player's answer too.
+  private followFavourite() {
+    const key = this.songKey(), reported = this.playback.nowPlaying?.inFavorites, song = this.playback.nowPlaying;
+    if (reported === undefined || !song) return;
+    if (this.loved?.key === key && this.loved.local) {
+      if (this.loved.value !== reported) return;
+      this.loved = { key, value: reported };
+    }
+    const id = song.playParams?.id, catalog = song.playParams?.catalogId;
+    // Library songs and catalog songs have separate ratings, so a row follows only its own song: the
+    // same ID, or the catalog song itself when a catalog song plays.
+    const library = !!id && id.startsWith("i.");
+    const matches = (item: Media) => /songs/.test(item.type) && (item.id === id || !library && !!catalog && !item.type.startsWith("library-") && item.id === catalog);
+    let changed = false;
+    const lists = [this.items, ...this.history.map(entry => entry.items), ...[...this.lists.values()].map(entry => entry.items)];
+    for (const items of new Set(lists)) for (const item of items) if (matches(item) && item.loved !== undefined && item.loved !== reported) { item.loved = reported; changed = true; }
+    if (changed) this.lovedRevision++;
+  }
+
+  private songKey(playback = this.playback) {
+    const song = playback.nowPlaying;
     return song ? song.playParams?.catalogId ?? song.playParams?.id ?? `${song.name}/${song.artistName}` : "";
   }
 
@@ -561,22 +717,36 @@ export class Model extends EventEmitter {
     // Toggling an unknown state could remove a favourite, which would move it in Favourite Songs.
     if (this.favourite === undefined) { this.status = "Still checking whether this song is a favourite."; this.changed(); return; }
     const value = !this.favourite;
-    this.loved = { key, value }; this.changed();
-    const done = await this.execute(() => value
-      ? this.player.command("/library/now-playing/rating", { rating: 1 }, "PUT")
-      : this.player.command("/library/now-playing/rating", {}, "DELETE"));
+    const id = this.playback.nowPlaying?.playParams?.id;
+    this.loved = { key, value, local: true }; this.changed();
+    // The player rates whatever plays when the command runs. A command queued before this one,
+    // such as starting another song, can change that, so the song is checked first.
+    let moved = false;
+    const done = await this.execute(async () => {
+      if (this.songKey(await this.player.snapshot()) !== key) { moved = true; return; }
+      await (value
+        ? this.player.command("/library/now-playing/rating", { rating: 1, id }, "PUT")
+        : this.player.command("/library/now-playing/rating", { id }, "DELETE"));
+    });
+    if (moved) {
+      if (this.loved?.key === key) this.loved = undefined;
+      this.status = "The song changed before the favourite was saved. Nothing was changed.";
+      this.changed();
+      return;
+    }
     // Cider applies ratings asynchronously. Read the stored rating before claiming it.
     let saved = !value;
     try {
-      for (let attempt = 0; done && attempt < 30 && saved !== value; attempt++) {
+      for (let attempt = 0; done && attempt < 30 && saved !== value && this.songKey() === key; attempt++) {
         saved = await this.player.rating() === 1;
         if (saved !== value) await Bun.sleep(100);
       }
     } catch {}
     if (this.songKey() !== key) return;
-    this.loved = { key, value: saved };
+    this.loved = { key, value: saved, local: true };
     // The song's row shows its heart too.
     for (const item of this.items) if (item.id === key || item.catalogId === key) item.loved = saved;
+    this.favouriteEdits++;
     this.lovedRevision++;
     if (saved !== value) this.status = "Apple Music did not save the favourite. Try again.";
     else this.status = value ? "Added to Favourite Songs" : "Removed from Favourite Songs";
@@ -612,8 +782,97 @@ export class Model extends EventEmitter {
     const hidden = this.preferences.hidden.includes(id) ? this.preferences.hidden.filter(value => value !== id) : [...this.preferences.hidden, id];
     await this.persist({ ...this.preferences, hidden });
   }
-  private async persist(value: Preferences) {
-    try { await this.save(value); this.preferences = value; this.status = "Layout saved"; this.changed(); }
-    catch (error) { this.fail(error); }
+  // Peels on the network, for the devices popup. index.ts fills them from src/devices.ts.
+  devices: DeviceView[] = [];
+  pairing?: Pairing;
+  // The device this Peel controls when it is not this computer.
+  target?: string;
+  targetId?: string;
+  onPlayOn?: (id: string) => Promise<void>;
+  onPair?: (id: string) => void;
+  onForgetDevices?: () => Promise<void>;
+  // Opening the devices popup lets nearby devices ask to pair for a while.
+  onDevicesOpened?: () => void;
+
+  // Moves the music to a device, or makes this computer the one that plays.
+  playOn(id: string) {
+    const device = this.devices.find(device => device.id === id);
+    return this.switchTarget(async () => {
+      await this.onPlayOn?.(id);
+      if (this.preferences.remote) await this.persist({ ...this.preferences, remote: undefined });
+      return device?.self ? "Playing on this computer" : `Playing on ${device?.name ?? "the other device"}`;
+    });
+  }
+
+  // Another Peel moved the music, or the device that played went offline.
+  retarget(apply: () => string | undefined) { return this.switchTarget(async () => apply()); }
+
+  private switchTarget(change: () => Promise<string | undefined>) {
+    this.commands = this.commands.then(async () => {
+      this.switchingOutput = true; this.changed();
+      try {
+        await this.refreshing;
+        const text = await change();
+        if (text) {
+          this.connected = false; this.queueRevision++;
+          this.loved = undefined; this.favouriteLookup = "";
+          this.status = text;
+        }
+      } catch (error) { this.fail(error); }
+      finally { this.switchingOutput = false; }
+      await this.refresh();
+      if (this.view === "queue") await this.requeue();
+    });
+    return this.commands;
+  }
+
+  outputTargets: string[] = [];
+  onOutput?: (host?: string) => Promise<void>;
+  private switchingOutput = false;
+
+  selectOutput(host?: string) {
+    this.commands = this.commands.then(async () => {
+      this.switchingOutput = true; this.changed();
+      try {
+        await this.refreshing;
+        const previous = this.preferences.remote;
+        await this.onOutput?.(host);
+        if (!await this.persist({ ...this.preferences, remote: host }, `Controlling ${host ?? "this computer"}`)) {
+          await this.onOutput?.(previous);
+          return;
+        }
+        this.connected = false;
+        this.queueRevision++;
+      } catch (error) { this.fail(error); }
+      finally { this.switchingOutput = false; }
+      await this.refresh();
+      if (this.view === "queue") await this.requeue();
+    });
+    return this.commands;
+  }
+
+  update: UpdateState = { installed: false, message: "" };
+  // Called when the update channel changes, so the new channel is checked at once.
+  onChannel: () => void = () => {};
+  // Checks for an update now, from the settings page.
+  onCheckUpdate: () => void = () => {};
+  // Closes this Peel and starts the ready version in the same terminal.
+  onRestart: () => void = () => {};
+  // Whether this computer's engine plays, so restarting into a new engine stops the music.
+  playsLocally: () => boolean = () => false;
+
+  // Changes one setting on the settings page and saves it with the layout.
+  async setPreference(change: Partial<Preferences>, message: string) {
+    const previous = this.preferences;
+    if (!await this.persist({ ...previous, ...change }, message)) return;
+    if (change.quality && change.quality !== previous.quality && this.connected) {
+      await this.player.setQuality?.(change.quality).catch(error => this.fail(error));
+    }
+    if (change.channel && change.channel !== previous.channel) this.onChannel();
+  }
+
+  private async persist(value: Preferences, message = "Layout saved") {
+    try { await this.save(value); this.preferences = value; this.status = message; this.changed(); return true; }
+    catch (error) { this.fail(error); return false; }
   }
 }

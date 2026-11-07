@@ -28,6 +28,9 @@ export interface Playback {
   volume: number;
   repeatMode: "none" | "one" | "all";
   shuffleMode: boolean;
+  queueRevision?: string;
+  // Why playback stopped by itself, when the engine could not continue.
+  error?: string;
 }
 
 export interface Page {
@@ -80,6 +83,8 @@ export interface Player {
   // Adds songs, or with Cider a whole album or playlist, after the playing song (next) or after the last queued song.
   enqueue(items: Media[], next: boolean): Promise<void>;
   command(path: string, body?: unknown, method?: string): Promise<void>;
+  // Peel's engine can change its stream quality. Cider sets quality in its own settings.
+  setQuality?(quality: "high" | "standard"): Promise<void>;
 }
 
 export function media(item: Record<string, any>, type = "songs"): Media {

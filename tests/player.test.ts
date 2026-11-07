@@ -219,6 +219,28 @@ describe("the rendered player", () => {
     expect(app.calls.filter(call => call.path === "/audio/volume").at(-1)).toEqual({ path: "/audio/volume", method: "PATCH", body: { volume: 1 } });
   });
 
+  test("a burst of seek arrows runs as one more seek, and Previous then Next cancel out", async () => {
+    const app = await setup(120, 36, "favourites");
+    let release!: () => void, started!: () => void;
+    const held = new Promise<void>(resolve => { release = resolve; });
+    const firstStarted = new Promise<void>(resolve => { started = resolve; });
+    const command = app.player.command.bind(app.player);
+    let first = true;
+    app.player.command = async (path, body, method) => {
+      if (path === "/playback/seek" && first) { first = false; started(); await held; }
+      return command(path, body, method);
+    };
+    app.mockInput.pressArrow("left");
+    await firstStarted;
+    try {
+      for (let index = 0; index < 20; index++) app.mockInput.pressArrow("left");
+      app.mockInput.pressKey("p"); app.mockInput.pressKey("n");
+    } finally { release(); }
+    // Waiting for a later control also waits for the keyboard commands ahead of it.
+    await app.model.volume(0.05);
+    expect(app.calls.filter(call => call.path.startsWith("/playback/")).map(call => call.path)).toEqual(["/playback/seek", "/playback/seek"]);
+  });
+
   test("the sidebar shows hidden entries only while editing, and Enter shows or hides them", async () => {
     const app = await setup();
     expect(app.renderer.root.findDescendantById("layout")).toBeFalsy();
@@ -404,10 +426,14 @@ test("starting another song stops queueing the rest of a long collection", async
 
 test("layout preferences survive a restart and use private file permissions", async () => {
   const dir = await mkdtemp(join(tmpdir(), "peel-test-")); cleanup.push(() => rm(dir, { recursive: true }));
-  const value = { order: ["queue", "favourites"], hidden: ["albums"], heartsInFavourites: true };
+  const value = { order: ["queue", "favourites"], hidden: ["albums"], heartsInFavourites: true, channel: "nightly" as const, quality: "standard" as const };
   await saveJson("layout.json", value, dir);
   expect(await readPreferences(dir)).toEqual(value);
-  expect((await stat(join(dir, "layout.json"))).mode & 0o777).toBe(0o600);
+  // A layout from an older Peel, without the newer settings, gets their defaults.
+  await saveJson("layout.json", { order: [], hidden: [], heartsInFavourites: false }, dir);
+  expect(await readPreferences(dir)).toMatchObject({ channel: "stable", quality: "high" });
+  // Windows has no Unix file modes. Its user profile folders are private already.
+  if (process.platform !== "win32") expect((await stat(join(dir, "layout.json"))).mode & 0o777).toBe(0o600);
 });
 
 test("a slow earlier search cannot overwrite a later search", async () => {
@@ -436,7 +462,8 @@ describe("home, albums, and favourites", () => {
     const app = await setup(120, 36, undefined, cached);
     expect(app.captureCharFrame()).toContain("Cached");
     expect(app.model.home.releases.map(item => item.id)).toEqual(["a.cached"]);
-    expect(app.calls.some(call => call.path === "/v1/me/library/artists")).toBe(false);
+    // The sidebar's Artists list is read ahead, so the scan shows as its catalog request.
+    expect(app.calls.some(call => call.path === "/v1/catalog/de/artists")).toBe(false);
     expect(app.model.home.recent.map(item => item.id)).toEqual(["a.soma", "pl.mix"]);
   });
 

@@ -3,16 +3,26 @@ import { AppleMusic, type AppleOptions } from "./apple";
 import { Cider } from "./cider";
 import { cacheDir, readAppleSignIn, readCache, readPreferences, readToken, saveJson } from "./config";
 import { Engine, ensureEngine, stopEngine } from "./engine";
+import { DevicePlayer, validHost } from "./remote";
+import { DeviceNetwork } from "./devices";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { ensureCider } from "./startup";
+import { checkForUpdate, currentBuild, readyVersion, restartCommand } from "./update";
 
 // Peel plays through its own engine. PEEL_PLAYER=cider uses Cider instead.
 const useCider = process.env.PEEL_PLAYER === "cider";
 
 try {
-  if (process.argv.includes("--help")) {
-    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nSet PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
+  if (process.argv.includes("--remote-host")) {
+    await (await import("./remote-host")).runRemoteHost();
+  } else if (process.argv.includes("--stop-host")) {
+    await new Engine().quit();
+  } else if (process.argv.includes("--version")) {
+    const build = await currentBuild();
+    console.log(build ? `Peel ${build.version} (${build.channel}, ${build.commit.slice(0, 7)}, built ${build.date})` : "Peel from a source folder");
+  } else if (process.argv.includes("--help")) {
+    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\n\nSet PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
   } else if (process.argv.includes("--connect") && useCider) {
     await ensureCider(new Cider().base, "", false, console.log);
     console.log("Approve Peel's access request in Cider. Waiting up to two minutes...");
@@ -29,6 +39,16 @@ try {
     console.log("Signed in to Apple Music. Run bun start.");
   } else {
     const preferences = await readPreferences();
+    const remoteOption = process.argv.indexOf("--remote");
+    if (remoteOption >= 0) {
+      const host = process.argv[remoteOption + 1];
+      if (!host || !validHost(host)) throw new Error("Use peel --remote <ssh-host>.");
+      if (useCider) throw new Error("Remote control uses Peel's engine. Unset PEEL_PLAYER=cider first.");
+      preferences.remote = host;
+      preferences.remotes = [...new Set([...(preferences.remotes ?? []), host])];
+      await saveJson("layout.json", preferences);
+    }
+    if (process.argv.includes("--local")) { delete preferences.remote; await saveJson("layout.json", preferences); }
     const signIn = await readAppleSignIn();
     const startup = new AbortController();
     const status = (text: string) => { model.status = text; model.changed(); };
@@ -47,10 +67,10 @@ try {
       };
       wake = () => ensureCider(cider.base, token, true, status, startup.signal);
     } else {
-      const engine = player = new Engine();
+      const engine = player = new DevicePlayer(preferences.remote, status);
       // Without a saved sign-in, Peel waits for the engine, which has one.
       options = {};
-      wake = () => ensureEngine(engine, status, startup.signal);
+      wake = () => engine.ensure(startup.signal);
     }
     // A rejected Apple sign-in is renewed from the player once it runs.
     const library = new AppleMusic(signIn.userToken, {
@@ -67,10 +87,75 @@ try {
       read: () => readCache("home.json"), write: value => saveJson("home.json", value, cacheDir),
     });
     model.wake = wake;
+    if (player instanceof DevicePlayer) {
+      const devices = player;
+      model.outputTargets = preferences.remotes ?? [];
+      model.onOutput = async host => { await devices.select(host); model.target = devices.target; model.targetId = devices.peer; };
+      // Every Peel on the network is a device. PEEL_DEVICES=off keeps this one off the network.
+      if (process.env.PEEL_DEVICES !== "off") {
+        const network = new DeviceNetwork({ local: devices.localPlayer() });
+        devices.attach(network);
+        const show = () => { model.devices = network.views(); model.pairing = network.pairing; model.target = devices.target; model.targetId = devices.peer; model.changed(); };
+        network.on("change", show);
+        network.on("pairing", (pairing: { name: string }) => { model.status = `${pairing.name} wants to pair. Check the code on both screens.`; show(); });
+        model.onPlayOn = id => devices.playOn(id);
+        model.onPair = id => { try { network.pair(id); show(); } catch (error) { model.fail(error); } };
+        model.onForgetDevices = () => network.forget();
+        model.onDevicesOpened = () => network.openForPairing();
+        devices.onRetarget = () => void model.retarget(() => { const text = devices.applyTarget(); model.target = devices.target; model.targetId = devices.peer; return text; });
+        void network.start().catch(error => model.fail(new Error(`Devices on the network are unavailable: ${error instanceof Error ? error.message : String(error)}`)));
+      }
+    }
+    // Updates install in the background and start the next time Peel opens. The settings page
+    // shows the result, and choosing another channel checks it at once.
+    const updates = (force: boolean) => {
+      const channel = model.preferences.channel;
+      model.update = { ...model.update, checking: true }; model.changed();
+      void checkForUpdate(channel, force).then(result => {
+        if (channel !== model.preferences.channel) return;
+        const announce = result.ready && !result.older && result.ready !== model.update.ready;
+        model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message, ready: result.ready, older: result.older, newEngine: result.newEngine };
+        if (announce) model.status = `Peel ${result.ready} is ready. Restart Peel from Settings to start it.`;
+        model.changed();
+      }, error => {
+        model.update = { ...model.update, checking: false, message: `Could not check for updates: ${error instanceof Error ? error.message : String(error)}` };
+        model.changed();
+      });
+    };
+    model.onChannel = () => { model.update = { ...model.update, message: "Checking for updates..." }; model.changed(); updates(true); };
+    model.onCheckUpdate = () => { model.update = { ...model.update, message: "Checking for updates..." }; updates(true); };
+    // A restart keeps this computer's engine, so the new Peel finds the music still playing. This
+    // process waits for the new one, which keeps the engine owned until the new Peel closes.
+    let restartInto: string | undefined;
+    model.playsLocally = () => !useCider && player instanceof DevicePlayer && !player.host && !player.peer;
+    // The version to start is read again, since another Peel window may have changed it. A change
+    // updates the row, so the listener sees what the restart would do before choosing it again.
+    model.onRestart = () => void readyVersion().then(next => {
+      const shown = model.update;
+      if (next.ready && next.ready === shown.ready && next.newEngine === shown.newEngine && next.older === shown.older) { restartInto = next.ready; renderer.destroy(); return; }
+      model.update = { ...shown, ...next, ready: next.ready };
+      model.status = next.ready ? `Another Peel window installed ${next.ready}. Check the row and choose it again.` : "The update is no longer installed. Check for updates again.";
+      model.changed();
+    }, error => model.fail(error));
+    const restart = async (version: string) => {
+      if (player instanceof DevicePlayer) player.detach();
+      // OpenTUI restores the terminal right after its destroy event, so the new Peel starts after that.
+      await new Promise(resolve => setTimeout(resolve, 0));
+      const { cmd, cwd } = restartCommand(version);
+      const child = Bun.spawn(cmd, { cwd, stdio: ["inherit", "inherit", "inherit"], env: process.env });
+      // A signal meant for this Peel reaches the new one, which owns the terminal now.
+      for (const signal of ["SIGINT", "SIGTERM", "SIGHUP"] as const) process.on(signal, () => child.kill(signal));
+      process.exit(await child.exited);
+    };
+    updates(false);
     let interval: ReturnType<typeof setInterval> | undefined;
     const ui = new PeelUI(renderer, model, () => { clearInterval(interval); ui.dispose(); renderer.destroy(); });
     // q, Ctrl+C, and closing the terminal window all destroy the renderer. The engine stops with it.
-    renderer.on("destroy", () => { startup.abort(); clearInterval(interval); ui.dispose(); if (!useCider) stopEngine(); });
+    renderer.on("destroy", () => {
+      startup.abort(); clearInterval(interval); ui.dispose();
+      if (restartInto) void restart(restartInto).catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); });
+      else if (!useCider) stopEngine(player as Engine);
+    });
     interval = setInterval(() => void model.refresh(), 1000);
     void model.start();
     // Start the player alongside browsing, so it is usually ready by the first song.
