@@ -51,6 +51,8 @@ export const backgroundLimit = 500;
 const keptLists = 40;
 const prefetchedLists = 12;
 const memoryStore: HomeStore = { read: async () => undefined, write: async () => {} };
+// Toggles that repeat after this many presses, so presses still waiting can be counted.
+const cycles: Record<string, number> = { "/playback/toggle": 2, "/playback/shuffle/toggle": 2, "/playback/repeat/toggle": 3 };
 
 export class Model extends EventEmitter {
   playback: Playback = structuredClone(stopped);
@@ -83,6 +85,12 @@ export class Model extends EventEmitter {
   private loads?: Promise<void>;
   private collection?: { id: string; type: string };
   private commands: Promise<unknown> = Promise.resolve();
+  // Presses of one control that wait behind other commands, by kind. Each kind waits as one
+  // command at most, which uses the newest value when it runs, so a burst of key presses never
+  // turns into minutes of old commands.
+  private waiting = new Map<string, { value: number; promise: Promise<boolean> }>();
+  // The target of a seek or volume change still running, so the next press builds on it.
+  private running = new Map<string, number>();
   private queueEdits = 0;
   // Counts queue reads and edits. A read shows its answer only if nothing newer started meanwhile.
   private queueRevision = 0;
@@ -144,6 +152,9 @@ export class Model extends EventEmitter {
 
   fail(error: unknown) { this.status = error instanceof Error ? error.message : String(error); this.changed(); }
 
+  // The engine's last reason for stopping that the status line showed.
+  private shownError?: string;
+
   // Concurrent callers share one playback request and its result.
   refresh() {
     if (this.switchingOutput) return Promise.resolve();
@@ -162,6 +173,9 @@ export class Model extends EventEmitter {
         // A started or restarted engine plays at its default quality until told otherwise.
         if (recovering) void this.player.setQuality?.(this.preferences.quality).catch(() => {});
         if (recovering && !this.starting) this.status = "Ready to play";
+        // The engine says why playback stopped when it could not continue by itself.
+        if (this.playback.error && this.playback.error !== this.shownError) this.status = this.playback.error;
+        this.shownError = this.playback.error;
         this.changed();
       } catch (error) {
         // Cider not running yet is normal. Losing a working connection is reported.
@@ -584,7 +598,26 @@ export class Model extends EventEmitter {
   }
 
   act(path: string, body: unknown = {}, method = "POST") {
+    if (path === "/playback/seek") return this.seekTo((typeof body === "function" ? body() : body).position);
+    const cycle = cycles[path];
+    // Two presses of play/pause cancel out, so only the presses that change anything run.
+    if (cycle) return this.combine(path, (count = 0) => count + 1, count => count % cycle ? this.repeat(count % cycle, () => this.player.command(path, {}, method)) : Promise.resolve());
     return this.execute(() => this.player.command(path, typeof body === "function" ? body() : body, method));
+  }
+
+  private async repeat(times: number, command: () => Promise<void>) { for (let i = 0; i < times; i++) await command(); }
+
+  // Adds a press to the command of its kind that is still waiting, or queues a new one. With target,
+  // a new command builds on the one still running, whose result Peel has not read back yet.
+  private combine(kind: string, press: (value?: number) => number, run: (value: number) => Promise<void>, target = false) {
+    const waiting = this.waiting.get(kind);
+    if (waiting) { waiting.value = press(waiting.value); return waiting.promise; }
+    const entry = { value: press(target ? this.running.get(kind) : undefined), promise: Promise.resolve(false) };
+    this.waiting.set(kind, entry);
+    const done = () => { if (this.waiting.get(kind) === entry) this.waiting.delete(kind); };
+    const finished = () => { done(); if (this.running.get(kind) === entry.value) this.running.delete(kind); };
+    entry.promise = this.execute(async () => { done(); if (target) this.running.set(kind, entry.value); await run(entry.value); }).finally(finished);
+    return entry.promise;
   }
 
   private async execute(command: () => Promise<void>) {
@@ -602,29 +635,34 @@ export class Model extends EventEmitter {
     return success;
   }
 
-  seek(delta: number) {
-    const maximum = this.playback.time.duration;
-    if (!(maximum > 0)) return Promise.resolve();
-    return this.act("/playback/seek", () => ({ position: Math.min(maximum, Math.max(0, this.playback.time.currentTime + delta)) }));
+  // Seeks are relative to a seek still waiting, so ten presses of Left go back 100 seconds in one
+  // command. A seek meant for a song that has stopped playing is dropped.
+  seek(delta: number) { return this.seekBy(position => position + delta); }
+  seekTo(position: number) { return this.seekBy(() => position); }
+  private seekBy(target: (position: number) => number) {
+    const maximum = this.playback.time.duration, song = this.songKey();
+    if (!(maximum > 0)) return Promise.resolve(false);
+    // Seek targets belong to their song, so a target for one song never carries over to the next.
+    return this.combine(`seek:${song}`, (position = this.playback.time.currentTime) => Math.min(maximum, Math.max(0, target(position))),
+      async position => { if (this.songKey() === song) await this.player.command("/playback/seek", { position }); }, true);
   }
-  volume(delta: number) { return this.act("/audio/volume", () => ({ volume: Math.min(1, Math.max(0, this.playback.volume + delta)) }), "PATCH"); }
+  volume(delta: number) {
+    return this.combine("volume", (volume = this.playback.volume) => Math.min(1, Math.max(0, volume + delta)), volume => this.player.command("/audio/volume", { volume }, "PATCH"), true);
+  }
 
-  async skip(direction: -1 | 1) {
-    if (this.playback.repeatMode !== "one") {
-      return this.act(direction === 1 ? "/playback/next" : "/playback/previous", direction === -1 ? { force: true } : {});
-    }
-    // Cider's ordinary Next can repeat the current song in repeat-one mode.
-    // An explicit queue jump skips without changing the user's repeat setting.
-    // The position is read in the same queued command as the jump, so rapid presses each move
-    // one song from where the previous press landed.
-    let jumped = false;
-    const done = await this.execute(async () => {
+  // Skips add up while they wait: three presses of Next skip three songs, and Next then Previous
+  // skip none. Several skips are one jump, so a burst of presses is one command, not one per press.
+  skip(direction: -1 | 1) {
+    return this.combine("skip", (count = 0) => count + direction, async count => {
+      const mode = this.playback.repeatMode;
+      if (!count) return;
+      // Cider's ordinary Next can repeat the current song in repeat-one mode, so that mode jumps too.
+      if (Math.abs(count) === 1 && mode !== "one") return this.player.command(count > 0 ? "/playback/next" : "/playback/previous", count < 0 ? { force: true } : {});
       const queue = await this.player.queuePosition();
       if (queue.total < 2) return;
-      await this.player.command("/queue/jump", { index: (queue.position + direction + queue.total) % queue.total });
-      jumped = true;
+      const index = mode === "none" ? Math.min(queue.total - 1, Math.max(0, queue.position + count)) : ((queue.position + count) % queue.total + queue.total) % queue.total;
+      if (index !== queue.position) await this.player.command("/queue/jump", { index });
     });
-    return done && jumped;
   }
 
   // Undefined until Apple has said whether the playing song is a favourite. The player's answer

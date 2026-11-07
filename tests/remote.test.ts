@@ -92,7 +92,9 @@ test("settings switch controllers, show the host, and keep the previous target a
   await model.selectOutput("main"); await app.flush();
   expect(model.preferences.remote).toBe("main");
   expect(app.captureCharFrame()).toContain("Control over SSH");
-  expect(app.captureCharFrame()).toContain("On main");
+  // The controlled computer is named beside the devices button, not before the artist.
+  expect(app.captureCharFrame()).toContain("d  main");
+  expect(app.captureCharFrame()).not.toContain("On main");
   await model.selectOutput("offline");
   expect(model.preferences.remote).toBe("main");
   expect(selected).toEqual(["main", "offline"]);

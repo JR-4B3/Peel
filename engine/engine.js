@@ -6,6 +6,16 @@
   const repeats = ["none", "one", "all"];
   let music;
   let signIn = false;
+  // Where music played a moment ago, and why it last stopped by itself, for the status line.
+  let last;
+  let notice;
+  // Peel reads the state every second, and MusicKit does not always report time changes, so both
+  // remember where music plays.
+  // Only music the listener wants playing counts. MusicKit can still report playing for a moment
+  // after a pause, and a paused import plays muted to reach its position.
+  let wanted = false;
+  const want = value => { wanted = value; if (!value) last = undefined; };
+  const remember = () => { if (wanted && music?.playbackState === 2) last = { position: music.queue.position, time: music.currentPlaybackTime ?? 0, duration: music.currentPlaybackDuration ?? 0, at: Date.now() }; };
   // The playing song's rating. A song shows as a favourite or not only once Apple has answered.
   let rated = { id: "", value: undefined, checked: 0 };
   // The queue entries the listener added, mapped to the Peel songs they came from. The rest of
@@ -82,6 +92,7 @@
   window.peelEngine = {
     state() {
       if (!music) return { ready: false, signIn };
+      remember();
       const item = music.nowPlayingItem;
       // An unknown rating is asked again every few seconds, and a known one every half minute, so
       // a favourite changed in another app or on another device shows here too.
@@ -97,16 +108,20 @@
           } : null,
           time: { currentTime: music.currentPlaybackTime ?? 0, duration: music.currentPlaybackDuration ?? 0 },
           queueRevision: revision(),
+          ...(notice ? { error: notice } : {}),
           volume: music.volume, repeatMode: repeats[music.repeatMode] ?? "none", shuffleMode: music.shuffleMode === 1,
         },
       };
     },
     tokens: () => ({ userToken: music.musicUserToken, storefront: music.storefrontId }),
-    pause: () => music.pause(),
+    failed: text => { notice = text; },
+    // A pause, a stop, or a move to another device means the listener stopped this music, so a
+    // failure that arrives afterwards does not start it again.
+    pause: () => { want(false); return music.pause(); },
     // Ends playback here and gives up Apple's stream, after the music moved to another device.
-    stop: () => music.stop(),
-    resume: () => music.play(),
-    toggle: () => music.playbackState === 2 ? music.pause() : music.play(),
+    stop: () => { want(false); return music.stop(); },
+    resume: () => { want(true); return music.play(); },
+    toggle: () => { const playing = music.playbackState === 2; want(!playing); return playing ? music.pause() : music.play(); },
     next: () => music.skipToNextItem(),
     previous: () => music.skipToPreviousItem(),
     seek: position => music.seekToTime(position),
@@ -117,6 +132,7 @@
     // A song inside its collection: the whole list is queued, starting at the selected song.
     // Songs the listener added and has not heard yet stay queued after it.
     play: async (items, index = 0) => {
+      want(true);
       const waiting = pending().map(item => added.get(item));
       added = new WeakMap();
       await music.setQueue({ items: items.map(resource), startWith: index, startPlaying: true });
@@ -126,6 +142,7 @@
     // songs and before the rest of the collection. Songs added while nothing is queued start playing.
     enqueue: async (items, next) => {
       if (!music.queue.items.length) {
+        want(true);
         await music.setQueue({ items: items.map(resource), startPlaying: true });
         music.queue.items.slice(1).forEach((item, index) => added.set(item, items[index + 1]));
         return;
@@ -154,6 +171,7 @@
       if (index > music.queue.position) music.queue.spliceQueueItems(index, 1);
     },
     jump: async (index, expected) => {
+      want(true);
       if (expected && music.queue.items[index]?.id !== expected) throw new Error("The queue changed on another controller. Try again.");
       await music.changeToMediaAtIndex(index);
     },
@@ -177,7 +195,9 @@
     },
     // Replaces this device's queue with one exported from another device. The volume stays this
     // device's own. A paused queue starts muted to reach its position, then pauses.
-    importPlayback: async ({ items = [], position = 0, added: marks = [], time = 0, playing = false, repeatMode = "none", shuffleMode = false } = {}) => {
+    // With cue, the queue is only set, as after reloading a player that stopped answering.
+    importPlayback: async ({ items = [], position = 0, added: marks = [], time = 0, playing = false, repeatMode = "none", shuffleMode = false, cue = false } = {}) => {
+      want(false);
       added = new WeakMap();
       if (!items.length) { await music.stop?.(); return; }
       const start = Math.min(Math.max(0, position), items.length - 1);
@@ -199,12 +219,14 @@
       const target = matched ? sources.findIndex(index => index >= start) : music.queue.position;
       music.queue.items.forEach((item, index) => { const source = matched ? sources[index] : index; if (marks.includes(source) && items[source]) added.set(item, items[source]); });
       music.repeatMode = Math.max(0, repeats.indexOf(repeatMode));
+      if (cue) { if (shuffleMode) music.shuffleMode = 1; return; }
       const volume = music.volume;
       if (!playing) music.volume = 0;
       try {
         if (target >= 0 && target !== music.queue.position) await music.changeToMediaAtIndex(target);
         // The song to start with was left out, so its position does not apply to the next one.
         if (matched && sources[target] !== start) time = 0;
+        want(playing);
         await music.play();
         if (time > 1) await music.seekToTime(time);
         if (!playing) await music.pause();
@@ -233,10 +255,21 @@
     music.volume = window.peel.volume;
     music.addEventListener("nowPlayingItemDidChange", () => void checkRating());
     music.addEventListener("playbackVolumeDidChange", () => log(`volume ${music.volume}`));
-    // Playback that ends by itself is logged with Apple's reason, if MusicKit gives one.
-    music.addEventListener("mediaPlaybackError", event => log(`playback error ${event?.errorCode ?? event?.name ?? ""} ${event?.message ?? event?.description ?? ""}`.trim()));
+    music.addEventListener("playbackTimeDidChange", remember);
+    // Apple's player drops the song and stops when loading its audio fails, for example after a
+    // short network outage. If music played a moment ago, the engine's main process reloads the
+    // player and continues: at the same place, or with the next song when it failed at the end of one.
+    music.addEventListener("mediaPlaybackError", event => {
+      const code = event?.errorCode ?? event?.name ?? "", text = event?.message ?? event?.description ?? "";
+      log(`playback error ${code} ${text}`.trim());
+      if (code !== "NETWORK_ERROR" && text !== "loadSegmentError" || !last || Date.now() - last.at > 2500) return;
+      const ended = last.duration > 0 && last.time >= last.duration - 2, count = music.queue.items.length;
+      const position = !ended || music.repeatMode === 1 ? last.position : music.repeatMode === 2 ? (last.position + 1) % count : last.position + 1;
+      if (position < count) console.log(`peel:recover ${JSON.stringify({ position, time: ended ? 0 : last.time })}`);
+    });
     music.addEventListener("playbackStateDidChange", event => {
       const state = event?.state ?? music.playbackState;
+      if (state === 2) notice = undefined;
       if (state === MusicKit.PlaybackStates?.stopped || state === 4) log(`playback stopped at ${Math.round(music.currentPlaybackTime ?? 0)}s of ${music.nowPlayingItem?.title ?? "nothing"}`);
     });
     log(`configured, authorized=${music.isAuthorized}`);
