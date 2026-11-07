@@ -88,7 +88,9 @@ async function launchHost() {
 // ---- The host ----------------------------------------------------------------------------------
 
 // Apple Music's media session state codes.
-const PLAYING = 3, BUFFERING = 6, CONNECTING = 8;
+const STOPPED = 1, PAUSED = 2, PLAYING = 3, BUFFERING = 6, CONNECTING = 8;
+// Paused, stopped, or with nothing to play (0).
+const stopped = (state: { state?: number }) => state.state === PAUSED || state.state === STOPPED || state.state === 0;
 const repeats = ["none", "one", "all"] as const;
 
 interface Control { state?: number; position?: number; item?: number; title?: string; artist?: string; album?: string; id?: string; duration?: number; error?: string }
@@ -192,7 +194,8 @@ export async function runHiresHost() {
   // Reads Apple's upcoming queue, and keeps the history before the playing entry.
   async function sync() {
     const queue: { queueId: number; id: string; title: string }[] = (await control.request("queue")).queue ?? [];
-    if (!queue.length) return;
+    // An empty queue means Apple has nothing queued any more, so Peel's mirror empties too.
+    if (!queue.length) { order = []; entries.clear(); synced = Date.now(); return; }
     const playing = queue[0]!.queueId, at = order.indexOf(playing);
     order = [...(at >= 0 ? order.slice(0, at) : []), ...queue.map(item => item.queueId)];
     for (const item of queue) if (!entries.has(item.queueId)) entries.set(item.queueId, { queueId: item.queueId, added: false, song: { id: item.id, type: "songs", name: item.title, artist: "", album: "", duration: 0, catalogId: item.id } });
@@ -212,14 +215,16 @@ export async function runHiresHost() {
     }
   }
 
-  // Reads what plays. When the playing entry changed, Apple's queue is read again.
-  async function read() {
+  // Reads what plays. When the playing entry changed, Apple's queue is read again. A command that
+  // runs keeps the queue to itself: the state Peel polls meanwhile does not read it.
+  async function read(resync = true) {
     const before = current.item;
     current = await control.request("state");
     // A changed queue Peel did not ask for, such as shuffle, shows within two seconds.
-    if (current.item !== before || Date.now() - synced > 2000) await sync();
+    if (resync && (current.item !== before || Date.now() - synced > 2000)) await sync();
     return current;
   }
+  let busy = 0;
 
   // Apple Music applies commands a moment later. Waits until its state shows the change, for up
   // to `within` milliseconds, so the state Peel reads next is already the new one.
@@ -368,14 +373,16 @@ export async function runHiresHost() {
     tokens: () => { throw new Error("The hi-res player has no Apple sign-in."); },
     failed: (text: string) => { notice = text; },
     quality: () => "lossless",
-    pause: async () => { wanted = false; await step("pause", state => state.state !== PLAYING); },
-    stop: async () => { wanted = false; await step("stop", state => state.state !== PLAYING); },
+    // Only a confirmed pause counts, not a song that is still buffering, so a device that moves
+    // the music away never resumes while this one starts after all.
+    pause: async () => { wanted = false; await step("pause", stopped); },
+    stop: async () => { wanted = false; await step("stop", stopped); },
     resume: async () => { wanted = true; notice = undefined; await step("play", state => state.state === PLAYING || state.state === BUFFERING); },
     toggle: async () => {
       await read().catch(() => {});
       const playing = current.state === PLAYING || current.state === BUFFERING;
       wanted = !playing;
-      await step(playing ? "pause" : "play", state => playing ? state.state !== PLAYING : state.state === PLAYING || state.state === BUFFERING);
+      await step(playing ? "pause" : "play", state => playing ? stopped(state) : state.state === PLAYING || state.state === BUFFERING);
     },
     next: () => step("next", (state, before) => state.item !== before.item),
     // Previous restarts a song that played for a few seconds, so a position back at the start counts too.
@@ -445,7 +452,7 @@ export async function runHiresHost() {
         if (shuffle) { shuffle = false; await control.request("shuffle 0"); }
         await playList(items, start, new Set(added));
         if (time > 1) await step(`seek ${Math.round(time * 1000)}`, state => Math.abs((state.position ?? 0) - time * 1000) < 1500);
-        if (!playing) await step("pause", state => state.state !== PLAYING);
+        if (!playing) await step("pause", stopped);
         wanted = playing;
       } finally { if (!playing) await control.request(`volume ${Math.round(volume * 15)}`); }
       repeat = Math.max(0, repeats.indexOf(repeatMode)); await control.request(`repeat ${repeat}`);
@@ -483,7 +490,11 @@ export async function runHiresHost() {
   const call = (method: string, args: unknown[] = []) => {
     const run = methods[method];
     if (!run) return Promise.reject(new Error(`Hi-res playback has no method ${method}.`));
-    const result = calling.catch(() => {}).then(async () => { const value = await run(...args); if (playbackMethods.has(method)) await read().catch(() => {}); return value; });
+    const result = calling.catch(() => {}).then(async () => {
+      busy++;
+      try { const value = await run(...args); if (playbackMethods.has(method)) await read().catch(() => {}); return value; }
+      finally { busy--; }
+    });
     calling = result;
     return result;
   };
@@ -507,7 +518,7 @@ export async function runHiresHost() {
         if (path === "/retain") return reply(200, null);
         if (path === "/state") {
           if (!ready) return reply(200, { ready: false, signIn: false, playback: control.error ? { error: control.error } : undefined, version, instance });
-          await read().catch(error => { notice = error.message; });
+          await read(!busy).catch(error => { notice = error.message; });
           return reply(200, { ready: true, signIn: false, playback: playback(), version, instance });
         }
         if (path === "/quit" && request.method === "POST") { setTimeout(() => void quit(), 10); return reply(200, null); }

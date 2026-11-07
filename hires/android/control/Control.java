@@ -50,12 +50,14 @@ public final class Control {
   // The longest command is a queue of a few hundred song IDs.
   static final int MAX_LINE = 256 * 1024;
 
-  // One line, or null at the end. A longer line than MAX_LINE ends the connection.
-  static String line(java.io.InputStream in) throws java.io.IOException {
+  // One line, or null at the end. A longer line than MAX_LINE, or one still incomplete at the
+  // deadline (0 for none), ends the connection.
+  static String line(java.io.InputStream in, long deadline) throws java.io.IOException {
     java.io.ByteArrayOutputStream bytes = new java.io.ByteArrayOutputStream();
     for (int b; (b = in.read()) != '\n'; ) {
       if (b < 0) return bytes.size() > 0 ? bytes.toString("UTF-8") : null;
       if (bytes.size() >= MAX_LINE) throw new java.io.IOException("line too long");
+      if (deadline > 0 && System.currentTimeMillis() > deadline) throw new java.io.IOException("too slow");
       bytes.write(b);
     }
     return bytes.toString("UTF-8");
@@ -69,13 +71,15 @@ public final class Control {
       java.io.InputStream in = new java.io.BufferedInputStream(s.getInputStream());
       OutputStream out = s.getOutputStream();
       String line;
-      while ((line = line(in)) != null) {
+      long deadline = System.currentTimeMillis() + 5000;
+      while ((line = line(in, deadline)) != null) {
         int space = line.indexOf(' ');
         if (space < 0 || !java.security.MessageDigest.isEqual(line.substring(0, space).getBytes(StandardCharsets.UTF_8), key.getBytes(StandardCharsets.UTF_8))) {
           out.write("{\"error\":\"key\"}\n".getBytes(StandardCharsets.UTF_8));
           return;
         }
         s.setSoTimeout(0);
+        deadline = 0;
         String reply;
         try { reply = run(line.substring(space + 1)); }
         catch (Throwable error) { Throwable cause = error.getCause() != null ? error.getCause() : error; reply = "{\"error\":" + quote(String.valueOf(cause)) + "}"; }

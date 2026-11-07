@@ -84,8 +84,8 @@ try {
         // started only for this is released afterwards; one that was running keeps running.
         const viaWebEngine = async () => {
           const web = new Engine(), running = await web.state().then(() => true, () => false);
-          await ensureEngine(web, status, startup.signal);
-          try { return await web.appleTokens(); } finally { if (!running) stopEngine(web); }
+          try { await ensureEngine(web, status, startup.signal); return await web.appleTokens(); }
+          finally { if (!running) stopEngine(web); }
         };
         let fresh: { userToken: string; storefront?: string };
         if (useHires) fresh = await viaWebEngine();
