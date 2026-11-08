@@ -192,6 +192,20 @@ test.skipIf(process.platform === "win32")("#14 the Mac launcher's Ghostty comman
 });
 
 
+// Issue #78: the Linux menu entry passes Peel's ghostty.conf to Ghostty, quoted for the desktop entry.
+test.skipIf(process.platform !== "linux")("the Linux menu entry opens Ghostty with Peel's ghostty.conf", async () => {
+  const dir = await temporary(), bin = join(dir, "bin"), home = join(dir, "home"), config = join(dir, "my $config");
+  await mkdir(bin, { recursive: true }); await mkdir(home, { recursive: true });
+  for (const name of ["bun", "ghostty"]) await writeFile(join(bin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const run = Bun.spawnSync(["bash", new URL("../scripts/install-local.sh", import.meta.url).pathname], {
+    env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, XDG_CONFIG_HOME: config }, stdout: "pipe", stderr: "pipe",
+  });
+  expect(run.exitCode, run.stderr.toString()).toBe(0);
+  const entry = await readFile(join(home, ".local/share/applications/peel.desktop"), "utf8");
+  const exec = entry.split("\n").find(line => line.startsWith("Exec="))!;
+  expect(exec).toContain(`"--config-file=?${join(dir, "my \\$config")}/peel/ghostty.conf" -e "${join(home, ".local/bin/peel")}"`);
+});
+
 test("the engine installer accepts castlabs binary-mode checksum filenames", async () => {
   const target = join(await temporary(), "engine");
   const archive = zip([{ name: "version", data: electronVersion.slice(1) }]);

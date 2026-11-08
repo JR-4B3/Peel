@@ -78,7 +78,7 @@ Everything also works with the mouse. `?` lists the keys for the current screen,
 | Play or pause | Space, or Ctrl+P while typing |
 | Previous, next | `p`, `n` |
 | Seek ten seconds | Left, Right. Shift+Left and Shift+Right on covers |
-| Volume | `-`, `+` |
+| Volume | `-`, `+`, or the mouse wheel over the player |
 | Shuffle, repeat | `s`, `r` |
 | Move around | Tab and Shift+Tab, arrow keys, Enter. Page Up, Page Down, Home, End in long lists |
 | Back | Escape or Backspace |
@@ -103,6 +103,7 @@ The last entry in the sidebar.
 | Audio quality | High (256 kbps) or Standard (64 kbps, a quarter of the data). With hi-res, Apple Music's own setting chooses. |
 | Updates | Stable or Nightly, and a row that checks now and restarts into a new version. |
 | Hearts in Favourite Songs | Show the heart on every row there, or hide it. |
+| Text size | Ghostty's font size when Peel opens from its menu entry or app, on Linux and macOS. A menu entry installed before 0.1.1 needs `peel --install-launcher` once. |
 | Memory | On Linux, how much memory Peel uses, Android included. |
 | Devices | Pair a device, or forget the paired ones. |
 

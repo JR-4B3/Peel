@@ -171,6 +171,17 @@ async function update(channel: Channel, force: boolean, now: number, dir: string
   return { build, message, ...await readyVersion(dir) };
 }
 
+// Writes the peel command and the menu, Applications or Start menu entry for the Peel in dir: a
+// release install's launcher starts whichever version <root>/current names, a source folder's
+// starts that folder. peel --install-launcher runs it again, for an entry an older Peel wrote.
+export async function installLauncher(dir = appDir, root = installRoot(dir)) {
+  const script = process.platform === "win32"
+    ? ["powershell", "-ExecutionPolicy", "Bypass", "-File", join(dir, "scripts", "install-local.ps1")]
+    : ["bash", join(dir, "scripts", "install-local.sh")];
+  const child = Bun.spawn(script, { stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, ...(root ? { PEEL_RELEASE_ROOT: root } : {}) } });
+  return await child.exited;
+}
+
 // bun src/update.ts install [--channel nightly] [--root <folder>]: installs the newest release
 // and a launcher that starts whichever version <root>/current names.
 if (import.meta.main && process.argv[2] === "install") {
@@ -182,11 +193,5 @@ if (import.meta.main && process.argv[2] === "install") {
   // The channel is a setting, so the installed Peel keeps updating from the same one.
   const preferences = await readPreferences();
   await saveJson("layout.json", { ...preferences, channel });
-  const version = join(root, "versions", release.version);
-  // The launcher scripts write peel, the desktop entry, and the app or Start menu entry.
-  const script = process.platform === "win32"
-    ? ["powershell", "-ExecutionPolicy", "Bypass", "-File", join(version, "scripts", "install-local.ps1")]
-    : ["bash", join(version, "scripts", "install-local.sh")];
-  const child = Bun.spawn(script, { stdio: ["inherit", "inherit", "inherit"], env: { ...process.env, PEEL_RELEASE_ROOT: root } });
-  process.exitCode = await child.exited;
+  process.exitCode = await installLauncher(join(root, "versions", release.version), root);
 }

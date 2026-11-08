@@ -5,6 +5,7 @@ import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
 import { cover, largeCover, largeCoverSize } from "./artwork";
 import { colour, icon } from "./theme";
+import { textSizes } from "./config";
 import { LyricsSource } from "./lyrics";
 import { LyricsView } from "./lyrics-view";
 
@@ -72,6 +73,8 @@ class ClearBox extends BoxRenderable {
 class Button extends TextRenderable {
   private hovered = false;
   showHint = true;
+  // The hints a narrow row can switch to, longest first. The last is the glyph alone.
+  hints?: string[];
 
   constructor(ctx: RenderContext, id: string, private glyph: string, private hint: string, action: () => void, private tint = colour.accent) {
     super(ctx, {
@@ -86,6 +89,11 @@ class Button extends TextRenderable {
     if (glyph === this.glyph && hint === this.hint && tint === this.tint) return;
     this.glyph = glyph; this.hint = hint; this.tint = tint; this.paint();
   }
+
+  setHint(hint: string) { this.set(this.glyph, hint); }
+
+  // The cells this button takes with the given hint.
+  widthWith(hint: string) { return Bun.stringWidth(this.glyph) + (hint ? 1 + Bun.stringWidth(hint) : 0); }
 
   paint() {
     const label = this.hovered ? colour.text : this.tint;
@@ -451,6 +459,7 @@ export class PeelUI {
   private playButton: Button;
   private favouriteButton: Button;
   private albumFavouriteButton: Button;
+  private actions: BoxRenderable;
   private shuffleButton: Button;
   private repeatButton: Button;
   private volumeText: TextRenderable;
@@ -524,11 +533,13 @@ export class PeelUI {
     this.headerArtist = new TextRenderable(ctx, { id: "collection-artist", fg: colour.accent, height: 1, truncate: true, selectable: false,
       onMouseDown: event => { const detail = model.detail; if (event.button === 0 && detail?.type.includes("albums")) { event.stopPropagation(); void model.openArtist(detail); } } });
     this.headerMeta = new TextRenderable(ctx, { fg: colour.muted, height: 2, truncate: true, selectable: false });
-    const actions = new BoxRenderable(ctx, { flexDirection: "row", gap: 3, height: 1 });
-    actions.add(this.button("play-collection", icon.play, "Play", () => { const first = this.model.items[0]; if (first) void this.model.activate(first); }));
+    // In a narrow header the buttons drop their keys, then their words, so none is cut off.
+    const actions = this.actions = new BoxRenderable(ctx, { id: "collection-actions", flexDirection: "row", gap: 3, height: 1, onSizeChange: () => this.fitActions() });
+    const play = this.button("play-collection", icon.play, "Play", () => { const first = this.model.items[0]; if (first) void this.model.activate(first); });
     this.albumFavouriteButton = this.button("favourite-album", icon.heartOutline, "Favourite  l", () => void model.toggleAlbumFavourite(), colour.faint);
-    actions.add(this.albumFavouriteButton);
-    actions.add(this.button("back", icon.back, "Back  esc", () => this.back()));
+    const back = this.button("back", icon.back, "Back  esc", () => this.back());
+    play.hints = ["Play", "Play", ""]; this.albumFavouriteButton.hints = ["Favourite  l", "Favourite", ""]; back.hints = ["Back  esc", "Back", ""];
+    for (const button of [play, this.albumFavouriteButton, back]) { button.flexShrink = 0; actions.add(button); }
     for (const item of [this.headerName, this.headerArtist, this.headerMeta, actions]) info.add(item);
     this.headerCover.onMouseDown = event => { const detail = model.detail; if (event.button === 0 && detail) { event.stopPropagation(); this.showCover(detail.artwork, detail.name, detail.artist || detail.genre || ""); } };
     this.header.add(this.headerCover); this.header.add(info);
@@ -568,7 +579,14 @@ export class PeelUI {
     this.body.add(this.lyrics.panel);
     this.root.add(this.body);
 
-    this.playerPanel = new BoxRenderable(ctx, { id: "player-panel", ...panel, paddingX: 1, height: 6, flexShrink: 0, flexDirection: "row", gap: 2 });
+    // The mouse wheel anywhere over the player changes the volume in 5% steps. Lists scroll as before.
+    this.playerPanel = new BoxRenderable(ctx, { id: "player-panel", ...panel, paddingX: 1, height: 6, flexShrink: 0, flexDirection: "row", gap: 2,
+      onMouseScroll: event => {
+        const direction = event.scroll?.direction;
+        if (direction !== "up" && direction !== "down") return;
+        event.stopPropagation();
+        void model.volume(direction === "up" ? 0.05 : -0.05);
+      } });
     this.playerCover = new Cover(ctx, { id: "player-cover", width: 8, height: 4, glyph: "\u{F075A}" });
     this.playerCover.onMouseDown = event => { const song = model.playback.nowPlaying; if (event.button === 0 && song) { event.stopPropagation(); this.showCover(song.artwork?.url, song.albumName ?? song.name ?? "", song.artistName ?? ""); } };
     this.playerPanel.add(this.playerCover);
@@ -616,6 +634,17 @@ export class PeelUI {
     this.root.add(footer);
     model.on("change", this.change); renderer.on("resize", this.resize); renderer.on("focused_renderable", this.focusChange); renderer.keyInput.on("keypress", this.key);
     this.resizeLayout(); this.update(); this.content().focus();
+  }
+
+  // The longest hints with which the collection's buttons fit their row.
+  private fitActions() {
+    const buttons = this.actions.getChildren().filter(child => child instanceof Button && child.visible) as Button[];
+    const levels = Math.max(...buttons.map(button => button.hints?.length ?? 1));
+    for (let level = 0; level < levels; level++) {
+      const hint = (button: Button) => button.hints ? button.hints[Math.min(level, button.hints.length - 1)]! : "";
+      const needed = buttons.reduce((total, button) => total + button.widthWith(hint(button)), 0) + 3 * Math.max(0, buttons.length - 1);
+      if (needed <= this.actions.width || level === levels - 1) { for (const button of buttons) button.setHint(hint(button)); return; }
+    }
   }
 
   private button(id: string, glyph: string, hint: string, action: () => void, tint = colour.accent) {
@@ -787,7 +816,8 @@ export class PeelUI {
       }
       const loved = model.albumFavourite;
       this.albumFavouriteButton.visible = detail.type.includes("albums");
-      this.albumFavouriteButton.set(loved ? icon.heart : icon.heartOutline, "Favourite  l", loved ? colour.heart : colour.faint);
+      this.albumFavouriteButton.set(loved ? icon.heart : icon.heartOutline, undefined, loved ? colour.heart : colour.faint);
+      this.fitActions();
     }
     if (this.content() === this.grid && this.tracks.focused) this.grid.focus();
     if (this.content() === this.tracks && this.grid.focused) this.tracks.focus();
@@ -1182,6 +1212,15 @@ export class PeelUI {
         activate: () => void model.setPreference({ heartsInFavourites: !hearts }, `Hearts in Favourite Songs: ${hearts ? "hidden" : "shown"}`),
       },
     ];
+    // Peel's menu entry opens Ghostty on Linux and macOS. Windows opens Windows Terminal.
+    if (process.platform !== "win32") rows.push({
+      id: "text-size", lead: icon.textSize, name: "Text size", right: preferences.textSize ? `${preferences.textSize} pt` : "Ghostty's",
+      description: "Ghostty's font size the next time Peel opens from its menu. A menu entry from before 0.1.1 needs peel --install-launcher.",
+      activate: () => {
+        const next = textSizes[(textSizes.indexOf(preferences.textSize) + 1) % textSizes.length]!;
+        void model.setPreference({ textSize: next }, next ? `Text size: ${next} pt, the next time Peel opens from its menu entry` : "Text size: Ghostty's own");
+      },
+    });
     if (model.memory) {
       const parts = model.memory.parts.map(part => `${part.name} ${formatBytes(part.bytes)}`).join(", ");
       rows.push({

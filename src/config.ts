@@ -11,6 +11,8 @@ export interface Preferences {
   channel: Channel;
   // The engine's stream quality. Apple's web player offers AAC at 256 or 64 kbps.
   quality: Quality;
+  // Ghostty's font size in points when Peel opens from its menu entry, or 0 for Ghostty's own.
+  textSize: number;
   remote?: string;
   remotes?: string[];
 }
@@ -27,7 +29,8 @@ export function systemDir(kind: "config" | "cache") {
 
 export const configDir = process.env.PEEL_CONFIG_DIR ?? join(systemDir("config"), "peel");
 export const cacheDir = process.env.PEEL_CACHE_DIR ?? join(systemDir("cache"), "peel");
-export const defaults: Preferences = { order: [], hidden: [], heartsInFavourites: false, channel: "stable", quality: "high" };
+export const defaults: Preferences = { order: [], hidden: [], heartsInFavourites: false, channel: "stable", quality: "high", textSize: 0 };
+export const textSizes = [0, 10, 11, 12, 13, 14, 15, 16, 18, 20, 24];
 
 export async function readPreferences(dir = configDir): Promise<Preferences> {
   try {
@@ -38,6 +41,7 @@ export async function readPreferences(dir = configDir): Promise<Preferences> {
       heartsInFavourites: value.heartsInFavourites === true,
       channel: value.channel === "nightly" ? "nightly" : "stable",
       quality: value.quality === "standard" ? "standard" : "high",
+      textSize: textSizes.includes(value.textSize) ? value.textSize : 0,
       ...(typeof value.remote === "string" ? { remote: value.remote } : {}),
       ...(Array.isArray(value.remotes) ? { remotes: value.remotes.filter((host: unknown) => typeof host === "string") } : {}),
     };
@@ -89,4 +93,15 @@ export async function readAppleSignIn(): Promise<AppleSignIn> {
     if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Could not read Peel's apple.json. Run bun run connect again.");
   }
   return { userToken: "" };
+}
+
+// Peel's menu entry and app open Ghostty with this file as an extra config file
+// (scripts/install-local.sh), so the Text size setting applies the next time Peel opens there.
+export async function saveTerminalConfig(preferences: Preferences, dir = configDir) {
+  const lines = ["# Written by Peel's Text size setting. Peel's menu entry loads it when it opens Ghostty."];
+  if (preferences.textSize) lines.push(`font-size = ${preferences.textSize}`);
+  await mkdir(dir, { recursive: true, mode: 0o700 });
+  const path = join(dir, "ghostty.conf"), partial = `${path}.${process.pid}.tmp`;
+  await writeFile(partial, lines.join("\n") + "\n");
+  await rename(partial, path);
 }

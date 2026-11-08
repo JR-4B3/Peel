@@ -73,7 +73,9 @@ if [[ -d /Applications/Ghostty.app || -d "$HOME/Applications/Ghostty.app" ]]; th
   # Ghostty already starts the command with "exec -l", so the command must not begin with exec.
   escaped=$(printf '%s' "$launcher" | sed "s/'/'\\\\''/g")
   quoted="'$escaped'"
-  exec open -na Ghostty --args --title=Peel --command="$quoted"
+  # Peel's Text size setting writes ghostty.conf. The ? lets Ghostty start without it.
+  config=${PEEL_CONFIG_DIR:-$HOME/Library/Application Support/peel}
+  exec open -na Ghostty --args --title=Peel --config-file="?$config/ghostty.conf" --command="$quoted"
 fi
 exec osascript - "$launcher" <<'SCRIPT'
 on run argv
@@ -107,11 +109,16 @@ if [[ -e "$peel_desktop" ]] && ! grep -q '^X-Peel-Launcher=true$' "$peel_desktop
   exit 1
 fi
 # Desktop Exec fields have their own quoting rules, separate from shell quoting.
-peel_desktop_launcher=${peel_launcher//\\/\\\\}
-peel_desktop_launcher=${peel_desktop_launcher//\"/\\\"}
-peel_desktop_launcher=${peel_desktop_launcher//\$/\\\$}
-peel_desktop_launcher=${peel_desktop_launcher//\`/\\\`}
-peel_desktop_launcher=${peel_desktop_launcher//%/%%}
+desktop_quote() {
+  local value=${1//\\/\\\\}
+  value=${value//\"/\\\"}
+  value=${value//\$/\\\$}
+  value=${value//\`/\\\`}
+  printf '%s' "${value//%/%%}"
+}
+peel_desktop_launcher=$(desktop_quote "$peel_launcher")
+# Peel's Text size setting writes ghostty.conf there (src/config.ts). The ? lets Ghostty start without it.
+peel_ghostty_config=$(desktop_quote "${PEEL_CONFIG_DIR:-${XDG_CONFIG_HOME:-$HOME/.config}/peel}/ghostty.conf")
 {
   printf '[Desktop Entry]\nType=Application\nName=Peel\n'
   printf 'Comment=Search your Apple Music library and control playback\n'
@@ -120,7 +127,7 @@ peel_desktop_launcher=${peel_desktop_launcher//%/%%}
   # the Nerd Font symbols Peel uses for its controls.
   if command -v ghostty >/dev/null 2>&1; then
     printf 'Terminal=false\nStartupWMClass=%s\n' "$peel_window_class"
-    printf 'Exec=ghostty --class=%s --title=Peel --gtk-single-instance=false --confirm-close-surface=false -e "%s"\n' "$peel_window_class" "$peel_desktop_launcher"
+    printf 'Exec=ghostty --class=%s --title=Peel --gtk-single-instance=false --confirm-close-surface=false "--config-file=?%s" -e "%s"\n' "$peel_window_class" "$peel_ghostty_config" "$peel_desktop_launcher"
   elif command -v kitty >/dev/null 2>&1; then
     printf 'Terminal=false\nStartupWMClass=peel\nExec=kitty --class peel --title Peel "%s"\n' "$peel_desktop_launcher"
   elif command -v alacritty >/dev/null 2>&1; then

@@ -1,6 +1,6 @@
 import { createCliRenderer } from "@opentui/core";
 import { AppleMusic } from "./apple";
-import { cacheDir, readAppleSignIn, readCache, readPreferences, saveJson } from "./config";
+import { cacheDir, readAppleSignIn, readCache, readPreferences, saveJson, saveTerminalConfig } from "./config";
 import { Engine, ensureEngine, stopEngine } from "./engine";
 import { Hires, ensureHires, hiresSelected } from "./hires";
 import { DevicePlayer, validHost } from "./remote";
@@ -8,7 +8,7 @@ import { DeviceNetwork } from "./devices";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { memoryUse } from "./memory";
-import { checkForUpdate, currentBuild, readyVersion, restartCommand } from "./update";
+import { checkForUpdate, currentBuild, installLauncher, readyVersion, restartCommand } from "./update";
 
 // Peel plays through its own engine. Where the hi-res pipeline (hires/) is installed, Apple
 // Music's Android app plays in hi-res unless PEEL_PLAYER=web.
@@ -19,11 +19,13 @@ try {
     await (await import("./remote-host")).runRemoteHost();
   } else if (process.argv.includes("--stop-host")) {
     await Promise.allSettled([new Engine().quit(), new Hires().quit()]);
+  } else if (process.argv.includes("--install-launcher")) {
+    process.exitCode = await installLauncher();
   } else if (process.argv.includes("--version")) {
     const build = await currentBuild();
     console.log(build ? `Peel ${build.version} (${build.channel}, ${build.commit.slice(0, 7)}, built ${build.date})` : "Peel from a source folder");
   } else if (process.argv.includes("--help")) {
-    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\n\nWhere hi-res (hires/) is installed, Peel plays through it. Set PEEL_PLAYER=web for the web engine.");
+    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\npeel --install-launcher  Write the peel command and the menu entry again\n\nWhere hi-res (hires/) is installed, Peel plays through it. Set PEEL_PLAYER=web for the web engine.");
   } else if (process.argv.includes("--connect")) {
     const engine = new Engine();
     await ensureEngine(engine, console.log);
@@ -69,7 +71,13 @@ try {
       },
     });
     const renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true, targetFps: 10 });
-    const model = new Model(library, player, preferences, value => saveJson("layout.json", value), {
+    // The Ghostty config follows the Text size setting, and is written only when that changes.
+    let textSize = preferences.textSize;
+    const save = async (value: typeof preferences) => {
+      await saveJson("layout.json", value);
+      if (value.textSize !== textSize) { await saveTerminalConfig(value); textSize = value.textSize; }
+    };
+    const model = new Model(library, player, preferences, save, {
       read: () => readCache("home.json"), write: value => saveJson("home.json", value, cacheDir),
     });
     model.wake = wake;

@@ -231,6 +231,20 @@ describe("the rendered player", () => {
     expect(called(app, "volume").at(-1)!.args).toEqual([1]);
   });
 
+  test("the mouse wheel over the player changes the volume, and lists still scroll", async () => {
+    const app = await setup(120, 36, "favourites");
+    const volume = app.renderer.root.findDescendantById("volume")!;
+    await app.mockMouse.scroll(volume.x, volume.y, "up"); await waitFor(() => Math.abs(app.model.playback.volume - 0.55) < 0.001);
+    const title = app.renderer.root.findDescendantById("now-playing")!;
+    await app.mockMouse.scroll(title.x, title.y, "down"); await app.mockMouse.scroll(title.x, title.y, "down");
+    await waitFor(() => Math.abs(app.model.playback.volume - 0.45) < 0.001);
+    expect(called(app, "volume").at(-1)!.args).toEqual([0.45]);
+    // Sideways scrolling leaves it alone, and a list under the wheel scrolls instead.
+    await app.mockMouse.scroll(title.x, title.y, "left"); await app.mockMouse.scroll(app.ui.grid.x + 2, app.ui.grid.y + 2, "down");
+    await app.flush(); await Bun.sleep(50);
+    expect(Math.abs(app.model.playback.volume - 0.45)).toBeLessThan(0.001);
+  });
+
   test("a burst of seek arrows runs as one more seek, and Previous then Next cancel out", async () => {
     const app = await setup(120, 36, "favourites");
     let release!: () => void, started!: () => void;
@@ -319,6 +333,42 @@ describe("the rendered player", () => {
     await click(app, "play-pause"); await waitFor(() => app.model.playback.state === "playing");
   });
 
+  // Issue #79: every button that shows is whole, inside each box around it, and apart from the others.
+  test.each([76, 100, 140])("no button is cut off or overlaps another at %i columns", async width => {
+    const app = await setup(width, 30, "albums");
+    const visible = (node: any) => { for (let n = node; n; n = n.parent) if (n.visible === false) return false; return true; };
+    const check = async (page: string) => {
+      await app.flush();
+      const buttons = ((app.ui as any).buttons as any[]).filter(button => visible(button) && button.width > 0);
+      expect(buttons.length).toBeGreaterThan(5);
+      for (const button of buttons) {
+        const where = `${button.id} on ${page} at ${width} columns`;
+        // The whole label fits in the button's own width.
+        expect(Bun.stringWidth(button.plainText), where).toBeLessThanOrEqual(button.width);
+        // Every box around it contains it, so nothing hides part of it.
+        for (let box = button.parent; box && box !== app.renderer.root; box = box.parent) {
+          expect(button.x >= box.x && button.x + button.width <= box.x + box.width, `${where}: sideways in ${box.id}`).toBe(true);
+          expect(button.y >= box.y && button.y + button.height <= box.y + box.height, `${where}: vertically in ${box.id}`).toBe(true);
+        }
+        expect(button.x + button.width).toBeLessThanOrEqual(width);
+        for (const other of buttons) {
+          if (other === button) continue;
+          const apart = button.x + button.width <= other.x || other.x + other.width <= button.x || button.y + button.height <= other.y || other.y + other.height <= button.y;
+          expect(apart, `${where} overlaps ${other.id}`).toBe(true);
+        }
+      }
+    };
+    await check("albums");
+    await click(app, "grid:tile:albums:0");
+    await waitFor(() => app.model.detail?.id === "l.soma");
+    await check("an album");
+    // The heart and play buttons still answer a click at every width.
+    await click(app, "favourite-album");
+    await waitFor(() => app.model.status === "Added SOMA to favourite albums");
+    await app.model.open("favourites");
+    await check("favourite songs");
+  });
+
   test("the interface fits the documented minimum size and survives resizing", async () => {
     const app = await setup(48, 24);
     expect(app.captureCharFrame()).toContain("SOMA");
@@ -390,12 +440,15 @@ test("Apple Music renews a rejected developer token once and a rejected user tok
 
 test("layout preferences survive a restart and use private file permissions", async () => {
   const dir = await mkdtemp(join(tmpdir(), "peel-test-")); cleanup.push(() => rm(dir, { recursive: true }));
-  const value = { order: ["queue", "favourites"], hidden: ["albums"], heartsInFavourites: true, channel: "nightly" as const, quality: "standard" as const };
+  const value = { order: ["queue", "favourites"], hidden: ["albums"], heartsInFavourites: true, channel: "nightly" as const, quality: "standard" as const, textSize: 14 };
   await saveJson("layout.json", value, dir);
   expect(await readPreferences(dir)).toEqual(value);
   // A layout from an older Peel, without the newer settings, gets their defaults.
   await saveJson("layout.json", { order: [], hidden: [], heartsInFavourites: false }, dir);
-  expect(await readPreferences(dir)).toMatchObject({ channel: "stable", quality: "high" });
+  expect(await readPreferences(dir)).toMatchObject({ channel: "stable", quality: "high", textSize: 0 });
+  // A text size Peel doesn't offer falls back to Ghostty's own.
+  await saveJson("layout.json", { textSize: "18; rm -rf /" }, dir);
+  expect((await readPreferences(dir)).textSize).toBe(0);
   // Windows has no Unix file modes. Its user profile folders are private already.
   if (process.platform !== "win32") expect((await stat(join(dir, "layout.json"))).mode & 0o777).toBe(0o600);
 });
