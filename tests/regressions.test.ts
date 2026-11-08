@@ -38,7 +38,6 @@ function setup() {
   const jumps: number[] = [];
   const ratings: Record<string, number> = {};
   const player: any = {
-
     snapshot: async () => structuredClone(state),
     queue: empty,
     queuePosition: async () => ({ position, total: 5 }),

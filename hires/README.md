@@ -6,9 +6,10 @@ This directory holds the pipeline that builds, tests and updates that Android.
 
 ## Setup (once)
 
-Hi-res needs an x86_64 PC with Linux, systemd and PipeWire, because Waydroid's images and Apple Music's Android app are x86_64 builds. On the machine that plays the music:
+Hi-res needs an x86_64 PC with Linux, systemd and PipeWire, because Waydroid's images and Apple Music's Android app are x86_64 builds. On the machine that plays the music, run these in the installed Peel's folder. Then `peel-hires` follows each Peel update. In a source checkout, run them in the checkout instead.
 
 ```sh
+cd ~/.local/share/peel/versions/"$(cat ~/.local/share/peel/current)"
 sudo hires/install.sh "$USER"   # packages, stock Waydroid, root helper, a sudoers rule for only that helper
 hires/install.sh --user         # peel-hires CLI, systemd units, PipeWire sample rates
 peel-hires setup                # first release, Apple Music, sign-in, then the full test
