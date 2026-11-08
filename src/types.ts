@@ -71,8 +71,6 @@ export interface Library {
 
 // The playback engine: the player state, the queue, and the playing song's rating.
 export interface Player {
-  // Plays any list of songs in order. Cider can queue only whole collections.
-  readonly queuesItems?: boolean;
   snapshot(): Promise<Playback>;
   rating(): Promise<number>;
   queue(offset?: number): Promise<Page>;
@@ -80,10 +78,10 @@ export interface Player {
   playItem(item: Media): Promise<void>;
   // items is the collection as loaded so far, with the selected track at index.
   playCollectionTrack(collection: { id: string; type: string }, items: Media[], index: number): Promise<void>;
-  // Adds songs, or with Cider a whole album or playlist, after the playing song (next) or after the last queued song.
+  // Adds songs after the playing song (next) or after the songs already added.
   enqueue(items: Media[], next: boolean): Promise<void>;
   command(path: string, body?: unknown, method?: string): Promise<void>;
-  // Peel's engine can change its stream quality. Cider sets quality in its own settings.
+  // The web engine's stream quality. A lossless player ignores it.
   setQuality?(quality: "high" | "standard"): Promise<void>;
   // True while the player plays Apple's lossless stream, whose quality Peel does not choose.
   readonly lossless?: boolean;

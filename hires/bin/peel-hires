@@ -75,7 +75,7 @@ wait_boot() {  # waits up to BOOT_TIMEOUT seconds (default 180) for Android to f
   return 1
 }
 
-apple_playing() {  # true when Apple Music plays in Android, Peel's engine or Cider
+apple_playing() {  # true when Apple Music plays in Android or in Peel's web engine
   if adb_target >/dev/null 2>&1 && adb_connect; then
     A shell dumpsys media_session 2>/dev/null | grep -A20 "package=$APPLE" | grep -q "state=PlaybackState {state=3" && return 0
   fi
@@ -85,9 +85,6 @@ apple_playing() {  # true when Apple Music plays in Android, Peel's engine or Ci
     port=$(json_get "$key" '["port"]' 2>/dev/null) && k=$(json_get "$key" '["key"]' 2>/dev/null) &&
       curl -s -m 3 -H "x-peel-key: $k" "localhost:$port/state" | grep -q '"state":"playing"' && return 0
   fi
-  local cider=${CIDER_API_BASE:-http://127.0.0.1:10767} token="${XDG_CONFIG_HOME:-$HOME/.config}/peel/auth.json"
-  local auth=""; [ -f "$token" ] && auth=$(json_get "$token" '["token"]' 2>/dev/null || true)
-  curl -s -m 3 -H "apptoken: $auth" "$cider/api/v2/playback" 2>/dev/null | grep -q '"state":"playing"' && return 0
   return 1
 }
 

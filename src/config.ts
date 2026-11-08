@@ -77,20 +77,9 @@ export async function readCache<T>(name: string, dir = cacheDir): Promise<T | un
   try { return JSON.parse(await readFile(join(dir, name), "utf8")); } catch { return undefined; }
 }
 
-export async function readToken(): Promise<string> {
-  if (process.env.CIDER_API_TOKEN) return process.env.CIDER_API_TOKEN;
-  try {
-    const data = JSON.parse(await readFile(join(configDir, "auth.json"), "utf8"));
-    if (typeof data.token === "string") return data.token;
-  } catch (error) {
-    if ((error as NodeJS.ErrnoException).code !== "ENOENT") throw new Error("Could not read Peel's auth.json. Run bun run connect again.");
-  }
-  return "";
-}
-
 export interface AppleSignIn { userToken: string; storefront?: string }
 
-// The Music User Token copied from Cider by bun run connect.
+// The Music User Token that bun run connect saved from the engine's Apple sign-in.
 export async function readAppleSignIn(): Promise<AppleSignIn> {
   if (process.env.APPLE_MUSIC_USER_TOKEN) return { userToken: process.env.APPLE_MUSIC_USER_TOKEN };
   try {

@@ -8,8 +8,7 @@
     "connect": "bun src/index.ts --connect",
     "engine": "bun src/engine.ts",
     "test": "bun test",
-    "check": "tsc --noEmit",
-    "verify:live": "bun scripts/verify-live.ts"
+    "check": "tsc --noEmit"
   },
   "dependencies": { "@opentui/core": "0.5.14" },
   "devDependencies": { "@types/bun": "^1.3.14", "typescript": "^5.9.3" }

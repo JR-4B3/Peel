@@ -1,0 +1,175 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Peel phone concept</title>
+<link rel="preconnect" href="https://fonts.googleapis.com">
+<link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;600;700&display=swap" rel="stylesheet">
+<style>
+  :root {
+    --p-text: #cdd6f4; --p-muted: #9399b2; --p-faint: #6c7086; --p-accent: #89b4fa;
+    --p-selected: #243f75; --p-heart: #ff729a; --p-soon: #fffaa5;
+    --page: #11111b; --page-text: #cdd6f4; --page-muted: #9399b2;
+    --mono: "JetBrains Mono", ui-monospace, monospace;
+    --sans: system-ui, sans-serif;
+  }
+  * { box-sizing: border-box; }
+  body { margin: 0; padding: 24px 16px; background: var(--page); font-family: var(--sans); color: var(--page-text); }
+  h1 { font-size: 18px; font-weight: 600; margin: 0 auto 4px; max-width: 1060px; }
+  .intro { color: var(--page-muted); font-size: 14px; margin: 0 auto 24px; max-width: 1060px; line-height: 1.5; }
+  .stage { display: flex; gap: 28px; justify-content: center; flex-wrap: wrap; }
+  figure { margin: 0; width: 330px; max-width: 100%; display: grid; gap: 12px; align-content: start; }
+  figcaption { font-size: 13px; line-height: 1.5; color: var(--page-muted); padding: 0 6px; }
+  figcaption b { color: var(--page-text); font-weight: 600; }
+  .phone { border-radius: 38px; padding: 10px; background: #0d0d14; box-shadow: 0 0 0 1px #2a2b3c inset; }
+  .screen {
+    height: 640px; border-radius: 30px; overflow: hidden; position: relative;
+    background:
+      radial-gradient(120% 60% at 80% 110%, rgba(250,179,135,.18), transparent 60%),
+      radial-gradient(90% 50% at 10% -10%, rgba(137,180,250,.12), transparent 60%),
+      rgba(24,24,37,.96);
+    font-family: var(--mono); font-size: 12px; line-height: 17px; color: var(--p-text);
+    padding: 34px 8px 8px; display: flex; flex-direction: column; gap: 6px;
+  }
+  .status { position: absolute; top: 10px; left: 26px; right: 26px; display: flex; justify-content: space-between; font-size: 11px; color: var(--p-muted); font-family: var(--sans); }
+  fieldset { margin: 0; border: 1px solid var(--p-faint); border-radius: 8px; padding: 4px 9px 7px; min-width: 0; }
+  fieldset.focus { border-color: var(--p-accent); }
+  legend { padding: 0 3px; color: var(--p-muted); white-space: pre; }
+  fieldset.focus > legend { color: var(--p-accent); }
+  .back { color: var(--p-accent); font-weight: 700; }
+  .muted { color: var(--p-muted); } .faint { color: var(--p-faint); }
+  .soon { color: var(--p-soon); } .heart { color: var(--p-heart); }
+  .grow { flex: 1; min-height: 0; overflow: hidden; }
+  .shelf-head { display: flex; justify-content: space-between; gap: 6px; font-weight: 700; margin-top: 4px; }
+  .shelf-head span:last-child { font-weight: 400; color: var(--p-muted); white-space: nowrap; }
+  .tiles { display: grid; grid-template-columns: repeat(3, minmax(0, 1fr)); gap: 6px; margin: 6px 0 10px; }
+  .tile { padding: 3px; border-radius: 6px; border: 1px solid transparent; min-width: 0; }
+  .tile.sel { border-color: var(--p-accent); }
+  .tile.sel .t:first-of-type { font-weight: 700; }
+  .art { aspect-ratio: 1; border-radius: 2px; margin-bottom: 5px; }
+  .t { white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .player { display: grid; grid-template-columns: 54px 1fr; gap: 4px 10px; }
+  .cover { width: 54px; height: 54px; border-radius: 2px; grid-row: span 2; }
+  .now { display: flex; justify-content: space-between; gap: 6px; }
+  .now b { font-weight: 700; white-space: nowrap; overflow: hidden; text-overflow: ellipsis; }
+  .seek { grid-column: 1 / -1; display: flex; gap: 8px; align-items: center; color: var(--p-muted); }
+  .line { flex: 1; height: 1px; background: var(--p-faint); position: relative; }
+  .line i { position: absolute; left: 0; top: -1px; height: 3px; border-radius: 2px; background: var(--p-accent); }
+  .controls { grid-column: 1 / -1; display: flex; justify-content: space-between; font-size: 16px; padding: 2px 6px 0; }
+  .controls .on { color: var(--p-accent); }
+  .where { color: var(--p-accent); }
+  .where::after { content: " ▾"; font-size: 9px; }
+  .tabs { display: flex; justify-content: space-around; padding: 6px 0 2px; border-top: 1px solid rgba(108,112,134,.35); margin-top: auto; }
+  .tabs span { display: grid; justify-items: center; gap: 1px; color: var(--p-faint); font-size: 10px; }
+  .tabs span b { font-size: 16px; font-weight: 400; }
+  .tabs span.on { color: var(--p-accent); }
+  .lyrics { display: flex; flex-direction: column; gap: 14px; padding: 18px 4px 0; font-size: 15px; line-height: 21px; }
+  .lyrics .past { color: var(--p-faint); }
+  .lyrics .sung { color: var(--p-accent); font-weight: 700; }
+  .lyrics .next { color: var(--p-muted); }
+  .lyrics .chosen { background: var(--p-selected); color: var(--p-text); margin: 0 -6px; padding: 2px 6px; border-radius: 3px; }
+  .seg { display: flex; gap: 4px; margin: 4px 0 8px; }
+  .seg span { flex: 1; text-align: center; border: 1px solid rgba(108,112,134,.5); border-radius: 4px; padding: 2px 0; color: var(--p-muted); }
+  .seg span.on { border-color: var(--p-accent); color: var(--p-accent); font-weight: 700; }
+  .row { display: flex; justify-content: space-between; gap: 8px; padding: 4px 4px; border-radius: 3px; }
+  .row.sel { background: var(--p-selected); }
+  .row .t:first-child { flex: 1; }
+</style>
+</head>
+<body>
+<h1>Peel on a phone: concept</h1>
+<p class="intro">Same panels, colors and type as the terminal, stacked in one column. Four tabs at the bottom: Home, Library, Queue and Settings. Screens you open on top of a tab, like lyrics or an album, show a back arrow in their panel title instead of text hints.</p>
+<div class="stage">
+  <figure>
+    <div class="phone"><div class="screen">
+      <div class="status"><span>21:04</span><span>Wi-Fi 82%</span></div>
+      <fieldset><legend>⌕ Search Apple Music</legend><span class="faint">Type a song, album, or artist</span></fieldset>
+      <fieldset class="grow focus"><legend>Home</legend>
+        <div class="shelf-head"><span>Recently played</span><span>‹ 1-3 of 20 ›</span></div>
+        <div class="tiles">
+          <div class="tile sel"><div class="art" style="background:linear-gradient(160deg,#3a2c22 0%,#1b1612 55%,#5b6f8e 100%)"></div><div class="t">Kind of Blue</div><div class="t muted">Miles Davis</div></div>
+          <div class="tile"><div class="art" style="background:linear-gradient(180deg,#0e1430,#1d2b63 70%,#3b4d9a)"></div><div class="t">Midnight Mood</div><div class="t muted">Playlist</div></div>
+          <div class="tile"><div class="art" style="background:linear-gradient(160deg,#000 0 46%,#e8e8e8 47% 49%,#000 50% 52%,#e53935 53% 56%,#fbc02d 57% 60%,#43a047 61% 64%,#1e88e5 65% 68%,#000 69%)"></div><div class="t">The Dark Side of the Moon</div><div class="t muted">Pink Floyd</div></div>
+        </div>
+        <div class="shelf-head"><span>New from favourites</span><span>‹ 1-3 of 48 ›</span></div>
+        <div class="tiles">
+          <div class="tile"><div class="art" style="background:linear-gradient(135deg,#f3eef0 0%,#f3eef0 40%,#c2185b 41%,#7a0f3a 100%)"></div><div class="t">Blüte 2</div><div class="t muted">Shindy</div><div class="t soon">Out 4 Dec</div></div>
+          <div class="tile"><div class="art" style="background:linear-gradient(180deg,#d9c3d6,#9c8aa0 60%,#6d6170)"></div><div class="t">Unusua</div><div class="t muted">Toro y Moi</div><div class="t soon">Out 20 Nov</div></div>
+          <div class="tile"><div class="art" style="background:linear-gradient(135deg,#7fd1ff,#1e88e5 45%,#e64a19 70%,#4fc3f7)"></div><div class="t">Atrocity Exhibition</div><div class="t muted">Danny Brown</div><div class="t soon">Out 13 Nov</div></div>
+        </div>
+      </fieldset>
+      <fieldset><legend>Playing on <span class="where">main</span></legend>
+        <div class="player">
+          <div class="cover" style="background:linear-gradient(160deg,#000 0 46%,#e8e8e8 47% 49%,#000 50% 52%,#e53935 53% 56%,#fbc02d 57% 60%,#43a047 61% 64%,#1e88e5 65% 68%,#000 69%)"></div>
+          <div class="now"><b>Speak to Me</b><span class="heart">♥</span></div>
+          <div class="muted t">Pink Floyd</div>
+          <div class="seek"><span>0:42</span><span class="line"><i style="width:57%"></i></span><span>1:13</span></div>
+          <div class="controls"><span>⏮&#xFE0E;</span><span class="on">⏸&#xFE0E;</span><span>⏭&#xFE0E;</span><span class="faint">⇄</span><span class="faint">↻</span><span>♪</span></div>
+        </div>
+      </fieldset>
+      <div class="tabs"><span class="on"><b>⌂</b>Home</span><span><b>▤</b>Library</span><span><b>☰</b>Queue</span><span><b>⚙&#xFE0E;</b>Settings</span></div>
+    </div></div>
+    <figcaption><b>Home.</b> Search stays at the top. Shelves keep three covers and scroll sideways.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="phone"><div class="screen">
+      <div class="status"><span>21:04</span><span>Wi-Fi 82%</span></div>
+      <fieldset class="grow focus"><legend>Library</legend>
+        <div class="seg"><span class="on">Songs</span><span>Albums</span><span>Artists</span><span>Playlists</span></div>
+        <div class="row"><span class="t">So What</span><span class="muted t">Miles Davis</span></div>
+        <div class="row sel"><span class="t">Time</span><span class="muted t">Pink Floyd</span></div>
+        <div class="row"><span class="t">Get Lucky</span><span class="muted t">Daft Punk</span></div>
+        <div class="row"><span class="t">Bohemian Rhapsody</span><span class="muted t">Queen</span></div>
+        <div class="row"><span class="t">Freelance</span><span class="muted t">Toro y Moi</span></div>
+        <div class="row"><span class="t">Blue in Green</span><span class="muted t">Miles Davis</span></div>
+        <div class="row"><span class="t">Money</span><span class="muted t">Pink Floyd</span></div>
+        <div class="row"><span class="t">Uptight</span><span class="muted t">Danny Brown</span></div>
+        <div class="row"><span class="t">Flamenco Sketches</span><span class="muted t">Miles Davis</span></div>
+        <div class="row"><span class="t">Brain Damage</span><span class="muted t">Pink Floyd</span></div>
+      </fieldset>
+      <fieldset><legend>Playing on <span class="where">main</span></legend>
+        <div class="player">
+          <div class="cover" style="background:linear-gradient(160deg,#000 0 46%,#e8e8e8 47% 49%,#000 50% 52%,#e53935 53% 56%,#fbc02d 57% 60%,#43a047 61% 64%,#1e88e5 65% 68%,#000 69%)"></div>
+          <div class="now"><b>Speak to Me</b><span class="heart">♥</span></div>
+          <div class="muted t">Pink Floyd</div>
+          <div class="seek"><span>0:42</span><span class="line"><i style="width:57%"></i></span><span>1:13</span></div>
+          <div class="controls"><span>⏮&#xFE0E;</span><span class="on">⏸&#xFE0E;</span><span>⏭&#xFE0E;</span><span class="faint">⇄</span><span class="faint">↻</span><span>♪</span></div>
+        </div>
+      </fieldset>
+      <div class="tabs"><span><b>⌂</b>Home</span><span class="on"><b>▤</b>Library</span><span><b>☰</b>Queue</span><span><b>⚙&#xFE0E;</b>Settings</span></div>
+    </div></div>
+    <figcaption><b>Library.</b> Songs, albums, artists and playlists share one tab, switched by the row at the top.</figcaption>
+  </figure>
+
+  <figure>
+    <div class="phone"><div class="screen">
+      <div class="status"><span>21:05</span><span>Wi-Fi 82%</span></div>
+      <fieldset class="grow focus"><legend><span class="back">‹</span> Lyrics</legend>
+        <div class="lyrics">
+          <div class="past">The line sung before</div>
+          <div class="past">The line before that one</div>
+          <div class="sung">The line being sung, highlighted as it plays</div>
+          <div class="next">The next line, waiting</div>
+          <div class="next chosen">A line you tapped plays from here</div>
+          <div class="next">Lines further down the song</div>
+          <div class="next">Scrolling returns to the sung line after a moment</div>
+        </div>
+      </fieldset>
+      <fieldset><legend>Playing on <span class="where">main</span>  24-bit/192 kHz</legend>
+        <div class="player">
+          <div class="cover" style="background:linear-gradient(160deg,#000 0 46%,#e8e8e8 47% 49%,#000 50% 52%,#e53935 53% 56%,#fbc02d 57% 60%,#43a047 61% 64%,#1e88e5 65% 68%,#000 69%)"></div>
+          <div class="now"><b>Speak to Me</b><span class="heart">♥</span></div>
+          <div class="muted t">Pink Floyd</div>
+          <div class="seek"><span>0:42</span><span class="line"><i style="width:57%"></i></span><span>1:13</span></div>
+          <div class="controls"><span>⏮&#xFE0E;</span><span class="on">⏸&#xFE0E;</span><span>⏭&#xFE0E;</span><span class="faint">⇄</span><span class="faint">↻</span><span class="on">♪</span></div>
+        </div>
+      </fieldset>
+      <div class="tabs"><span><b>⌂</b>Home</span><span><b>▤</b>Library</span><span><b>☰</b>Queue</span><span><b>⚙&#xFE0E;</b>Settings</span></div>
+    </div></div>
+    <figcaption><b>Lyrics, playing on main.</b> The arrow in the panel title goes back. Tap "main" to send the music to another device.</figcaption>
+  </figure>
+</div>
+</body>
+</html>

@@ -8,7 +8,7 @@ The engine loads `https://music.apple.com/robots.txt`, because Apple accepts the
 
 Each request from Peel carries its process ID. Once every Peel that sent one has exited, the engine quits. `POST /release` removes the calling Peel and quits when no other Peel is left. `POST /quit` stops it at once.
 
-Measured on main on 8 October 2026, with Cider running:
+Measured on main on 8 October 2026:
 
 | Step | Time after launch |
 | --- | --- |
@@ -17,4 +17,4 @@ Measured on main on 8 October 2026, with Cider running:
 | MusicKit configured | 0.30 s |
 | Search to audible playback | 1.8 s |
 
-Playback ran at the right position after ten seconds. Known gap: the engine plays at MusicKit's full volume and has no controls yet.
+Playback ran at the right position after ten seconds.

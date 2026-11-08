@@ -70,9 +70,10 @@ if [[ -d /Applications/Ghostty.app || -d "$HOME/Applications/Ghostty.app" ]]; th
   # Ghostty runs --command through a shell, so the path is single-quoted for it. A quote in the
   # path becomes '\'' and spaces stay part of the path. sed does the replacement, because macOS's
   # bash 3.2 keeps quotes in a ${var//...} replacement and would break the command.
+  # Ghostty already starts the command with "exec -l", so the command must not begin with exec.
   escaped=$(printf '%s' "$launcher" | sed "s/'/'\\\\''/g")
   quoted="'$escaped'"
-  exec open -na Ghostty --args --title=Peel --command="exec $quoted"
+  exec open -na Ghostty --args --title=Peel --command="$quoted"
 fi
 exec osascript - "$launcher" <<'SCRIPT'
 on run argv

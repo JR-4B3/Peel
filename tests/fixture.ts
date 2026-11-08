@@ -1,18 +1,28 @@
 import { AppleMusic } from "../src/apple";
-import { Cider } from "../src/cider";
-import { stopped, type Playback } from "../src/types";
+import { Engine } from "../src/engine";
+import { stopped, type Media, type Playback } from "../src/types";
 
-// Serve Cider's v2 envelopes for playback and Apple Music's native JSON for the library.
-export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number; silentRating?: boolean } = {}) {
+// Apple Music's native JSON for the library, and a stand-in for Peel's playback engine that keeps
+// its queue the way engine/engine.js does. Nothing reaches Apple or starts a real engine.
+// version names the engine that answers, such as "hires" for the hi-res host.
+export function fixture(options: { queueDelay?: number; silentRating?: boolean; version?: string } = {}) {
   const playback: Playback = { ...structuredClone(stopped), nowPlaying: { name: "Soma", artistName: "Skrillex" }, time: { currentTime: 30, duration: 200 } };
+  // Requests to Apple Music, and the engine methods Peel called with their arguments.
   const calls: { path: string; method: string; body: any }[] = [];
+  const commands: { method: string; args: any[] }[] = [];
   const song = { id: "i.soma", name: "Soma", artistName: "Skrillex", albumName: "SOMA", durationMs: 200000 };
   const collection = [song,
     { ...song, id: "i.selected", name: "Selected song" },
     { ...song, id: "i.last", name: "Last song" },
   ];
-  let queue = collection.map(item => ({ track: { id: item.id, type: "songs", attributes: item } }));
-  let position = 1;
+  // The engine's queue: each entry, and whether the listener added it.
+  interface Entry { id: string; type: string; name: string; artist: string; album: string; duration: number; added: boolean }
+  const entry = (item: Pick<Media, "id" | "type"> & Partial<Media>, added = false): Entry => ({
+    id: item.id, type: item.type, name: item.name ?? item.id, artist: item.artist ?? "", album: item.album ?? "", duration: item.duration ?? 200, added,
+  });
+  let queue: Entry[] = collection.map(item => entry({ id: item.id, type: "library-songs", name: item.name, artist: item.artistName, album: item.albumName }));
+  let position = 0;
+  // The songs that started playing, in order.
   const audible: string[] = [];
   let rating = 0;
   // Rated albums, by the id in their rating path.
@@ -28,7 +38,6 @@ export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number
   const soon = new Date(Date.now() + 9 * 86400000).toISOString().slice(0, 10);
   const recent = new Date(Date.now() - 9 * 86400000).toISOString().slice(0, 10);
   const songs = collection.map(item => ({ id: item.id, type: "library-songs", attributes: { ...item, durationInMillis: item.durationMs } }));
-  // Apple Music answers in its native JSON, without Cider's envelope.
   const apple = (request: Request, url: URL, path: string) => {
     if (request.headers.get("authorization") !== "Bearer dev-token" || request.headers.get("origin") !== "https://music.apple.com") return Response.json({ errors: [] }, { status: 401 });
     if (request.headers.get("music-user-token") !== "user-token") return Response.json({ errors: [] }, { status: 403 });
@@ -83,55 +92,82 @@ export function fixture(options: { waitForDecoder?: boolean; queueDelay?: number
     return Response.json(data);
   };
   const server = Bun.serve({ port: 0, async fetch(request) {
-    const url = new URL(request.url), path = url.pathname.replace("/api/v2", "");
-    if (path.startsWith("/v1/")) return apple(request, url, path);
-    if (request.headers.get("apptoken") !== "test-token") return Response.json({ error: "UNAUTHORIZED_APP_TOKEN" }, { status: 403 });
-    const body = request.method === "GET" ? undefined : await request.json();
-    calls.push({ path, method: request.method, body });
-    let data: any = {};
-    if (path === "/playback") data = { ...playback, nowPlaying: playback.nowPlaying && { ...playback.nowPlaying, inFavorites: options.silentRating ? undefined : rating === 1 } };
-    else if (path === "/playback/toggle") playback.state = playback.state === "playing" ? "paused" : "playing";
-    else if (path === "/playback/pause") playback.state = "paused";
-    else if (path === "/playback/play") playback.state = "playing";
-    else if (path === "/playback/play-item") {
-      const item = collection.find(item => item.id === body.id) ?? { ...song, id: body.id, name: "Search result" };
-      queue = [{ track: { id: item.id, type: "songs", attributes: item } }]; position = 0;
-      playback.state = "playing"; playback.nowPlaying = { name: item.name, artistName: item.artistName, albumName: item.albumName };
-      playback.time.currentTime = options.waitForDecoder ? 0 : 1;
-      audible.push(item.id);
-    }
-    else if (path === "/playback/play-collection") {
-      queue = collection.map(item => ({ track: { id: item.id, type: "songs", attributes: item } })); position = 0;
-      playback.nowPlaying = { name: song.name, artistName: song.artistName };
-      audible.push(song.id);
-    }
-    else if (path === "/queue/add-later" && /songs/.test(body.type)) await Bun.sleep(options.queueDelay ?? 0), queue.push({ track: { id: body.id, type: "songs", attributes: { ...song, id: body.id, name: body.id } } });
-    else if (path === "/queue/add-next" && /songs/.test(body.type)) queue.splice(position + 1, 0, { track: { id: body.id, type: "songs", attributes: { ...song, id: body.id, name: body.id } } });
-    else if (path === "/queue/add-later") queue.push(...collection.map(item => ({ track: { id: item.id, type: "songs", attributes: item } })));
-    else if (path.startsWith("/queue/items/") && request.method === "DELETE") queue.splice(Number(path.split("/").at(-1)), 1);
-    else if (path === "/queue/move") {
-      const playing = queue[position]; const [item] = queue.splice(body.from, 1); queue.splice(body.to, 0, item);
-      position = queue.indexOf(playing);
-    }
-    else if (path === "/queue/jump") {
-      position = body.index;
-      const item = queue[position]?.track;
-      if (item) { playback.nowPlaying = { name: item.attributes.name, artistName: item.attributes.artistName }; audible.push(item.id); }
-    }
-    else if (path === "/playback/seek") playback.time.currentTime = body.position;
-    else if (path === "/audio/volume") playback.volume = body.volume;
-    else if (path === "/playback/shuffle/toggle") playback.shuffleMode = !playback.shuffleMode;
-    else if (path === "/playback/shuffle") playback.shuffleMode = body.enabled;
-    else if (path === "/playback/repeat/toggle") playback.repeatMode = playback.repeatMode === "none" ? "one" : "none";
-    else if (path === "/library/now-playing/rating") rating = request.method === "PUT" ? body.rating : 0;
-    else if (path === "/library/now-playing/status") data = { inLibrary: false, rating };
-    else if (path === "/queue") {
-      const offset = Number(url.searchParams.get("offset") ?? 0), limit = Number(url.searchParams.get("limit") ?? 100);
-      data = { items: queue.slice(offset, offset + limit), position, total: queue.length };
-    }
-    else if (path === "/queue/position") data = { position, total: queue.length };
-    return Response.json({ data, meta: { offset: 0, limit: 100, total: data.items?.length ?? 0 } });
+    const url = new URL(request.url);
+    if (url.pathname.startsWith("/v1/")) return apple(request, url, url.pathname);
+    return Response.json({ errors: [] }, { status: 404 });
   } });
-  return { server, playback, calls, audible, lovedAlbums, beginPlayback: () => { playback.time.currentTime = 1; }, player: new Cider(`http://127.0.0.1:${server.port}`, "test-token"),
+
+  const start = (index: number) => {
+    position = index;
+    const item = queue[position];
+    if (!item) return;
+    playback.state = "playing"; playback.time.currentTime = 0;
+    playback.nowPlaying = { name: item.name, artistName: item.artist, albumName: item.album, playParams: { id: item.id } };
+    audible.push(item.id);
+  };
+  const pending = () => queue.slice(position + 1).filter(item => item.added);
+  const expect = (index: number, id?: string) => {
+    if (id && queue[index]?.id !== id) throw new Error("The queue changed on another controller. Try again.");
+  };
+  const methods: Record<string, (...args: any[]) => unknown> = {
+    pause: () => { playback.state = "paused"; },
+    resume: () => { playback.state = "playing"; },
+    toggle: () => { playback.state = playback.state === "playing" ? "paused" : "playing"; },
+    next: () => { if (position + 1 < queue.length) start(position + 1); },
+    previous: () => { if (position > 0) start(position - 1); },
+    seek: (time: number) => { playback.time.currentTime = time; },
+    volume: (value: number) => { playback.volume = Math.min(1, Math.max(0, value)); },
+    shuffle: (enabled: boolean) => { playback.shuffleMode = enabled; },
+    toggleShuffle: () => { playback.shuffleMode = !playback.shuffleMode; },
+    toggleRepeat: () => { playback.repeatMode = playback.repeatMode === "none" ? "one" : playback.repeatMode === "one" ? "all" : "none"; },
+    play: (items: Media[], index = 0) => {
+      const waiting = pending();
+      queue = items.map(item => entry(item));
+      queue.splice(index + 1, 0, ...waiting);
+      start(index);
+    },
+    enqueue: async (items: Media[], next: boolean) => {
+      await Bun.sleep(options.queueDelay ?? 0);
+      if (!queue.length) { queue = items.map((item, index) => entry(item, index > 0)); start(0); return; }
+      let at = position + 1;
+      if (!next) while (queue[at]?.added) at++;
+      queue.splice(at, 0, ...items.map(item => entry(item, true)));
+    },
+    move: (from: number, to: number, id?: string, target?: string) => {
+      expect(from, id); expect(to, target);
+      if (Math.min(from, to) <= position) return;
+      const [item] = queue.splice(from, 1);
+      queue.splice(to, 0, item!);
+    },
+    remove: (index: number, id?: string) => { expect(index, id); if (index > position) queue.splice(index, 1); },
+    jump: (index: number, id?: string) => { expect(index, id); start(index); },
+    added: (offset = 0, limit = 100) => {
+      const entries = queue.map((item, index) => ({ item, index })).filter(({ item, index }) => index > position && item.added);
+      return { more: offset + limit < entries.length, items: entries.slice(offset, offset + limit).map(({ item, index }) => ({
+        id: item.id, type: item.type, attributes: { name: item.name, artistName: item.artist, albumName: item.album, durationInMillis: item.duration * 1000 }, queueIndex: index,
+      })) };
+    },
+    position: () => ({ position, total: queue.length }),
+    rating: () => rating,
+    rate: (value: number, id?: string) => {
+      if (id && playback.nowPlaying?.playParams?.id && playback.nowPlaying.playParams.id !== id) throw new Error("The playing song changed. Nothing was rated.");
+      rating = value;
+    },
+    quality: () => 256,
+    tokens: () => ({ userToken: "user-token", storefront: "de" }),
+  };
+  const transport = async (path: string, body?: any) => {
+    if (path === "/state") return {
+      ready: true, signIn: false, version: options.version ?? "fixture", instance: "fixture",
+      playback: { ...structuredClone(playback), nowPlaying: playback.nowPlaying && { ...playback.nowPlaying, inFavorites: options.silentRating ? undefined : rating === 1 } },
+    };
+    if (path === "/release" || path === "/retain") return null;
+    const { method, args = [] } = body ?? {};
+    const run = methods[method];
+    if (path !== "/call" || !run) throw new Error(`The fixture engine has no method ${method}.`);
+    commands.push({ method, args: structuredClone(args) });
+    return await run(...args) ?? null;
+  };
+  return { server, playback, calls, commands, audible, lovedAlbums, queue: () => queue, player: new Engine("/nonexistent", transport),
     library: new AppleMusic("user-token", { base: `http://127.0.0.1:${server.port}`, developerToken: async () => "dev-token" }) };
 }
