@@ -38,7 +38,7 @@ function setup() {
   const jumps: number[] = [];
   const ratings: Record<string, number> = {};
   const player: any = {
-    queuesItems: true,
+
     snapshot: async () => structuredClone(state),
     queue: empty,
     queuePosition: async () => ({ position, total: 5 }),
@@ -173,7 +173,7 @@ test("#18 a queue read that started before a removal does not bring removed song
   let player = ["A", "B", "C"], held: ((page: Page) => void) | undefined;
   const deleted: string[] = [];
   const model = new Model(library(), {
-    queuesItems: true, snapshot: async () => structuredClone(stopped),
+    snapshot: async () => structuredClone(stopped),
     queue: async () => {
       if (!held) return new Promise<Page>(resolve => { held = resolve; });
       return { items: player.map((id, index) => track(id, index + 1)), more: false };

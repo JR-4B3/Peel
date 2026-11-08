@@ -55,8 +55,6 @@ export interface AppleOptions {
   storefront?: string;
   // Asks the playback engine for a current Music User Token after Apple rejects the saved one.
   renewUser?: () => Promise<string | undefined>;
-  // Reads an Apple path through Cider's proxy when Peel has no working sign-in of its own.
-  proxy?: (path: string) => Promise<Resource>;
 }
 
 export class AppleMusic implements Library {
@@ -85,16 +83,9 @@ export class AppleMusic implements Library {
 
   // Apple answers 401 for a stale developer token and 403 for a stale user token.
   // Each is renewed once per request, so a lasting rejection cannot loop.
-  // Cider's proxy only reads, so changes such as ratings need Peel's own sign-in.
   async request(path: string, init: RequestInit = {}, base = this.base): Promise<Resource> {
-    const write = !!init.method && init.method !== "GET";
     this.userToken ||= await this.renewUser() ?? "";
-    if (!this.userToken) {
-      if (this.options.proxy && !write) return this.options.proxy(path);
-      throw new Error("Peel has no Apple Music sign-in. Run peel --connect.");
-    }
-    // Cider's proxy fills in the storefront itself, so the fallback keeps the placeholder.
-    const original = path;
+    if (!this.userToken) throw new Error("Peel has no Apple Music sign-in. Run peel --connect.");
     path = path.replace("$STOREFRONT", await this.storefrontId(path));
     let response = await this.fetch(path, await this.developerToken(false), init, base);
     if (response.status === 401) response = await this.fetch(path, await this.developerToken(true), init, base);
@@ -103,8 +94,6 @@ export class AppleMusic implements Library {
       if (token && token !== this.userToken) { this.userToken = token; response = await this.fetch(path, await this.developerToken(false), init, base); }
     }
     if (response.status === 401 || response.status === 403) {
-      // Later requests skip the rejected sign-in until Cider provides a new one.
-      if (this.options.proxy) { this.userToken = ""; if (!write) return this.options.proxy(original); }
       throw new Error("Apple Music rejected Peel's sign-in. Run peel --connect.");
     }
     if (response.status === 404) return { data: [] };

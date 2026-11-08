@@ -25,7 +25,7 @@ test("hi-res plays where peel-hires is set up, unless another player is chosen",
   expect(hiresSelected()).toBe(true);
   process.env.PEEL_PLAYER = "auto";
   expect(hiresSelected()).toBe(true);
-  for (const other of ["web", "cider"]) {
+  for (const other of ["web", "something-else"]) {
     process.env.PEEL_PLAYER = other;
     expect(hiresSelected()).toBe(false);
   }

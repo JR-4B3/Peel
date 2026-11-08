@@ -24,7 +24,7 @@ test("choosing another copy of a song while the first one starts plays from that
     const items = ids.map(song), started: number[] = [];
     const library = { songs: async () => ({ items, more: false }), ratings: async () => new Set() };
     const player = {
-      queuesItems: true, snapshot: async () => structuredClone(stopped),
+      snapshot: async () => structuredClone(stopped),
       playCollectionTrack: async (_collection: unknown, _items: unknown, index: number) => { await Bun.sleep(20); started.push(index); },
     };
     const model = new Model(library as any, player as any);

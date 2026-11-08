@@ -351,7 +351,7 @@ describe("lyrics in the player", () => {
     await a.mockInput.pressKey("y");
     await Bun.sleep(20); await a.flush();
     expect(a.renderer.root.findDescendantById("lyrics-panel")?.focused).toBe(true);
-    const seeks = () => a.api.calls.filter(call => call.path === "/playback/seek").map(call => call.body.position);
+    const seeks = () => a.api.commands.filter(call => call.method === "seek").map(call => call.args[0]);
     await a.mockInput.pressKey("j"); await a.flush();
     a.mockInput.pressEnter();
     for (let i = 0; i < 100 && !seeks().length; i++) await Bun.sleep(10);

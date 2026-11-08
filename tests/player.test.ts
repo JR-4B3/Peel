@@ -2,7 +2,7 @@ import { afterEach, describe, expect, test } from "bun:test";
 import { ImageRenderable } from "@opentui/core";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { AppleMusic } from "../src/apple";
-import { Cider } from "../src/cider";
+import { Engine } from "../src/engine";
 import { Model, parseFilter } from "../src/model";
 import { PeelUI } from "../src/ui";
 import { type Home, type Media } from "../src/types";
@@ -39,6 +39,14 @@ export async function click(setup: TestRendererSetup, id: string) {
   await setup.mockMouse.click(target.x + Math.min(1, target.width - 1), target.y);
 }
 
+// The engine methods Peel called with this name.
+const called = (app: { commands: { method: string; args: any[] }[] }, method: string) => app.commands.filter(call => call.method === method);
+// The song the last play command started, and how many songs it queued.
+const started = (app: { commands: { method: string; args: any[] }[] }) => {
+  const play = called(app, "play").at(-1);
+  return play && { id: play.args[0][play.args[1]]?.id, type: play.args[0][play.args[1]]?.type, queued: play.args[0].length };
+};
+
 async function waitFor(predicate: () => boolean) {
   for (let count = 0; count < 100; count++) { if (predicate()) return; await Bun.sleep(10); }
   throw new Error("Expected state did not arrive");
@@ -62,83 +70,87 @@ describe("the rendered player", () => {
     await app.flush(); expect(app.captureCharFrame()).toContain(`${icon.pause} space`);
     app.mockInput.pressKey(" "); await waitFor(() => app.model.playback.state === "paused");
     await app.flush(); expect(app.captureCharFrame()).toContain("Paused");
-    for (const [id, path, key] of [["previous", "/playback/previous", "p"], ["next", "/playback/next", "n"], ["shuffle", "/playback/shuffle/toggle", "s"], ["repeat", "/playback/repeat/toggle", "r"]]) {
-      const before = app.calls.filter(call => call.path === path).length;
+    for (const [id, method, key] of [["previous", "previous", "p"], ["next", "next", "n"], ["shuffle", "toggleShuffle", "s"], ["repeat", "toggleRepeat", "r"]]) {
+      const before = called(app, method).length;
       await click(app, id); app.mockInput.pressKey(key);
-      await waitFor(() => app.calls.filter(call => call.path === path).length === before + 2);
+      await waitFor(() => called(app, method).length === before + 2);
     }
   });
 
-  test("selecting a playlist track starts only that song and retains the collection order", async () => {
+  test("selecting a playlist track queues the playlist and starts at that song", async () => {
     const app = await setup(120, 36, "favourites");
     await click(app, "tracks:row:1");
-    await waitFor(() => app.calls.some(call => call.path === "/queue/move"));
+    await waitFor(() => app.audible.length === 1);
     expect(app.audible).toEqual(["i.selected"]);
-    expect(app.calls.some(call => call.path === "/playback/play-collection")).toBe(false);
-    expect(app.calls.find(call => call.path === "/queue/add-later")?.body).toEqual({ id: "p.favourites", type: "library-playlists" });
-    expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.soma", "i.selected", "i.last"]);
+    const [play] = called(app, "play");
+    expect(play!.args[0].map((item: Media) => item.id)).toEqual(["i.soma", "i.selected", "i.last"]);
+    expect(play!.args[1]).toBe(1);
     expect(await app.player.queuePosition()).toEqual({ position: 1, total: 3 });
   });
 
-  test("e queues the highlighted song at the end, Shift+E after the playing song, and u lists the queue", async () => {
+  test("e queues the highlighted song after the added ones, Shift+E after the playing song, and u lists the queue", async () => {
     const app = await setup(120, 36, "favourites");
     await click(app, "tracks:row:0");
-    await waitFor(() => app.calls.some(call => call.path.startsWith("/queue/items/")));
+    await waitFor(() => app.audible.length === 1);
     app.mockInput.pressKey("j"); app.mockInput.pressKey("j");
     app.mockInput.pressKey("e");
     await waitFor(() => app.model.status.startsWith("Added to the queue"));
     app.mockInput.pressKey("k");
     app.mockInput.pressKey("E", { shift: true });
     await waitFor(() => app.model.status.startsWith("Plays next"));
-    expect(app.calls.find(call => call.path === "/queue/add-next")?.body).toEqual({ id: "i.selected", type: "library-songs" });
-    expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.soma", "i.selected", "i.selected", "i.last", "i.last"]);
+    expect(called(app, "enqueue").map(call => [call.args[0].map((item: Media) => item.id), call.args[1]])).toEqual([[["i.last"], false], [["i.selected"], true]]);
+    expect(app.queue().map(item => item.id)).toEqual(["i.soma", "i.selected", "i.last", "i.selected", "i.last"]);
+    expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.selected", "i.last"]);
     app.mockInput.pressKey("u");
-    await waitFor(() => app.model.view === "queue" && app.model.items.length === 5);
+    await waitFor(() => app.model.view === "queue" && app.model.items.length === 2);
   });
 
   test("the queue moves a song with Shift+Down and Shift+E, removes it with x, and names those keys", async () => {
-    const app = await setup(120, 36, "queue");
+    const app = await setup();
+    const queued = ["q.one", "q.two", "q.three"].map(id => ({ id, type: "songs", name: id, artist: "Artist", album: "Album", duration: 100 }));
+    await app.player.enqueue(queued, false);
+    await app.model.open("queue"); await app.flush();
     await waitFor(() => app.model.view === "queue" && app.model.items.length === 3);
     expect(app.captureCharFrame()).toContain("⇧↑↓ move");
     app.mockInput.pressArrow("down", { shift: true });
-    await waitFor(() => app.calls.some(call => call.path === "/queue/move"));
-    expect(app.calls.find(call => call.path === "/queue/move")?.body).toEqual({ from: 0, to: 1 });
+    await waitFor(() => called(app, "move").length === 1);
+    expect(called(app, "move")[0]!.args).toEqual([1, 2, "q.one", "q.two"]);
     expect(app.ui.tracks.index).toBe(1);
     app.mockInput.pressKey("E", { shift: true });
-    await waitFor(() => app.calls.filter(call => call.path === "/queue/move").length === 2);
-    expect(app.calls.filter(call => call.path === "/queue/move").at(-1)?.body).toEqual({ from: 1, to: 0 });
+    await waitFor(() => called(app, "move").length === 2);
+    expect(called(app, "move")[1]!.args).toEqual([2, 1, "q.one", "q.two"]);
     app.mockInput.pressKey("x");
-    await waitFor(() => app.calls.some(call => call.path === "/queue/items/0"));
+    await waitFor(() => called(app, "remove").length === 1);
+    expect(called(app, "remove")[0]!.args).toEqual([1, "q.one"]);
     await waitFor(() => app.model.items.length === 2);
-    expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.selected", "i.last"]);
+    expect((await app.player.queue()).items.map(item => item.id)).toEqual(["q.two", "q.three"]);
   });
 
-  test("a double-click activates its song once without playing the collection's first song", async () => {
+  test("a double-click activates its song once", async () => {
     const app = await setup(120, 36, "favourites");
     await click(app, "tracks:row:1");
     await app.flush();
     await click(app, "tracks:row:1");
-    await waitFor(() => app.calls.some(call => call.path === "/queue/move"));
+    await waitFor(() => app.audible.length === 1);
     await Bun.sleep(20);
     expect(app.audible).toEqual(["i.selected"]);
-    expect(app.calls.filter(call => call.path === "/playback/play-item")).toHaveLength(1);
-    expect(app.calls.filter(call => call.path === "/queue/add-later")).toHaveLength(1);
+    expect(called(app, "play")).toHaveLength(1);
     expect(await app.player.queuePosition()).toEqual({ position: 1, total: 3 });
   });
 
-  test("different rapid selections finish in order without interleaving queue construction", async () => {
+  test("different rapid selections finish in order", async () => {
     const app = await setup(120, 36, "favourites");
     await Promise.all([app.model.activate(app.model.items[1]), app.model.activate(app.model.items[2])]);
     expect(app.audible).toEqual(["i.selected", "i.last"]);
-    expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.soma", "i.selected", "i.last"]);
+    expect(app.queue().map(item => item.id)).toEqual(["i.soma", "i.selected", "i.last"]);
     expect(await app.player.queuePosition()).toEqual({ position: 2, total: 3 });
   });
 
-  test("selecting the first track retains one copy of it in its collection", async () => {
+  test("selecting the first track starts the collection at its start", async () => {
     const app = await setup(120, 36, "favourites");
     await app.model.activate(app.model.items[0]);
     expect(app.audible).toEqual(["i.soma"]);
-    expect((await app.player.queue()).items.map(item => item.id)).toEqual(["i.soma", "i.selected", "i.last"]);
+    expect(app.queue().map(item => item.id)).toEqual(["i.soma", "i.selected", "i.last"]);
     expect(await app.player.queuePosition()).toEqual({ position: 0, total: 3 });
   });
 
@@ -146,12 +158,12 @@ describe("the rendered player", () => {
     const app = await setup();
     await app.model.act("/playback/repeat/toggle");
     app.mockInput.pressKey("n");
-    await waitFor(() => app.calls.some(call => call.path === "/queue/jump"));
-    expect(app.calls.find(call => call.path === "/queue/jump")?.body).toEqual({ index: 2 });
+    await waitFor(() => called(app, "jump").length === 1);
+    expect(called(app, "jump")[0]!.args).toEqual([1]);
     expect(app.model.playback.repeatMode).toBe("one");
     await click(app, "previous");
-    await waitFor(() => app.calls.filter(call => call.path === "/queue/jump").length === 2);
-    expect(app.calls.filter(call => call.path === "/queue/jump").at(-1)?.body).toEqual({ index: 1 });
+    await waitFor(() => called(app, "jump").length === 2);
+    expect(called(app, "jump")[1]!.args).toEqual([0]);
     expect(app.model.playback.repeatMode).toBe("one");
   });
 
@@ -160,14 +172,14 @@ describe("the rendered player", () => {
     app.mockInput.pressKey("f", { ctrl: true });
     await app.mockInput.typeText("n p s r q / a song");
     expect(app.ui.search.value).toBe("n p s r q / a song");
-    expect(app.calls.filter(call => call.method !== "GET")).toHaveLength(0);
+    expect(app.commands.filter(call => call.method !== "quality")).toHaveLength(0);
     app.mockInput.pressEnter(); await waitFor(() => app.model.items[0]?.name === "Search result");
     await app.flush(); expect(app.captureCharFrame()).toContain("An album");
     // Songs form the list. Albums and artists are shelves of covers.
     expect(app.model.shelves.map(shelf => [shelf.title, shelf.items[0]?.id])).toEqual([["Albums", "456"], ["Artists", "100"]]);
     await click(app, "tracks:row:0");
-    await waitFor(() => app.calls.some(call => call.path === "/playback/play-item"));
-    expect(app.calls.find(call => call.path === "/playback/play-item")?.body).toEqual({ id: "123", type: "songs" });
+    await waitFor(() => called(app, "play").length === 1);
+    expect(called(app, "play")[0]!.args[0].map((item: Media) => [item.id, item.type])).toEqual([["123", "songs"]]);
   });
 
   test("End and Home jump to the ends of a song list", async () => {
@@ -216,7 +228,7 @@ describe("the rendered player", () => {
     await click(app, "volume-down"); await waitFor(() => Math.abs(app.model.playback.volume - 0.45) < 0.001);
     app.mockInput.pressKey("+"); await waitFor(() => Math.abs(app.model.playback.volume - 0.5) < 0.001);
     app.model.playback.volume = 1; await app.model.volume(0.05);
-    expect(app.calls.filter(call => call.path === "/audio/volume").at(-1)).toEqual({ path: "/audio/volume", method: "PATCH", body: { volume: 1 } });
+    expect(called(app, "volume").at(-1)!.args).toEqual([1]);
   });
 
   test("a burst of seek arrows runs as one more seek, and Previous then Next cancel out", async () => {
@@ -238,7 +250,7 @@ describe("the rendered player", () => {
     } finally { release(); }
     // Waiting for a later control also waits for the keyboard commands ahead of it.
     await app.model.volume(0.05);
-    expect(app.calls.filter(call => call.path.startsWith("/playback/")).map(call => call.path)).toEqual(["/playback/seek", "/playback/seek"]);
+    expect(app.commands.filter(call => call.method !== "volume" && call.method !== "quality").map(call => call.method)).toEqual(["seek", "seek"]);
   });
 
   test("the sidebar shows hidden entries only while editing, and Enter shows or hides them", async () => {
@@ -319,61 +331,48 @@ describe("the rendered player", () => {
     await click(app, "play-pause"); await waitFor(() => app.model.playback.state === "playing");
   });
 
-  test("an unauthorised Cider still shows the library, and playing reports the required connection", async () => {
+  test("without a running engine the library still shows, and playing reports why", async () => {
     const setup = await createTestRenderer({ width: 90, height: 28 }); cleanup.push(() => setup.renderer.destroy());
     const api = fixture(); cleanup.push(() => api.server.stop(true));
-    const model = new Model(api.library, new Cider(`http://127.0.0.1:${api.server.port}`, "wrong-token"));
+    const model = new Model(api.library, new Engine(join(tmpdir(), "peel-no-engine")));
     const ui = new PeelUI(setup.renderer, model); cleanup.push(() => ui.dispose());
     await model.start(); await setup.flush();
     expect(model.playlists.map(item => item.name)).toContain("Background Chill");
     expect(setup.captureCharFrame()).toContain("Stopped");
     await click(setup, "play-pause");
-    await waitFor(() => model.status.includes("bun run connect"));
+    await waitFor(() => model.status.includes("engine is not running"));
     expect(model.connected).toBe(false);
   });
 
-  test("browsing loads while Cider starts, and the first song waits for Cider once", async () => {
+  test("browsing loads while the engine starts, and the first song waits for it once", async () => {
     const api = fixture(); cleanup.push(() => api.server.stop(true));
     const model = new Model(api.library, api.player);
     let wakes = 0, open!: () => void;
     const ready = new Promise<void>(done => { open = done; });
     model.wake = async () => { wakes++; await ready; };
-    // Cider has not opened its API yet.
+    // The engine has not answered yet.
     const snapshot = api.player.snapshot.bind(api.player);
     let up = false;
-    api.player.snapshot = () => up ? snapshot() : Promise.reject(new Error("Cannot reach Cider."));
+    api.player.snapshot = () => up ? snapshot() : Promise.reject(new Error("The playback engine is starting."));
     await model.start();
     expect(model.playlists.length).toBe(2);
     expect(model.home.recent.length).toBeGreaterThan(0);
     expect(model.connected).toBe(false);
-    expect(model.status).not.toContain("Cannot reach Cider");
+    expect(model.status).not.toContain("engine is starting");
     await model.open("songs");
     const first = model.activate(model.items[0]!), second = model.act("/playback/next");
     await Bun.sleep(20);
     expect(model.starting).toBe(true);
-    expect(api.calls.some(call => call.path === "/playback/play-item")).toBe(false);
+    expect(api.commands).toHaveLength(0);
     up = true; open();
     await Promise.all([first, second]);
     expect(wakes).toBe(1);
     expect(model.connected).toBe(true);
-    expect(api.calls.filter(call => call.path === "/playback/play-item" || call.path === "/playback/next").map(call => call.path)).toEqual(["/playback/play-item", "/playback/next"]);
+    expect(api.commands.filter(call => call.method === "play" || call.method === "next").map(call => call.method)).toEqual(["play", "next"]);
   });
 });
 
-test("collection queue construction waits for the selected decoder to begin playback", async () => {
-  const api = fixture({ waitForDecoder: true }); cleanup.push(() => api.server.stop(true));
-  const items = await api.library.songs("p.favourites");
-  const starting = api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, items.items, 1);
-  await waitFor(() => api.calls.some(call => call.path === "/playback") && api.playback.nowPlaying?.name === "Selected song");
-  expect(api.playback.time.currentTime).toBe(0);
-  expect(api.calls.some(call => call.path === "/queue/add-later")).toBe(false);
-  api.beginPlayback();
-  await starting;
-  expect(api.audible).toEqual(["i.selected"]);
-  expect(await api.player.queuePosition()).toEqual({ position: 1, total: 3 });
-});
-
-test("Apple Music renews a rejected developer token once and a rejected user token from Cider", async () => {
+test("Apple Music renews a rejected developer token once and a rejected user token through the engine", async () => {
   const api = fixture(); cleanup.push(() => api.server.stop(true));
   // Like the real cache, a refreshed developer token is kept for later requests.
   const refreshes: boolean[] = [];
@@ -386,42 +385,7 @@ test("Apple Music renews a rejected developer token once and a rejected user tok
   expect(refreshes).toEqual([false, true, false]);
   const rejected = new AppleMusic("expired", { base: api.library.base, developerToken: async () => "dev-token" });
   await expect(rejected.playlists()).rejects.toThrow("peel --connect");
-});
-
-test("without a working Apple sign-in, the library is read through Cider's proxy", async () => {
-  const api = fixture(); cleanup.push(() => api.server.stop(true));
-  const paths: string[] = [];
-  const proxy = async (path: string) => { paths.push(path); return { data: [{ id: "p.proxied", type: "library-playlists", attributes: { name: "Through Cider" } }] }; };
-  const missing = new AppleMusic("", { base: api.library.base, developerToken: async () => "dev-token", proxy });
-  expect((await missing.playlists()).map(item => item.name)).toEqual(["Through Cider"]);
-  const rejected = new AppleMusic("expired", { base: api.library.base, developerToken: async () => "dev-token", proxy });
-  expect((await rejected.playlists()).map(item => item.name)).toEqual(["Through Cider"]);
-  // Cider substitutes the storefront itself.
-  await rejected.search("soma");
-  expect(paths.at(-1)).toStartWith("v1/catalog/$STOREFRONT/search?");
-});
-
-test("a song beyond a collection's first hundred starts at once and queues the following songs", async () => {
-  const api = fixture(); cleanup.push(() => api.server.stop(true));
-  const song = (id: string): Media => ({ id, type: "library-songs", name: id, artist: "Skrillex", album: "SOMA", duration: 200 });
-  const started = Date.now();
-  const items = [...Array.from({ length: 810 }, (_, n) => song(`i.${n}`)), song("i.selected"), song("i.811"), song("i.812")];
-  await api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, items, 810);
-  expect(Date.now() - started).toBeLessThan(2000);
-  await waitFor(() => api.calls.filter(call => call.path === "/queue/add-later").length === 2);
-  expect(api.calls.filter(call => call.path === "/queue/add-later").map(call => call.body.id)).toEqual(["i.811", "i.812"]);
-  expect((await api.player.queue()).items.map(item => item.id)).toEqual(["i.selected", "i.811", "i.812"]);
-});
-
-test("starting another song stops queueing the rest of a long collection", async () => {
-  const api = fixture({ queueDelay: 20 }); cleanup.push(() => api.server.stop(true));
-  const following = Array.from({ length: 50 }, (_, n): Media => ({ id: `i.${n}`, type: "library-songs", name: `${n}`, artist: "", album: "", duration: 0 }));
-  const items = [...Array.from({ length: 500 }, (): Media => ({ ...following[0]!, id: "i.before" })), { ...following[0]!, id: "i.selected" }, ...following];
-  await api.player.playCollectionTrack({ id: "p.favourites", type: "library-playlists" }, items, 500);
-  await waitFor(() => api.calls.some(call => call.path === "/queue/add-later"));
-  await api.player.command("/playback/play-item", { id: "123", type: "songs" });
-  await Bun.sleep(100);
-  expect(api.calls.filter(call => call.path === "/queue/add-later").length).toBeLessThan(50);
+  await expect(new AppleMusic("", { base: api.library.base, developerToken: async () => "dev-token" }).playlists()).rejects.toThrow("no Apple Music sign-in");
 });
 
 test("layout preferences survive a restart and use private file permissions", async () => {
@@ -495,8 +459,8 @@ describe("home, albums, and favourites", () => {
     // The row keeps its playlist number, and selecting it plays that song.
     app.mockInput.pressEnter(); await app.flush();
     await click(app, "tracks:row:0");
-    await waitFor(() => app.calls.some(call => call.path === "/playback/play-item"));
-    expect(app.calls.find(call => call.path === "/playback/play-item")?.body).toEqual({ id: "i.last", type: "library-songs" });
+    await waitFor(() => called(app, "play").length === 1);
+    expect(started(app)).toEqual({ id: "i.last", type: "library-songs", queued: 1 });
     app.mockInput.pressEscape(); await waitFor(() => app.model.shown.length === 3);
     app.mockInput.pressKey("o"); await app.flush();
     expect(app.model.filter.sort).toBe("title");
@@ -550,8 +514,8 @@ test("filtering loads the rest of the list first", async () => {
     const frame = app.captureCharFrame();
     expect(frame).toContain("Other Album"); expect(frame).toContain("3 songs"); expect(frame).toContain("Back");
     await click(app, "tracks:row:1");
-    await waitFor(() => app.calls.some(call => call.path === "/queue/move"));
-    expect(app.calls.find(call => call.path === "/queue/add-later")?.body).toEqual({ id: "l.other", type: "library-albums" });
+    await waitFor(() => called(app, "play").length === 1);
+    expect(started(app)).toEqual({ id: app.model.items[1]!.id, type: app.model.items[1]!.type, queued: 3 });
     app.mockInput.pressEscape(); await waitFor(() => app.model.view === "albums");
     expect(app.ui.grid.selected()?.media.id).toBe("l.other");
     expect(app.ui.grid.focused).toBe(true);
@@ -571,21 +535,21 @@ test("filtering loads the rest of the list first", async () => {
     expect(app.ui.grid.selected()?.media.id).toBe("pl.mix");
     app.mockInput.pressArrow("down"); await app.flush();
     expect(app.ui.grid.selected()?.media.id).toBe("a.new");
-    expect(app.calls.some(call => call.path === "/playback/seek")).toBe(false);
+    expect(called(app, "seek")).toHaveLength(0);
     app.mockInput.pressArrow("right", { shift: true });
-    await waitFor(() => app.calls.some(call => call.path === "/playback/seek"));
+    await waitFor(() => called(app, "seek").length > 0);
   });
 
-  test("the heart favourites the playing song and confirms Cider's stored rating", async () => {
+  test("the heart favourites the playing song and confirms the stored rating", async () => {
     const app = await setup();
     expect(app.captureCharFrame()).toContain(icon.heartOutline);
     await click(app, "favourite");
     await waitFor(() => app.model.status === "Added to Favourite Songs");
-    expect(app.calls.find(call => call.path === "/library/now-playing/rating")).toMatchObject({ method: "PUT", body: { rating: 1 } });
+    expect(called(app, "rate")[0]!.args[0]).toBe(1);
     await app.flush(); expect(app.captureCharFrame()).toContain(icon.heart);
     app.mockInput.pressKey("f");
     await waitFor(() => app.model.status === "Removed from Favourite Songs");
-    expect(app.calls.filter(call => call.path === "/library/now-playing/rating").at(-1)?.method).toBe("DELETE");
+    expect(called(app, "rate").at(-1)!.args[0]).toBe(0);
     expect(app.model.favourite).toBe(false);
   });
 
@@ -668,9 +632,9 @@ describe("the enlarged cover", () => {
     release(); await waitFor(() => smallerFinished); await Bun.sleep(20); await app.flush();
     expect(image.source).toBe(sharp);
     expect(image.image?.width).toBe(2);
-    const before = app.calls.filter(call => call.path === "/playback/toggle").length;
+    const before = called(app, "toggle").length;
     app.mockInput.pressKey(" ");
-    await waitFor(() => app.calls.filter(call => call.path === "/playback/toggle").length === before + 1);
+    await waitFor(() => called(app, "toggle").length === before + 1);
     expect(app.renderer.root.findDescendantById("cover-view")).toBeDefined();
     await click(app, "cover-view-image"); await app.flush();
     expect(app.renderer.root.findDescendantById("cover-view")).toBeUndefined();
@@ -722,8 +686,8 @@ describe("artists", () => {
     expect(app.model.items).toHaveLength(6);
     expect(app.calls.some(call => call.path === "/v1/me/library/albums/l.soma/artists")).toBe(true);
     await click(app, "tracks:row:0");
-    await waitFor(() => app.calls.some(call => call.path === "/playback/play-item"));
-    expect(app.calls.find(call => call.path === "/playback/play-item")?.body).toEqual({ id: "t1", type: "songs" });
+    await waitFor(() => called(app, "play").length === 1);
+    expect(started(app)).toMatchObject({ id: "t1", type: "songs" });
     app.mockInput.pressEscape(); await waitFor(() => app.model.detail?.id === "l.soma");
     expect(app.model.items).toHaveLength(3);
   });

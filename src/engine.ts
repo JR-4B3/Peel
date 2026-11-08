@@ -257,7 +257,6 @@ interface Queue { position: number; items: { id: string; type: string; added: bo
 export type EngineTransport = (path: string, body?: unknown) => Promise<any>;
 
 export class Engine implements Player {
-  readonly queuesItems = true;
   private access?: { port: number; key: string };
 
   constructor(private home = engineHome, private transport?: EngineTransport) {}
@@ -343,7 +342,7 @@ export class Engine implements Player {
     await this.call("enqueue", items.filter(item => !/albums|artists|playlists/.test(item.type)), next);
   }
 
-  // Peel's controls use Cider's command paths. The engine has a method for each.
+  // Peel's controls send these command paths. The engine has a method for each.
   async command(path: string, body: any = {}, method = "POST") {
     const commands: Record<string, () => Promise<unknown>> = {
       "/playback/pause": () => this.call("pause"),

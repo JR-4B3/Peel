@@ -1,7 +1,6 @@
 import { createCliRenderer } from "@opentui/core";
-import { AppleMusic, type AppleOptions } from "./apple";
-import { Cider } from "./cider";
-import { cacheDir, readAppleSignIn, readCache, readPreferences, readToken, saveJson } from "./config";
+import { AppleMusic } from "./apple";
+import { cacheDir, readAppleSignIn, readCache, readPreferences, saveJson } from "./config";
 import { Engine, ensureEngine, stopEngine } from "./engine";
 import { Hires, ensureHires, hiresSelected } from "./hires";
 import { DevicePlayer, validHost } from "./remote";
@@ -9,12 +8,10 @@ import { DeviceNetwork } from "./devices";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { memoryUse } from "./memory";
-import { ensureCider } from "./startup";
 import { checkForUpdate, currentBuild, readyVersion, restartCommand } from "./update";
 
-// Peel plays through its own engine. PEEL_PLAYER=cider uses Cider instead. Where the hi-res
-// pipeline (hires/) is installed, Apple Music's Android app plays in hi-res unless PEEL_PLAYER=web.
-const useCider = process.env.PEEL_PLAYER === "cider";
+// Peel plays through its own engine. Where the hi-res pipeline (hires/) is installed, Apple
+// Music's Android app plays in hi-res unless PEEL_PLAYER=web.
 const useHires = hiresSelected();
 
 try {
@@ -26,16 +23,7 @@ try {
     const build = await currentBuild();
     console.log(build ? `Peel ${build.version} (${build.channel}, ${build.commit.slice(0, 7)}, built ${build.date})` : "Peel from a source folder");
   } else if (process.argv.includes("--help")) {
-    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\n\nWhere hi-res (hires/) is installed, Peel plays through it. Set PEEL_PLAYER=web for the web engine,\nor PEEL_PLAYER=cider to play through Cider, and CIDER_API_BASE for another Cider address.");
-  } else if (process.argv.includes("--connect") && useCider) {
-    await ensureCider(new Cider().base, "", false, console.log);
-    console.log("Approve Peel's access request in Cider. Waiting up to two minutes...");
-    const result = await new Cider().connect();
-    await saveJson("auth.json", { token: result.token });
-    // Peel reads the library from Apple directly with Cider's Apple Music sign-in.
-    const apple = await new Cider(undefined, result.token).appleTokens();
-    await saveJson("apple.json", apple);
-    console.log(`Connected. Granted permissions: ${result.scopes.join(", ")}. Run bun start.`);
+    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote main  Control main through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\n\nWhere hi-res (hires/) is installed, Peel plays through it. Set PEEL_PLAYER=web for the web engine.");
   } else if (process.argv.includes("--connect")) {
     const engine = new Engine();
     await ensureEngine(engine, console.log);
@@ -47,7 +35,6 @@ try {
     if (remoteOption >= 0) {
       const host = process.argv[remoteOption + 1];
       if (!host || !validHost(host)) throw new Error("Use peel --remote <ssh-host>.");
-      if (useCider) throw new Error("Remote control uses Peel's engine. Unset PEEL_PLAYER=cider first.");
       preferences.remote = host;
       preferences.remotes = [...new Set([...(preferences.remotes ?? []), host])];
       await saveJson("layout.json", preferences);
@@ -56,29 +43,12 @@ try {
     const signIn = await readAppleSignIn();
     const startup = new AbortController();
     const status = (text: string) => { model.status = text; model.changed(); };
-    let player: Cider | Engine, options: AppleOptions, wake: () => Promise<void>;
-    if (useCider) {
-      const token = await readToken();
-      const cider = player = new Cider(undefined, token);
-      // Without a working sign-in, the library is read through Cider, which means waiting for Cider to start.
-      let proxied = false;
-      options = {
-        proxy: async path => {
-          await model.ensurePlayback();
-          if (!proxied) { proxied = true; status("Reading your library through Cider. Run peel --connect once so it loads without waiting."); }
-          return cider.amapi(path);
-        },
-      };
-      wake = () => ensureCider(cider.base, token, true, status, startup.signal);
-    } else {
-      const engine = player = useHires ? new DevicePlayer(preferences.remote, status, new Hires(), ensureHires) : new DevicePlayer(preferences.remote, status);
-      // Without a saved sign-in, Peel waits for the engine, which has one.
-      options = {};
-      wake = () => engine.ensure(startup.signal);
-    }
+    const player = useHires ? new DevicePlayer(preferences.remote, status, new Hires(), ensureHires) : new DevicePlayer(preferences.remote, status);
+    // Without a saved sign-in, Peel waits for the engine, which has one.
+    const wake = (): Promise<void> => player.ensure(startup.signal);
     // A rejected Apple sign-in is renewed from the player once it runs.
     const library = new AppleMusic(signIn.userToken, {
-      ...options, storefront: signIn.storefront,
+      storefront: signIn.storefront,
       renewUser: async () => {
         // The hi-res player signs in inside Android and has no token for Peel. This computer's web
         // engine renews it then, also when the player is a hi-res host reached over SSH. An engine
@@ -91,8 +61,8 @@ try {
         let fresh: { userToken: string; storefront?: string };
         if (useHires) fresh = await viaWebEngine();
         else {
-          if (!useCider) await model.ensurePlayback();
-          fresh = await player.appleTokens().catch(error => useCider ? Promise.reject(error) : viaWebEngine());
+          await model.ensurePlayback();
+          fresh = await player.appleTokens().catch(viaWebEngine);
         }
         await saveJson("apple.json", fresh);
         return fresh.userToken;
@@ -104,37 +74,34 @@ try {
     });
     model.wake = wake;
     model.readMemory = () => memoryUse();
-    if (player instanceof DevicePlayer) {
-      const devices = player;
-      model.outputTargets = preferences.remotes ?? [];
-      model.onOutput = async host => { await devices.select(host); model.target = devices.target; model.targetId = devices.peer; };
-      // Every Peel on the network is a device. PEEL_DEVICES=off keeps this one off the network.
-      if (process.env.PEEL_DEVICES !== "off") {
-        const network = new DeviceNetwork({ local: devices.localPlayer() });
-        devices.attach(network);
-        const show = () => { model.devices = network.views(); model.pairing = network.pairing; model.target = devices.target; model.targetId = devices.peer; model.changed(); };
-        network.on("change", show);
-        network.on("pairing", (pairing: { name: string }) => { model.status = `${pairing.name} wants to pair. Check the code on both screens.`; show(); });
-        model.onPlayOn = id => devices.playOn(id);
-        model.onPair = id => { try { network.pair(id); show(); } catch (error) { model.fail(error); } };
-        model.onForgetDevices = () => network.forget();
-        model.onDevicesOpened = () => network.openForPairing();
-        // A Peel that controlled an SSH host and followed the music elsewhere stays on the device
-        // network after a restart too, as if its listener had chosen the device.
-        devices.onRetarget = () => void model.retarget(async () => {
-          const text = await devices.applyTarget(); model.target = devices.target; model.targetId = devices.peer;
-          if (!devices.host) await model.forgetRemote();
-          return text;
-        });
-        void network.start().catch(error => model.fail(new Error(`Devices on the network are unavailable: ${error instanceof Error ? error.message : String(error)}`)));
-      }
+    model.outputTargets = preferences.remotes ?? [];
+    model.onOutput = async host => { await player.select(host); model.target = player.target; model.targetId = player.peer; };
+    // Every Peel on the network is a device. PEEL_DEVICES=off keeps this one off the network.
+    if (process.env.PEEL_DEVICES !== "off") {
+      const network = new DeviceNetwork({ local: player.localPlayer() });
+      player.attach(network);
+      const show = () => { model.devices = network.views(); model.pairing = network.pairing; model.target = player.target; model.targetId = player.peer; model.changed(); };
+      network.on("change", show);
+      network.on("pairing", (pairing: { name: string }) => { model.status = `${pairing.name} wants to pair. Check the code on both screens.`; show(); });
+      model.onPlayOn = id => player.playOn(id);
+      model.onPair = id => { try { network.pair(id); show(); } catch (error) { model.fail(error); } };
+      model.onForgetDevices = () => network.forget();
+      model.onDevicesOpened = () => network.openForPairing();
+      // A Peel that controlled an SSH host and followed the music elsewhere stays on the device
+      // network after a restart too, as if its listener had chosen the device.
+      player.onRetarget = () => void model.retarget(async () => {
+        const text = await player.applyTarget(); model.target = player.target; model.targetId = player.peer;
+        if (!player.host) await model.forgetRemote();
+        return text;
+      });
+      void network.start().catch(error => model.fail(new Error(`Devices on the network are unavailable: ${error instanceof Error ? error.message : String(error)}`)));
     }
     // Updates install in the background and start the next time Peel opens. The settings page
     // shows the result, and choosing another channel checks it at once.
     // A Peel that plays through the web engine while hi-res has since been set up restarts into
     // hi-res. The new Peel never uses the web engine, so the restart counts as a new engine: the
     // row says the music stops, and this Peel releases the web engine instead of keeping it.
-    const switchesToHires = () => !useCider && !useHires && hiresSelected();
+    const switchesToHires = () => !useHires && hiresSelected();
     const updates = (force: boolean) => {
       const channel = model.preferences.channel;
       model.update = { ...model.update, checking: true }; model.changed();
@@ -154,7 +121,7 @@ try {
     // A restart keeps this computer's engine, so the new Peel finds the music still playing. This
     // process waits for the new one, which keeps the engine owned until the new Peel closes.
     let restartInto: string | undefined;
-    model.playsLocally = () => !useCider && player instanceof DevicePlayer && !player.host && !player.peer;
+    model.playsLocally = () => !player.host && !player.peer;
     // The version to start is read again, since another Peel window may have changed it. A change
     // updates the row, so the listener sees what the restart would do before choosing it again.
     model.onRestart = () => void readyVersion().then(next => {
@@ -167,8 +134,8 @@ try {
     }, error => model.fail(error));
     const restart = async (version: string) => {
       const release = switchesToHires();
-      if (player instanceof DevicePlayer) player.detach();
-      if (release) await (player as Engine).release().catch(() => {});
+      player.detach();
+      if (release) await player.release().catch(() => {});
       // OpenTUI restores the terminal right after its destroy event, so the new Peel starts after that.
       await new Promise(resolve => setTimeout(resolve, 0));
       const { cmd, cwd } = restartCommand(version);
@@ -184,7 +151,7 @@ try {
     renderer.on("destroy", () => {
       startup.abort(); clearInterval(interval); ui.dispose();
       if (restartInto) void restart(restartInto).catch(error => { console.error(error instanceof Error ? error.message : String(error)); process.exit(1); });
-      else if (!useCider) stopEngine(player as Engine);
+      else stopEngine(player);
     });
     interval = setInterval(() => void model.refresh(), 1000);
     void model.start();

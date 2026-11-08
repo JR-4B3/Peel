@@ -57,7 +57,7 @@ const cycles: Record<string, number> = { "/playback/toggle": 2, "/playback/shuff
 
 export class Model extends EventEmitter {
   playback: Playback = structuredClone(stopped);
-  // Cider answers with an authorised playback state. Browsing does not need it.
+  // The player answered with its playback state. Browsing does not need it.
   connected = false;
   starting = false;
   // Counts changes to songs' favourite marks, which change the songs in place.
@@ -107,7 +107,7 @@ export class Model extends EventEmitter {
   private favouriteEdits = 0;
   releases: Promise<void> = Promise.resolve();
 
-  // Starts Cider when it is not running. Tests and custom API addresses need nothing started.
+  // Starts the player when it is not running. Tests need nothing started.
   wake: () => Promise<void> = async () => {};
 
   constructor(readonly library: Library, readonly player: Player, public preferences: Preferences = structuredClone(defaults), private save: (value: Preferences) => Promise<void> = async () => {}, private store: HomeStore = memoryStore) { super(); }
@@ -133,7 +133,7 @@ export class Model extends EventEmitter {
     return entries.map(item => ({ ...item, hidden: this.preferences.hidden.includes(item.id) })).filter(item => includeHidden || !item.hidden);
   }
 
-  // Home and the sidebar come from Apple Music, so they load while Cider is still starting.
+  // Home and the sidebar come from Apple Music, so they load while the player is still starting.
   async start() {
     await Promise.all([this.loadNavigation(), this.loadHome(), this.refresh()]);
   }
@@ -192,21 +192,21 @@ export class Model extends EventEmitter {
         this.shownError = this.playback.error;
         this.changed();
       } catch (error) {
-        // Cider not running yet is normal. Losing a working connection is reported.
+        // A player that is not running yet is normal. Losing a working connection is reported.
         if (this.connected) this.fail(error);
         this.connected = false; this.playbackError = error; this.changed();
       } finally { this.refreshing = undefined; }
     })();
   }
 
-  // Playback commands wait here. Concurrent commands share one Cider startup, and a failure allows a retry.
+  // Playback commands wait here. Concurrent commands share one player startup, and a failure allows a retry.
   ensurePlayback(): Promise<void> {
     if (this.connected) return Promise.resolve();
     return this.engine ??= (async () => {
       this.starting = true; this.changed();
       try {
         await this.wake();
-        // A poll that began before Cider opened its API can still be in flight.
+        // A poll that began before the player answered can still be in flight.
         await this.refresh();
         if (!this.connected) await this.refresh();
         if (!this.connected) throw this.playbackError ?? new Error("The player is not responding.");
@@ -247,7 +247,7 @@ export class Model extends EventEmitter {
     if (navigation?.media) return offset => this.library.songs(navigation.media!.id, offset);
     if (id === "albums") return offset => this.library.albums(offset);
     if (id === "artists") return offset => this.library.artists(offset);
-    // The queue lives in Cider. Before Cider runs there is nothing queued.
+    // The queue lives in the player. Before it runs there is nothing queued.
     if (id === "queue") return offset => this.connected ? this.player.queue(offset) : Promise.resolve({ items: [], more: false });
     return offset => this.library.songs(undefined, offset);
   }
@@ -527,12 +527,12 @@ export class Model extends EventEmitter {
     if (item.type.includes("artists")) return this.openArtist(item);
     if (item.type.includes("albums") || item.type.includes("playlists")) return this.openCollection(item);
     const collection = this.collection;
-    // A filtered list plays in its displayed order. Cider can only queue whole collections, so it plays the song alone.
+    // A filtered or sorted list plays in its displayed order.
     const list = this.shown;
-    const index = list === this.items || this.player.queuesItems ? list.indexOf(item) : -1;
+    const index = list.indexOf(item);
     // A double-click on one row starts it once. The row's place is part of the key, so another
     // copy of the same song in the list is a new choice.
-    const key = JSON.stringify([this.view, item.type, item.id, item.queueIndex, list.indexOf(item)]);
+    const key = JSON.stringify([this.view, item.type, item.id, item.queueIndex, index]);
     const previous = this.activation;
     if (previous?.key === key && (previous.pending || Date.now() - previous.started < 500)) {
       await previous.promise;
@@ -569,8 +569,8 @@ export class Model extends EventEmitter {
   async enqueue(item: Media, next: boolean) {
     if (item.type.includes("artists")) { this.status = "Artists cannot be queued. Open the artist and queue a song or album."; this.changed(); return; }
     let songs = [item];
-    // Cider adds a collection itself. Peel's engine needs its songs, up to the usual list limit.
-    if (/albums|playlists/.test(item.type) && this.player.queuesItems) {
+    // An album or playlist is queued as its songs, up to the usual list limit.
+    if (/albums|playlists/.test(item.type)) {
       try {
         const load = this.songsOf(item);
         songs = [];
@@ -640,7 +640,7 @@ export class Model extends EventEmitter {
 
   private async execute(command: () => Promise<void>) {
     let success = false;
-    // Keep rapid clicks ordered, start Cider for the first one, and always read Cider's state after a command.
+    // Keep rapid clicks ordered, start the player for the first one, and always read its state after a command.
     this.commands = this.commands.then(async () => {
       try {
         await this.ensurePlayback();
@@ -674,7 +674,7 @@ export class Model extends EventEmitter {
     return this.combine("skip", (count = 0) => count + direction, async count => {
       const mode = this.playback.repeatMode;
       if (!count) return;
-      // Cider's ordinary Next can repeat the current song in repeat-one mode, so that mode jumps too.
+      // Next in repeat-one mode would repeat the current song, so that mode jumps instead.
       if (Math.abs(count) === 1 && mode !== "one") return this.player.command(count > 0 ? "/playback/next" : "/playback/previous", count < 0 ? { force: true } : {});
       const queue = await this.player.queuePosition();
       if (queue.total < 2) return;
@@ -752,7 +752,7 @@ export class Model extends EventEmitter {
       this.changed();
       return;
     }
-    // Cider applies ratings asynchronously. Read the stored rating before claiming it.
+    // Apple stores ratings asynchronously. Read the stored rating before claiming it.
     let saved = !value;
     try {
       for (let attempt = 0; done && attempt < 30 && saved !== value && this.songKey() === key; attempt++) {
@@ -825,7 +825,7 @@ export class Model extends EventEmitter {
   }
 
   // The music moved away from the SSH host this Peel controlled, so the saved host is cleared.
-  async forgetRemote() { if (this.preferences.remote) await this.persist({ ...this.preferences, remote: undefined }); }
+  async forgetRemote() { if (this.preferences.remote) await this.persist({ remote: undefined }); }
 
   // Another Peel moved the music, or the device that played went offline.
   retarget(apply: () => string | undefined | Promise<string | undefined>) { return this.switchTarget(async () => apply()); }

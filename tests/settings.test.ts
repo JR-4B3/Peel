@@ -13,13 +13,11 @@ import { fixture } from "./fixture";
 const cleanup: (() => unknown)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 
-async function settings(engine: boolean, lossless = false) {
-  const api = fixture(); cleanup.push(() => api.server.stop(true));
-  const qualities: string[] = [];
-  // The fixture plays through Cider. Peel's engine also sets the stream quality.
-  if (engine) (api.player as any).setQuality = async (quality: string) => { qualities.push(quality); };
+async function settings(lossless = false) {
   // A hi-res host, on this computer or another, reports that it plays lossless.
-  if (lossless) (api.player as any).lossless = true;
+  const api = fixture(lossless ? { version: "hires" } : {}); cleanup.push(() => api.server.stop(true));
+  // The stream qualities the engine was told to use.
+  const qualities = () => api.commands.filter(call => call.method === "quality").map(call => call.args[0]);
   const app = await createTestRenderer({ width: 120, height: 36 }); cleanup.push(() => app.renderer.destroy());
   const saved: Preferences[] = [];
   const model = new Model(api.library, api.player, structuredClone(defaults), async value => { saved.push(structuredClone(value)); });
@@ -32,14 +30,14 @@ async function settings(engine: boolean, lossless = false) {
 }
 
 test("the settings page switches quality, update channel, and hearts, and saves each", async () => {
-  const app = await settings(true);
+  const app = await settings();
   expect(app.model.navigation().map(item => item.id)).toContain("settings");
   let frame = app.captureCharFrame();
   for (const text of ["Audio quality", "High  256 kbps", "Updates", "Stable", "Hearts in Favourite Songs", "Hidden"]) expect(frame).toContain(text);
   app.mockInput.pressEnter();
   await Bun.sleep(20); await app.flush();
   // The saved quality goes to the player when it connects, then the change.
-  expect(app.qualities).toEqual(["high", "standard"]);
+  expect(app.qualities()).toEqual(["high", "standard"]);
   expect(app.captureCharFrame()).toContain("Standard  64 kbps");
   app.mockInput.pressKey("j"); app.mockInput.pressEnter();
   await Bun.sleep(20); await app.flush();
@@ -53,25 +51,16 @@ test("the settings page switches quality, update channel, and hearts, and saves 
   expect(app.captureCharFrame()).toContain("Shown");
 });
 
-test("with Cider, the quality setting points to Cider and changes nothing", async () => {
-  const app = await settings(false);
-  expect(app.captureCharFrame()).toContain("Set in Cider");
-  app.mockInput.pressEnter();
-  await Bun.sleep(20);
-  expect(app.saved).toEqual([]);
-  expect(app.model.status).toContain("Cider");
-});
-
 test("with hi-res, the quality setting shows lossless and changes nothing", async () => {
-  const app = await settings(true, true);
+  const app = await settings(true);
   const frame = app.captureCharFrame();
   expect(frame).toContain("Hi-Res Lossless");
   expect(frame).not.toContain("256 kbps");
   app.mockInput.pressEnter();
   await Bun.sleep(20); await app.flush();
   expect(app.saved).toEqual([]);
-  // Only the saved quality the player gets when it connects, which a lossless player ignores.
-  expect(app.qualities).toEqual(["high"]);
+  // A lossless player is never told an AAC quality, also not the saved one when it connects.
+  expect(app.qualities()).toEqual([]);
   expect(app.model.status).toContain("lossless");
 });
 
@@ -93,11 +82,10 @@ test("the engine client follows the backend that answers", async () => {
 
 test("a started engine gets the saved quality", async () => {
   const api = fixture(); cleanup.push(() => api.server.stop(true));
-  const qualities: string[] = [];
-  (api.player as any).setQuality = async (quality: string) => { qualities.push(quality); };
   const model = new Model(api.library, api.player, { ...structuredClone(defaults), quality: "standard" });
   await model.refresh();
-  expect(qualities).toEqual(["standard"]);
+  await Bun.sleep(10);
+  expect(api.commands.filter(call => call.method === "quality").map(call => call.args[0])).toEqual(["standard"]);
 });
 
 // A stand-in for GitHub's releases API, serving one release per channel from real archives.
@@ -203,7 +191,7 @@ test("rapid channel changes finish with the last chosen release", async () => {
 });
 
 test("the update row checks now, and offers a restart once a newer Peel is ready", async () => {
-  const app = await settings(true);
+  const app = await settings();
   let checks = 0, restarts = 0;
   app.model.onCheckUpdate = () => { checks++; };
   app.model.onRestart = () => { restarts++; };

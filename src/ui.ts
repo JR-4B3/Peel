@@ -999,7 +999,7 @@ export class PeelUI {
     if (!open) return this.closeDevices();
     if (this.devicesView) return;
     if (!this.model.onPlayOn) {
-      this.model.status = this.model.player.setQuality ? "Devices are off. Unset PEEL_DEVICES=off to use them." : "Devices need Peel's own player. Unset PEEL_PLAYER=cider to use them.";
+      this.model.status = "Devices are off. Unset PEEL_DEVICES=off to use them.";
       this.model.changed(); return;
     }
     const ctx = this.renderer;
@@ -1146,18 +1146,16 @@ export class PeelUI {
   // The settings page: one row per setting, its value on the right. Enter switches it.
   private settingsRows() {
     const model = this.model, preferences = model.preferences, update = model.update;
-    const engine = !!model.player.setQuality, lossless = !!model.player.lossless;
+    const lossless = !!model.player.lossless;
     const high = preferences.quality === "high", stable = preferences.channel === "stable";
     const hearts = preferences.heartsInFavourites;
     const rows: Parameters<ClickList["setRows"]>[0] = [
       {
         id: "quality", lead: icon.quality, name: "Audio quality",
-        right: !engine ? "Set in Cider" : lossless ? "Hi-Res Lossless" : high ? "High  256 kbps" : "Standard  64 kbps",
-        description: !engine ? "Cider plays the music, so its own settings choose the quality."
-          : lossless ? "Apple Music's Android app plays ALAC up to 24-bit/192 kHz. Its own Audio Quality setting chooses the quality, not Peel."
+        right: lossless ? "Hi-Res Lossless" : high ? "High  256 kbps" : "Standard  64 kbps",
+        description: lossless ? "Apple Music's Android app plays ALAC up to 24-bit/192 kHz. Its own Audio Quality setting chooses the quality, not Peel."
           : "AAC from Apple. Standard uses a quarter of the data. Hi-Res Lossless needs Peel's hi-res player, which runs on Linux (hires/).",
         activate: () => {
-          if (!engine) { model.status = "Cider plays the music. Choose its quality in Cider's settings."; model.changed(); return; }
           if (lossless) { model.status = "Hi-res plays lossless. Apple Music's Android app chooses the quality."; model.changed(); return; }
           void model.setPreference({ quality: high ? "standard" : "high" }, `Audio quality: ${high ? "Standard, 64 kbps" : "High, 256 kbps"}`);
         },
