@@ -111,32 +111,37 @@ export class DevicePlayer extends Engine {
   attach(network: DeviceNetwork) {
     this.network = network;
     const follow = () => { if (this.wanted() !== this.peer) this.onRetarget?.(); };
-    network.on("claim", (claim: Claim, live: boolean) => { if (this.remote) void this.leaveSsh(claim, live); else follow(); });
+    network.on("claim", (claim: Claim, live: boolean) => {
+      if (!this.remote) return follow();
+      this.claimSeen = { claim, live };
+      this.onRetarget?.();
+    });
     network.on("online", follow); network.on("offline", follow);
   }
 
-  // Set when this Peel stopped controlling its SSH host because the music moved to another engine,
-  // so applyTarget reports the change. onRetarget's caller then clears the saved host.
-  private sshLeft = false;
+  // The newest claim heard while this Peel controls an SSH host, for applyTarget to check.
+  private claimSeen?: { claim: Claim; live: boolean };
 
   // A Peel that controls an SSH host still shows the music that plays. When another Peel moves
   // the music to a different computer, or it starts on this one, this Peel follows it, as if the
-  // listener had chosen that device. A move to the SSH host's own engine changes nothing here.
-  // A claim learned while catching up, such as right after Peel starts, counts only when that
-  // device plays: a song paused there long ago does not end SSH control the listener just chose.
-  private async leaveSsh(claim: Claim, live: boolean) {
+  // listener had chosen that device. Returns the device to follow, undefined for this computer,
+  // or false to keep the SSH host. It keeps the host when the music moved to the host's own
+  // engine, and while the host plays, since closing SSH can stop the host's engine. A claim
+  // learned while catching up, such as right after Peel starts, counts only when that device
+  // plays: a song paused there long ago does not end SSH control the listener just chose.
+  private async sshTarget({ claim, live }: { claim: Claim; live: boolean }): Promise<string | undefined | false> {
     const network = this.network!, remote = this.remote!, here = claim.device === network.id;
-    if (!here && !network.online(claim.device)) return;
+    const reachable = () => network.claim === claim && (here || network.online(claim.device));
+    if (!reachable()) return false;
     const [host, claimed] = await Promise.all([
       remote.request("/state").catch(() => undefined),
       (here ? this.local.state() : network.request(claim.device, "/state")).catch(() => undefined),
     ]);
-    if (this.remote !== remote || network.claim !== claim || !claimed?.playback?.nowPlaying) return;
-    if (!live && claimed.playback.state !== "playing") return;
-    if (claimed.instance && claimed.instance === host?.instance) return;
-    this.remote.close(); this.remote = undefined; this.host = undefined;
-    this.peer = this.wanted(); this.sshLeft = true;
-    this.onRetarget?.();
+    if (this.remote !== remote || !reachable() || !claimed?.playback?.nowPlaying) return false;
+    if (!live && claimed.playback.state !== "playing") return false;
+    if (host?.playback?.state === "playing") return false;
+    if (claimed.instance && claimed.instance === host?.instance) return false;
+    return here ? undefined : claim.device;
   }
 
   // The device that plays, if this Peel can reach it. Otherwise this computer.
@@ -147,12 +152,20 @@ export class DevicePlayer extends Engine {
     return device !== network.id && network.online(device) ? device : undefined;
   }
 
-  // Follows the device that plays. Returns a message when the controlled device changed.
-  applyTarget(): string | undefined {
-    const next = this.wanted(), left = this.sshLeft;
-    this.sshLeft = false;
-    if (next === this.peer && !left) return undefined;
-    const network = this.network!, previous = this.peer;
+  // Follows the device that plays. Returns a message when the controlled device changed. The
+  // model runs it in its command queue, so the SSH check never overlaps a move the listener chose.
+  async applyTarget(): Promise<string | undefined> {
+    const network = this.network!, seen = this.claimSeen;
+    this.claimSeen = undefined;
+    if (this.remote) {
+      const remote = this.remote, target = seen ? await this.sshTarget(seen) : false;
+      if (target === false || this.remote !== remote) return undefined;
+      remote.close(); this.remote = undefined; this.host = undefined; this.peer = target;
+      return target ? `Playing on ${network.nameOf(target)}` : "Playing on this computer";
+    }
+    const next = this.wanted();
+    if (next === this.peer) return undefined;
+    const previous = this.peer;
     this.peer = next;
     if (next) return `Playing on ${network.nameOf(next)}`;
     return previous && !network.online(previous) ? `${network.nameOf(previous)} went offline. Controlling this computer.` : "Playing on this computer";

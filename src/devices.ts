@@ -595,6 +595,8 @@ export class DeviceNetwork extends EventEmitter {
     // Every connection is checked, not only the newest one per device. A device that changed
     // networks can leave an older connection open that no longer reaches it.
     const open = [...this.sessions.values()].flatMap(set => [...set]).filter(session => !session.closed && !session.retiring);
+    // What each device answered in this check. A check still waiting from an earlier round is not counted.
+    const answered = new Map<string, Summary | undefined>();
     await Promise.all(open.map(async session => {
       const id = session.peer.id;
       if (this.checking.has(session)) return;
@@ -607,6 +609,7 @@ export class DeviceNetwork extends EventEmitter {
         if (Array.isArray(status?.keys) && (status.keys.some((key: string) => !this.groupKeys.some(own => own.id === key)) || this.groupKeys.some(own => !status.keys.includes(own.id)))) await this.sync(session);
         const summary = status?.summary && typeof status.summary.state === "string" ? { state: status.summary.state, song: typeof status.summary.song === "string" ? status.summary.song : undefined, artist: typeof status.summary.artist === "string" ? status.summary.artist : undefined } : undefined;
         if (JSON.stringify(summary) !== JSON.stringify(this.summaries.get(id))) { this.summaries.set(id, summary); this.changed(); }
+        answered.set(id, summary);
         this.missed.delete(session);
       } catch {
         // A computer that went to sleep keeps its connection open but stops answering. Two missed
@@ -616,17 +619,19 @@ export class DeviceNetwork extends EventEmitter {
         if (missed >= 2 && !session.closed) session.end();
       } finally { this.checking.delete(session); }
     }));
-    this.claimUnclaimed(own);
+    this.claimUnclaimed(own, answered);
   }
 
   // Music can start here without a claim, for example from a Peel that controls this computer over
   // SSH. Then the other Peels would keep showing the device that played before. This computer
-  // claims the music once it has played at two checks in a row, the device holding the claim does
-  // not play, and the claim has stood for a while, so a handover in progress never bounces back.
-  private claimUnclaimed(own: Summary | undefined) {
-    const playing = own?.state === "playing";
+  // claims the music once it has played at two checks in a row, the device holding the claim
+  // answered this check and does not play, and the claim has stood for a while, so a handover in
+  // progress never bounces back. A device that did not answer may still play, and claiming would
+  // pause it, so an offline or slow device keeps the claim.
+  private claimUnclaimed(own: Summary | undefined, answered: Map<string, Summary | undefined>) {
+    const playing = own?.state === "playing", owner = this.claim.device;
     const settled = Date.now() - this.claimChanged >= (this.options.claimSettle ?? 10000);
-    if (playing && this.playedBefore && settled && this.claim.device !== this.id && this.summaries.get(this.claim.device)?.state !== "playing") this.claimOutput(this.id);
+    if (playing && this.playedBefore && settled && owner !== this.id && answered.has(owner) && answered.get(owner)?.state !== "playing") this.claimOutput(this.id);
     this.playedBefore = playing;
   }
 
