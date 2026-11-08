@@ -12,6 +12,41 @@
 | `docs/` | How devices work, this page, and the roadmap |
 | `mobile/` | The phone design and plan |
 
+## Running from source
+
+```sh
+bun install --frozen-lockfile
+bun run connect
+bun start
+```
+
+`bash scripts/install-local.sh` (Windows: `scripts\install-local.ps1`) adds a launcher and menu entry that run the checkout instead of a release. A checkout updates through git, not through Peel's updater. `bun run engine` runs the playback engine in the terminal with its log visible, and `PEEL_ENGINE_SHOW=1` shows its window.
+
+On Linux with a systemd user session, the engine runs as the `peel-engine` user unit and the hi-res host as `peel-hires-host`, both in `app-peel.slice`. Without systemd, the engine runs as a detached process and logs to `engine.log` in its profile folder.
+
+## Files and variables
+
+| System | Settings and sign-in | Cache | Engine profile |
+| --- | --- | --- | --- |
+| Linux | `~/.config/peel` | `~/.cache/peel` | `~/.config/peel-engine` |
+| macOS | `~/Library/Application Support/peel` | `~/Library/Caches/peel` | `~/Library/Application Support/peel-engine` |
+| Windows | `%APPDATA%\peel` | `%LOCALAPPDATA%\peel` | `%LOCALAPPDATA%\peel-engine` |
+
+Release installs live in `~/.local/share/peel`, `~/Library/Application Support/Peel` or `%LOCALAPPDATA%\Peel`, one folder per version under `versions/`, with `current` naming the one the launcher starts.
+
+| Variable | Effect |
+| --- | --- |
+| `PEEL_PLAYER` | `web` plays through the web engine where hi-res is set up, `hires` forces hi-res. |
+| `PEEL_DEVICES=off` | Keeps a Peel off the device network. |
+| `PEEL_DEVICE_PORT`, `PEEL_DISCOVERY_PORT` | The device ports, TCP 10770 and UDP 10771. |
+| `PEEL_CONFIG_DIR`, `PEEL_CACHE_DIR`, `PEEL_ENGINE_HOME` | Move the folders above. On Linux, `XDG_CONFIG_HOME` and `XDG_CACHE_HOME` do too. |
+| `APPLE_MUSIC_USER_TOKEN` | An Apple Music user token instead of the saved one. |
+| `PEEL_ENGINE_SHOW=1` | Shows the engine's window. |
+
+`peel --remote <ssh-host>` controls another computer's player over SSH without moving the music, and `peel --local` returns to this computer. [remote-play.md](remote-play.md#ssh) has the details.
+
+Peel reads the library from `api.music.apple.com` with the developer token from the script of Apple's web player, cached in `apple-developer-token.json` until a day before it expires. Apple doesn't document this use and can change or revoke it.
+
 ## Tests
 
 ```sh
