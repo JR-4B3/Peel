@@ -112,7 +112,7 @@ interface Entry { queueId: number; song: Media; added: boolean }
 // caller reads Apple Music's state to see whether it took effect.
 export class Uncertain extends Error {}
 // Commands that set a value, or only read, have the same effect when Android receives them twice.
-const repeatable = new Set(["ping", "state", "queue", "volume", "repeat", "shuffle", "autoplay", "seek", "pause", "stop", "play", "skip"]);
+const repeatable = new Set(["ping", "state", "queue", "volume", "repeat", "shuffle", "autoplay", "seek", "pause", "stop", "play", "skip", "restart"]);
 
 // One line-based connection to the controller in Android. Requests go one at a time.
 class Controller {
@@ -255,9 +255,27 @@ export async function runHiresHost() {
     current = await control.request("state");
     // A changed queue Peel did not ask for, such as shuffle, shows within two seconds.
     if (resync && (current.item !== before || Date.now() - synced > 2000)) await sync();
+    watchStall();
     return current;
   }
   let busy = 0;
+
+  // Apple Music sometimes stops renewing its stream lease. The song then stays buffering at one
+  // place and never plays (#60). After stallLimit there, the host restarts Apple Music and
+  // continues at the same song and position. If that stalls too, it pauses and says so. A song
+  // that plays again allows the next recovery.
+  const stallLimit = Number(process.env.PEEL_HIRES_STALL_MS) || 10000;
+  let stall: { item?: number; position?: number; since: number } | undefined, recovered = false, recovering = false;
+  function watchStall() {
+    if (current.state === PLAYING) recovered = false;
+    if (!wanted || recovering || current.state !== BUFFERING) { stall = undefined; return; }
+    if (!stall || stall.item !== current.item || stall.position !== current.position) { stall = { item: current.item, position: current.position, since: Date.now() }; return; }
+    if (Date.now() - stall.since < stallLimit) return;
+    stall = undefined; recovering = true;
+    const again = recovered;
+    recovered = true;
+    void call("recover", [again]).catch(() => {}).finally(() => { recovering = false; });
+  }
 
   // Apple Music applies commands a moment later. Waits until its state shows the change, for up
   // to `within` milliseconds, so the state Peel reads next is already the new one.
@@ -581,6 +599,20 @@ export async function runHiresHost() {
         throw error;
       }
     },
+    // Restarts Apple Music and continues the queue where it stalled, or pauses after a second
+    // stall. watchStall runs it. A listener who paused meanwhile keeps the pause.
+    recover: async (again: boolean) => {
+      if (!wanted) return;
+      if (again) {
+        wanted = false;
+        await step("pause", stopped).catch(() => {});
+        notice = "Apple Music stopped streaming, also after a restart. Check the network, or try another song.";
+        return;
+      }
+      const saved = methods.exportPlayback!() as Parameters<typeof methods.importPlayback>[0];
+      await control.request("restart");
+      await methods.importPlayback!({ ...saved, playing: true });
+    },
     rating: async () => await readRating(playingSong()) ?? -1,
     rate: async (value: number, expected?: string) => {
       const song = playingSong(), path = ratingPath(song);
@@ -590,7 +622,7 @@ export async function runHiresHost() {
       rated = { id: song!.id, value: value ? 1 : 0, checked: Date.now() };
     },
   };
-  const playbackMethods = new Set(["pause", "stop", "resume", "toggle", "next", "previous", "seek", "play", "jump", "enqueue", "importPlayback"]);
+  const playbackMethods = new Set(["pause", "stop", "resume", "toggle", "next", "previous", "seek", "play", "jump", "enqueue", "importPlayback", "recover"]);
 
   // Each Peel sends its process ID. Once every Peel that used the host has exited, the music
   // pauses and the host exits. Android keeps running for the next start.

@@ -15,13 +15,16 @@ const android = {
   batch: 0, selected: 0, position: 0, state: 2, volume: 1, queue: [] as Item[],
   // What the next commands do instead of their usual effect.
   ignore: new Set<string>(), fail: new Set<string>(), dropAfter: new Set<string>(), partialAdd: false,
+  // While above zero, a start stays buffering, as when Apple Music stops renewing its stream
+  // lease. Each restart of Apple Music takes one off.
+  stall: 0, restarts: 0,
   // A state reply is split at this byte offset into two packets.
   splitAt: undefined as number | undefined,
   commands: [] as string[],
 };
 function reset() {
   // Queue IDs keep counting, as Apple's do: a new queue never reuses an old entry's ID.
-  Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [] });
+  Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [], stall: 0, restarts: 0 });
   android.ignore.clear(); android.fail.clear(); android.dropAfter.clear();
 }
 const snapshot = () => {
@@ -36,7 +39,8 @@ function apply(name: string, args: string[]): unknown {
   switch (name) {
     case "ping": return { ok: true };
     case "queue": return { queue: android.queue.slice(android.selected) };
-    case "list": android.queue = batchOf(args[1]!.split(",")); android.selected = Number(args[0]); android.position = 0; android.state = 3; break;
+    case "list": android.queue = batchOf(args[1]!.split(",")); android.selected = Number(args[0]); android.position = 0; android.state = android.stall ? 6 : 3; break;
+    case "restart": android.restarts++; android.stall = Math.max(0, android.stall - 1); android.queue = []; android.selected = 0; android.state = 1; return { ok: true };
     case "add": {
       let ids = args[1]!.split(",");
       if (android.partialAdd) ids = ids.slice(0, 1);
@@ -47,7 +51,7 @@ function apply(name: string, args: string[]): unknown {
     case "volume": android.volume = Number(args[0]); break;
     case "pause": android.state = 2; break;
     case "stop": android.state = 1; break;
-    case "play": android.state = 3; break;
+    case "play": android.state = android.stall ? 6 : 3; break;
     case "next": if (android.selected + 1 < android.queue.length) { android.selected++; android.position = 0; } break;
   }
   return undefined;
@@ -103,7 +107,7 @@ beforeAll(async () => {
   const home = join(temporary, "host");
   host = Bun.spawn([process.execPath, new URL("../src/hires.ts", import.meta.url).pathname, "--hires-host"], {
     env: { ...process.env, PEEL_HIRES_HOME: home, PEEL_HIRES_PORT: String(port), PEEL_HIRES_COMMAND: command,
-      PEEL_CONFIG_DIR: join(temporary, "config"), PEEL_CACHE_DIR: cache, APPLE_MUSIC_USER_TOKEN: "offline",
+      PEEL_CONFIG_DIR: join(temporary, "config"), PEEL_CACHE_DIR: cache, APPLE_MUSIC_USER_TOKEN: "offline", PEEL_HIRES_STALL_MS: "300",
       APPLE_MUSIC_API_BASE: api.url.toString(), PEEL_OWNER: String(process.pid), PATH: join(temporary, "bin") },
     stdout: "ignore", stderr: "ignore",
   });
@@ -221,6 +225,29 @@ test.skipIf(!supported)("characters split between packets arrive whole", async (
     android.splitAt = undefined;
   }
 }, 30000);
+
+test.skipIf(!supported)("a start that stays buffering restarts Apple Music once and continues, and a second stall pauses", async () => {
+  // Peel reads the state every second, and the host notices the stall from it.
+  const poll = async (done: () => boolean) => {
+    for (let attempt = 0; attempt < 150 && !done(); attempt++) { await send("/state"); await Bun.sleep(20); }
+    expect(done()).toBe(true);
+  };
+  android.stall = 1;
+  await play("101", "102");
+  expect(android.state).toBe(6);
+  await poll(() => android.restarts === 1 && android.state === 3);
+  expect(android.queue[android.selected]?.id).toBe("101");
+  expect(android.queue.map(item => item.id)).toEqual(["101", "102"]);
+
+  // It stalls again after the restart: the host pauses and says so, and restarts no more.
+  android.stall = 2;
+  await play("103");
+  await poll(() => android.state === 2);
+  expect(android.restarts).toBe(2);
+  expect((await send("/state")).body.playback.error).toContain("stopped streaming");
+  await Bun.sleep(500); await send("/state");
+  expect(android.restarts).toBe(2);
+}, 20000);
 
 // Last: the host exits at the end.
 test.skipIf(!supported)("a Peel that attaches while the last one leaves keeps the host", async () => {
