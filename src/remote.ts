@@ -206,8 +206,9 @@ export class DevicePlayer extends Engine {
   }
 
   // Moves the music to device: the queue, the playing song, and its position. The device that
-  // played pauses first and stops once the new one has the queue. If the move fails, it plays
-  // again only when the new device confirms it stayed silent.
+  // played pauses first and stops once the new one has the queue. If reading its queue fails, it
+  // plays on. If loading the queue on the new device fails, it plays again only once the new
+  // device confirms it paused.
   async playOn(device: string) {
     const network = this.network;
     if (!network) throw new Error("Devices are not available with this player.");
