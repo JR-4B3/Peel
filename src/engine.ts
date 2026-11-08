@@ -226,7 +226,7 @@ export async function installEngine(status: (text: string) => void = () => {}) {
 // Electron started with ELECTRON_RUN_AS_NODE runs as plain Node and cannot load the engine.
 // Terminals inside Electron apps, such as T3 Code's, set it for their own child processes.
 function engineEnvironment() {
-  const environment: Record<string, string | undefined> = { ...process.env, PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir, PEEL_OWNER: String(process.pid) };
+  const environment: Record<string, string | undefined> = { ...process.env, PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir, PEEL_OWNER: String(process.pid), ...ownerRole() };
   delete environment.ELECTRON_RUN_AS_NODE;
   return environment;
 }
@@ -254,6 +254,11 @@ export async function engineVersion() {
 interface State { ready: boolean; signIn: boolean; playback?: Playback; version?: string }
 interface Queue { position: number; items: { id: string; type: string; added: boolean; attributes: { name?: string; artistName?: string; albumName?: string; durationInMillis?: number } }[] }
 
+// The SSH helper sets PEEL_REMOTE_HOST. Its requests, and an engine it starts, mark it as a remote
+// controller, so the engine pauses when the last Peel on this computer closes.
+export const remoteOwner = (): Record<string, string> => process.env.PEEL_REMOTE_HOST === "1" ? { "x-peel-remote": "1" } : {};
+export const ownerRole = (): Record<string, string> => process.env.PEEL_REMOTE_HOST === "1" ? { PEEL_OWNER_REMOTE: "1" } : {};
+
 export type EngineTransport = (path: string, body?: unknown) => Promise<any>;
 
 export class Engine implements Player {
@@ -275,7 +280,7 @@ export class Engine implements Player {
     try {
       response = await fetch(`http://127.0.0.1:${access.port}${path}`, {
         method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body),
-        headers: { "x-peel-key": access.key, "x-peel-owner": String(process.pid), "content-type": "application/json" }, signal: AbortSignal.timeout(30000),
+        headers: { "x-peel-key": access.key, "x-peel-owner": String(process.pid), ...remoteOwner(), "content-type": "application/json" }, signal: AbortSignal.timeout(30000),
       });
     } catch { this.access = undefined; throw new Error("Peel's playback engine is not running."); }
     if (response.status === 403 && retry) { await this.read(); return this.send(path, body, false); }
@@ -379,7 +384,7 @@ async function quitEngine(engine: Engine) {
 
 // For a detached engine, failed settles with a message if it fails to start or exits.
 async function launchEngine(): Promise<{ failed: Promise<string> } | undefined> {
-  const environment: Record<string, string> = { PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir, PEEL_OWNER: String(process.pid) };
+  const environment: Record<string, string> = { PEEL_ENGINE_HOME: engineHome, PEEL_CACHE_DIR: cacheDir, PEEL_OWNER: String(process.pid), ...ownerRole() };
   const args = [electronPath, engineDir, ...electronArgs()];
   if (systemdSession()) {
     const settings = Object.entries(environment).map(([name, value]) => `--setenv=${name}=${value}`);

@@ -243,6 +243,31 @@ test("the engine quits when the last Peel closes, even after an old SSH helper a
   expect(quits.length).toBe(1);
 });
 
+test("the last Peel on this computer closing pauses the engine while an SSH controller stays", async () => {
+  const { context, server, quits } = engineMain({ PEEL_OWNER: "101" });
+  const called: string[] = [];
+  context.serve({ webContents: { executeJavaScript: async (source: string) => {
+    const method = source.match(/peelEngine\.(\w+)\(/)?.[1];
+    if (method && method !== "state") called.push(method);
+    return { ready: true };
+  } } }, "test-key");
+  await once(server(), "listening"); cleanup.push(() => server().close());
+  const port = (server().address() as net.AddressInfo).port;
+  const send = (path: string, owner: string, remote = false) => fetch(`http://127.0.0.1:${port}${path}`, { method: path === "/state" ? "GET" : "POST", headers: { "x-peel-key": "test-key", "x-peel-owner": owner, ...remote ? { "x-peel-remote": "1" } : {} } });
+  await send("/state", "303", true);
+  await send("/release", "101");
+  for (let i = 0; i < 20 && !called.includes("pause"); i++) await Bun.sleep(5);
+  expect(called).toEqual(["pause"]);
+  expect(quits.length).toBe(0);
+  // Another Peel on this computer comes and goes; the controller that leaves last ends the engine.
+  await send("/state", "202");
+  await send("/release", "303", true);
+  expect(quits.length).toBe(0);
+  expect(called).toEqual(["pause"]);
+  await send("/release", "202");
+  expect(quits.length).toBe(1);
+});
+
 test("commands from different controllers finish in order on the host", async () => {
   const { context, server } = engineMain({});
   const completed: string[] = [];

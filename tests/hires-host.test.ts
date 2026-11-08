@@ -59,10 +59,11 @@ function apply(name: string, args: string[]): unknown {
 
 let controller: Server, api: ReturnType<typeof Bun.serve>, host: ReturnType<typeof Bun.spawn>, temporary: string;
 let port = 0, key = "";
-async function send(path: string, body?: unknown, owner = process.pid) {
+const lookups: string[] = [];
+async function send(path: string, body?: unknown, owner = process.pid, remote = false) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body),
-    headers: { "x-peel-key": key, "x-peel-owner": String(owner) },
+    headers: { "x-peel-key": key, "x-peel-owner": String(owner), ...remote ? { "x-peel-remote": "1" } : {} },
   });
   return { status: response.status, body: await response.json() as any };
 }
@@ -96,7 +97,15 @@ beforeAll(async () => {
   });
   await new Promise<void>(resolve => controller.listen(0, "127.0.0.1", resolve));
   const controlPort = (controller.address() as any).port;
-  api = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => Response.json({ results: { songs: { data: [] } } }) });
+  // The catalog knows song 301, which the cover test plays without Peel queuing it.
+  api = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => {
+    const path = new URL(request.url).pathname;
+    lookups.push(path);
+    if (/\/v1\/catalog\/de\/songs\/30[23]$/.test(path)) return new Response("unavailable", { status: 503 });
+    if (path.endsWith("/v1/me/storefront")) return Response.json({ data: [{ id: "de", type: "storefronts" }] });
+    if (path.endsWith("/v1/catalog/de/songs/301")) return Response.json({ data: [{ id: "301", type: "songs", attributes: { name: "Song 301", artistName: "Catalog", albumName: "Lookup", artwork: { url: "https://art.example/{w}x{h}.jpg" } } }] });
+    return Response.json({ results: { songs: { data: [] } } });
+  } });
   const cache = join(temporary, "cache");
   await mkdir(cache);
   await writeFile(join(cache, "apple-developer-token.json"), JSON.stringify({ token: "offline", expires: Date.now() + 7 * 86400000 }));
@@ -257,7 +266,55 @@ test.skipIf(!supported)("a start that stays buffering restarts Apple Music once 
   expect(android.restarts).toBe(2);
 }, 20000);
 
+test.skipIf(!supported)("a song Apple Music plays that Peel did not queue gets its cover from the catalog", async () => {
+  // As after a restart of the host: Apple Music plays on from a queue this host never saw.
+  android.queue = batchOf(["301"]); android.selected = 0; android.state = 3;
+  let song: any;
+  for (let attempt = 0; attempt < 100 && !song?.artwork?.url; attempt++) { song = (await send("/state")).body.playback.nowPlaying; await Bun.sleep(20); }
+  expect(song).toMatchObject({ name: "Song 301", artwork: { url: "https://art.example/{w}x{h}.jpg" }, playParams: { id: "301" } });
+  const looked = (id: string) => lookups.filter(path => path.endsWith(`/songs/${id}`)).length;
+  expect(looked("301")).toBe(1);
+
+  // A later placeholder of the same song gets the cover without asking again.
+  android.queue = batchOf(["301"]); android.selected = 0;
+  song = (await send("/state")).body.playback.nowPlaying;
+  expect(song.artwork.url).toBe("https://art.example/{w}x{h}.jpg");
+  expect(looked("301")).toBe(1);
+
+  // Songs whose lookup fails are asked for once each, also while they alternate.
+  for (let round = 0; round < 6; round++) {
+    android.queue = batchOf([round % 2 ? "303" : "302"]); android.selected = 0;
+    await send("/state"); await Bun.sleep(30);
+  }
+  expect([looked("302"), looked("303")]).toEqual([1, 1]);
+}, 20000);
+
 const calls = async () => (await readFile(join(temporary, "calls"), "utf8").catch(() => "")).split("\n").filter(Boolean);
+
+test.skipIf(!supported)("the last Peel on this computer closing pauses the music while an SSH controller stays, and Android keeps running", async () => {
+  const helper = Bun.spawn(["sleep", "30"]);
+  const stops = async () => (await calls()).filter(call => call === "session idle").length, earlier = await stops();
+  try {
+    await send("/state", undefined, helper.pid, true);
+    await play("401");
+    expect(android.state).toBe(3);
+    await send("/release", {});
+    for (let attempt = 0; attempt < 100 && android.state !== 2; attempt++) await Bun.sleep(20);
+    expect(android.state).toBe(2);
+    expect(await Promise.race([host.exited, Bun.sleep(500).then(() => "running")])).toBe("running");
+    expect(await stops()).toBe(earlier);
+    // The controller can start the music again.
+    expect((await send("/call", { method: "resume", args: [] }, helper.pid, true)).status).toBe(200);
+    expect(android.state).toBe(3);
+  } finally {
+    await send("/state");
+    // A controller that leaves while a Peel on this computer stays changes nothing.
+    await send("/release", {}, helper.pid, true);
+    helper.kill();
+  }
+  await Bun.sleep(1200);
+  expect(android.state).toBe(3);
+}, 20000);
 
 test.skipIf(!supported)("a Peel that attaches while Android stops plays after Android starts again", async () => {
   await send("/release", {});
