@@ -107,7 +107,7 @@ export function fixture(options: { queueDelay?: number; silentRating?: boolean; 
   };
   const pending = () => queue.slice(position + 1).filter(item => item.added);
   const expect = (index: number, id?: string) => {
-    if (id && queue[index]?.id !== id) throw new Error("The queue changed on another controller. Try again.");
+    if (id && queue[index]?.id !== id) throw new Error("The queue changed in another Peel. Try again.");
   };
   const methods: Record<string, (...args: any[]) => unknown> = {
     pause: () => { playback.state = "paused"; },

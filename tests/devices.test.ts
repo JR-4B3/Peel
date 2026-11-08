@@ -99,7 +99,7 @@ test("a device without a shared key cannot open a session", async () => {
   expect(stranger.network.online(mac.network.id)).toBe(false);
 });
 
-test("only the engine requests a controller needs are forwarded", () => {
+test("only the engine requests a remote Peel needs are forwarded", () => {
   expect(allowedRequest("/state", undefined)).toBe(true);
   expect(allowedRequest("/call", { method: "importPlayback", args: [{}] })).toBe(true);
   for (const [path, body] of [["/call", { method: "tokens" }], ["/call", { method: "quality", args: ["high"] }], ["/quit", {}], ["/retain", {}], ["/release", {}], ["/call", { method: "constructor" }]] as const) expect(allowedRequest(path, body)).toBe(false);
@@ -343,12 +343,12 @@ function controlOverSsh(computer: Computer, host: Computer, stateDelay = 0) {
   (computer.player as any).remote = {
     request: async (path: string, body?: any) => {
       if (path === "/state" && stateDelay) await Bun.sleep(stateDelay);
-      if (closed) throw new Error("Remote controller closed.");
+      if (closed) throw new Error("SSH control closed.");
       return (host.fake.engine as any).transport(path, body);
     },
     close: () => { closed = true; },
   };
-  computer.player.host = host.name;
+  computer.player.sshHost = host.name;
 }
 
 test("a Peel that controls desktop over SSH follows music another Peel moves to its own computer", async () => {
@@ -359,7 +359,7 @@ test("a Peel that controls desktop over SSH follows music another Peel moves to 
   // desktop's own Peel moves what it plays to the Mac.
   Object.assign(desktop.fake.state, { items: [song("24hrs")], position: 0, playing: true });
   await desktop.player.playOn(mac.network.id);
-  await waitFor(() => mac.player.host === undefined, "the Mac leaving SSH");
+  await waitFor(() => mac.player.sshHost === undefined, "the Mac leaving SSH");
   expect(mac.player.peer).toBeUndefined();
   expect((await mac.player.state()).playback?.nowPlaying?.name).toBe("24HRS");
   expect(mac.fake.state.playing).toBe(true);
@@ -375,7 +375,7 @@ test("a Peel that controls desktop over SSH stays when the music moves to deskto
   await laptop.player.playOn(desktop.network.id);
   await waitFor(() => mac.network.claim.device === desktop.network.id, "the Mac hearing desktop's claim");
   await Bun.sleep(300);
-  expect(mac.player.host).toBe("desktop");
+  expect(mac.player.sshHost).toBe("desktop");
   expect(switches).toBe(0);
   expect(desktop.fake.state.playing).toBe(true);
 }, 15000);
@@ -391,7 +391,7 @@ test("a Peel that starts in SSH control keeps it for an old claim, unless that d
     await link(mac, desktop);
     await waitFor(() => mac.network.claim.device === mac.network.id && mac.network.claim.generation === 1, "the Mac catching up");
     await Bun.sleep(300);
-    expect(mac.player.host).toBe(playing ? undefined : "desktop");
+    expect(mac.player.sshHost).toBe(playing ? undefined : "desktop");
   }
 }, 20000);
 
@@ -413,7 +413,7 @@ test("a move the listener chose runs before or after an SSH check, never during 
   model.fail = error => { errors.push(error); };
   await model.playOn(mac.network.id);
   expect(errors).toEqual([]);
-  expect(mac.player.host).toBeUndefined();
+  expect(mac.player.sshHost).toBeUndefined();
   expect(mac.network.claim.device).toBe(mac.network.id);
   expect(mac.fake.state.items.length).toBe(1);
 }, 15000);
@@ -429,7 +429,7 @@ test("a Peel in SSH control stays when the claimed device leaves during the chec
   laptop.network.close();
   await waitFor(() => !mac.network.online(laptop.network.id), "the laptop going offline");
   await Bun.sleep(400);
-  expect(mac.player.host).toBe("desktop");
+  expect(mac.player.sshHost).toBe("desktop");
   expect(mac.player.peer).toBeUndefined();
 }, 15000);
 

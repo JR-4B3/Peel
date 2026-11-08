@@ -12,12 +12,12 @@ export class RemoteConnection {
   private child?: ChildProcessWithoutNullStreams;
   private sequence = 0;
   private pending = new Map<number, { resolve: (value: any) => void; reject: (error: Error) => void; timer: ReturnType<typeof setTimeout> }>();
-  constructor(readonly host: string, private status: (text: string) => void = () => {}, private command = "~/.local/bin/peel --remote-host") {
-    if (!validHost(host)) throw new Error("Use an SSH host name or alias for the playback computer.");
+  constructor(readonly sshHost: string, private status: (text: string) => void = () => {}, private command = "~/.local/bin/peel --remote-host") {
+    if (!validHost(sshHost)) throw new Error("Use an SSH host name or alias for the playback computer.");
   }
 
   private start() {
-    const child = this.child = spawn("ssh", ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "--", this.host, this.command], { windowsHide: true });
+    const child = this.child = spawn("ssh", ["-T", "-o", "BatchMode=yes", "-o", "ConnectTimeout=8", "-o", "ServerAliveInterval=5", "-o", "ServerAliveCountMax=2", "--", this.sshHost, this.command], { windowsHide: true });
     let errorText = "";
     child.stderr.on("data", chunk => { errorText = (errorText + chunk).slice(-2000); });
     const lines = createInterface({ input: child.stdout });
@@ -31,9 +31,9 @@ export class RemoteConnection {
         if (reply.error) pending.reject(new Error(reply.error)); else pending.resolve(reply.value);
       } catch { this.fail(child, "The remote Peel returned an invalid response. Update Peel on the playback computer."); }
     });
-    child.on("error", error => this.fail(child, `Could not connect to ${this.host}: ${error.message}`));
-    child.on("exit", () => this.fail(child, `Lost the connection to ${this.host}. ${errorText.trim() || "Playback stays on that computer. Reconnect to read its state."}`));
-    child.stdin.on("error", () => this.fail(child, `Lost the connection to ${this.host}.`));
+    child.on("error", error => this.fail(child, `Could not connect to ${this.sshHost}: ${error.message}`));
+    child.on("exit", () => this.fail(child, `Lost the connection to ${this.sshHost}. ${errorText.trim() || "Playback stays on that computer. Reconnect to read its state."}`));
+    child.stdin.on("error", () => this.fail(child, `Lost the connection to ${this.sshHost}.`));
     return child;
   }
 
@@ -48,14 +48,14 @@ export class RemoteConnection {
   request: EngineTransport = (path, body) => {
     const child = this.child ?? this.start(), id = ++this.sequence;
     return new Promise((resolve, reject) => {
-      // The first request can include signing in on the host. SSH itself times out sooner if unreachable.
-      const timer = setTimeout(() => this.fail(child, `The request to ${this.host} timed out. A command may have completed. Reconnect before trying it again.`), 6 * 60 * 1000);
+      // The first request can include signing in on the SSH host. SSH itself times out sooner if unreachable.
+      const timer = setTimeout(() => this.fail(child, `The request to ${this.sshHost} timed out. A command may have completed. Reconnect before trying it again.`), 6 * 60 * 1000);
       this.pending.set(id, { resolve, reject, timer });
       child.stdin.write(JSON.stringify({ id, path, body }) + "\n");
     });
   };
 
-  close() { if (this.child) this.fail(this.child, "Remote controller closed. Playback stays on the host."); }
+  close() { if (this.child) this.fail(this.child, "SSH control closed. Playback stays on the SSH host."); }
 }
 
 // An Engine with a selectable transport keeps every playback operation on the selected device:
@@ -68,14 +68,14 @@ export class DevicePlayer extends Engine {
   network?: DeviceNetwork;
   // The paired device this Peel controls, when the music plays there.
   peer?: string;
-  host?: string;
+  sshHost?: string;
   // Called when the device that plays changed elsewhere. The model then calls applyTarget.
   onRetarget?: () => void;
   // Tests pass their own engine and startup, so they never start or stop a real engine.
   constructor(host?: string, private status: (text: string) => void = () => {}, private local = new Engine(), private startEngine: typeof ensureEngine = ensureEngine) {
     super(undefined, (path, body) => this.detached ? Promise.reject(new Error("Peel restarted into an update."))
       : this.remote ? this.remote.request(path, body) : this.peer ? this.network!.request(this.peer, path, body) : this.sendLocal(path, body));
-    if (host) { this.remote = new RemoteConnection(host, status); this.host = host; }
+    if (host) { this.remote = new RemoteConnection(host, status); this.sshHost = host; }
   }
 
   private ensureLocal() {
@@ -160,7 +160,7 @@ export class DevicePlayer extends Engine {
     if (this.remote) {
       const remote = this.remote, target = seen ? await this.sshTarget(seen) : false;
       if (target === false || this.remote !== remote) return undefined;
-      remote.close(); this.remote = undefined; this.host = undefined; this.peer = target;
+      remote.close(); this.remote = undefined; this.sshHost = undefined; this.peer = target;
       return target ? `Playing on ${network.nameOf(target)}` : "Playing on this computer";
     }
     const next = this.wanted();
@@ -172,7 +172,7 @@ export class DevicePlayer extends Engine {
   }
 
   // The device this Peel controls, for the player strip. Undefined means this computer.
-  get target() { return this.host ?? (this.peer ? this.network?.nameOf(this.peer) : undefined); }
+  get target() { return this.sshHost ?? (this.peer ? this.network?.nameOf(this.peer) : undefined); }
 
   async ensure(signal?: AbortSignal) {
     if (this.remote) await this.remote.request("/state");
@@ -201,24 +201,26 @@ export class DevicePlayer extends Engine {
       }
       else { this.localUsed = true; await this.startEngine(this.local, this.status); }
     } catch (error) { next?.close(); throw error; }
-    this.remote?.close(); this.remote = next; this.host = host;
+    this.remote?.close(); this.remote = next; this.sshHost = host;
     if (!host) this.peer = this.wanted();
   }
 
   // Moves the music to device: the queue, the playing song, and its position. The device that
-  // played pauses only once the new one has the queue, and keeps playing if that fails.
+  // played pauses first and stops once the new one has the queue. If reading its queue fails, it
+  // plays on. If loading the queue on the new device fails, it plays again only once the new
+  // device confirms it paused.
   async playOn(device: string) {
     const network = this.network;
     if (!network) throw new Error("Devices are not available with this player.");
     const here = device === network.id, name = network.nameOf(device);
     if (!here && !network.online(device)) throw new Error(`Can't reach ${name}. Open Peel on ${name} and check that it's on the same Wi-Fi.`);
-    const current = this.remote ? `ssh:${this.host}` : this.peer ?? network.id;
+    const current = this.remote ? `ssh:${this.sshHost}` : this.peer ?? network.id;
     if (current !== device) {
       const source: EngineTransport = this.remote ? this.remote.request : this.peer ? (path, body) => network.request(this.peer!, path, body) : (path, body) => this.local.send(path, body);
       const destination: EngineTransport = here ? async (path, body) => { await this.ensureLocal(); return this.local.send(path, body); } : (path, body) => network.request(device, path, body);
-      await moveMusic(source, destination, this.host ?? (this.peer ? network.nameOf(this.peer) : "this computer"), here ? "this computer" : name, !this.remote && !this.peer);
+      await moveMusic(source, destination, this.sshHost ?? (this.peer ? network.nameOf(this.peer) : "this computer"), here ? "this computer" : name, !this.remote && !this.peer);
     }
-    this.remote?.close(); this.remote = undefined; this.host = undefined;
+    this.remote?.close(); this.remote = undefined; this.sshHost = undefined;
     this.peer = here ? undefined : device;
     network.claimOutput(device);
   }

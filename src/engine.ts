@@ -255,7 +255,7 @@ interface State { ready: boolean; signIn: boolean; playback?: Playback; version?
 interface Queue { position: number; items: { id: string; type: string; added: boolean; attributes: { name?: string; artistName?: string; albumName?: string; durationInMillis?: number } }[] }
 
 // The SSH helper sets PEEL_REMOTE_HOST. Its requests, and an engine it starts, mark it as a remote
-// controller, so the engine pauses when the last Peel on this computer closes.
+// Peel, so the engine pauses when the last Peel on this computer closes.
 export const remoteOwner = (): Record<string, string> => process.env.PEEL_REMOTE_HOST === "1" ? { "x-peel-remote": "1" } : {};
 export const ownerRole = (): Record<string, string> => process.env.PEEL_REMOTE_HOST === "1" ? { PEEL_OWNER_REMOTE: "1" } : {};
 

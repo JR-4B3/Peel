@@ -12,6 +12,20 @@
 | `docs/` | How devices work, this page, and the roadmap |
 | `mobile/` | The phone design and plan |
 
+## Words
+
+The code and its comments use these words in one sense each.
+
+| Word | Meaning |
+| --- | --- |
+| engine | A player process that Peel sends commands to: the web engine in `engine/`, or the hi-res host. |
+| hi-res host | `src/hires.ts` running as its own process, the `peel-hires-host` service where systemd runs. It speaks the engine's protocol and drives Android. |
+| SSH host | The computer `peel --remote <ssh-host>` controls. `DevicePlayer.sshHost` holds its name. |
+| remote Peel | A Peel that controls another computer, over SSH or through the devices popup. |
+| controller | Only the Java program inside Android (`hires/android/control/Control.java`) that `peel-hires controller` starts. |
+| owner | A Peel process that keeps an engine running. When the last one exits, the engine stops. |
+| claim | The shared record of which device plays, with a generation number. The highest generation wins. |
+
 ## Running from source
 
 ```sh
