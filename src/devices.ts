@@ -296,6 +296,8 @@ export interface NetworkOptions {
   announceEvery?: number;
   // Tests run several devices on one computer and reach them at its own addresses.
   allowOwnAddresses?: boolean;
+  // How long a claim stands before music playing here without one takes it over. Tests shorten it.
+  claimSettle?: number;
 }
 
 export class DeviceNetwork extends EventEmitter {
@@ -308,6 +310,9 @@ export class DeviceNetwork extends EventEmitter {
   private known = new Map<string, Known>();
   private nearby = new Map<string, Nearby>();
   private summaries = new Map<string, Summary | undefined>();
+  // When the claim last changed, and whether this computer played at the previous check.
+  private claimChanged = Date.now();
+  private playedBefore = false;
   private sessions = new Map<string, Set<Session>>();
   private connecting = new Map<string, number>();
   // Set when this device declined a pairing. Every request is refused for a while after that, so a
@@ -323,6 +328,9 @@ export class DeviceNetwork extends EventEmitter {
   private turns = new Map<string, number>();
   private missed = new WeakMap<Session, number>();
   private checking = new WeakSet<Session>();
+  // Sessions that exchanged a status once. The first exchange catches up on claims made while the
+  // two devices were apart. Later claims are moves happening now.
+  private synced = new WeakSet<Session>();
   private sockets = new Set<Line>();
   private clients = new Set<Line>();
   private server?: Server;
@@ -383,6 +391,7 @@ export class DeviceNetwork extends EventEmitter {
     this.known.clear();
     for (const value of Array.isArray(stored?.known) ? stored.known.slice(0, 64) : []) { const device = readKnown(value); if (device && device.id !== this.id) this.known.set(device.id, device); }
     this.claim = validClaim(stored?.output) ? stored.output : { device: this.id, generation: 0 };
+    this.claimChanged = Date.now();
     if (!stored || stored.id !== this.id) await saveJson("devices.json", { id: this.id, keys: this.groupKeys, known: this.knownList(), output: this.claim }, this.dir).catch(() => {});
   }
 
@@ -428,20 +437,23 @@ export class DeviceNetwork extends EventEmitter {
   // This device's view of who plays moves to device, and every connected device hears about it.
   claimOutput(device: string) {
     this.claim = { device, generation: this.claim.generation + 1 };
+    this.claimChanged = Date.now();
     void this.persist();
     for (const sessions of this.sessions.values()) for (const session of sessions) if (!session.closed) void session.request("claim", { claim: this.claim }).catch(() => {});
-    this.emit("claim", this.claim);
+    this.emit("claim", this.claim, true);
     this.changed();
   }
 
-  adopt(claim: unknown) {
+  // live is false when the claim comes from catching up with a device, not from a move just made.
+  adopt(claim: unknown, live = true) {
     // Generation 0 is every device's own starting point, not a choice anyone made.
     if (!validClaim(claim) || claim.generation < 1 || !newer(claim, this.claim)) return;
     this.claim = { device: claim.device, generation: claim.generation };
+    this.claimChanged = Date.now();
     void this.persist();
     // The music moved to another device, so this one stops.
     if (claim.device !== this.id) void this.options.local.pause().catch(() => {});
-    this.emit("claim", this.claim);
+    this.emit("claim", this.claim, live);
     this.changed();
   }
 
@@ -494,8 +506,9 @@ export class DeviceNetwork extends EventEmitter {
     this.groupKeys = [newGroupKey()];
     // A new group starts its claims again, even after a paired device sent a huge generation.
     this.claim = { device: this.id, generation: 1 };
+    this.claimChanged = Date.now();
     await this.persist();
-    this.emit("claim", this.claim);
+    this.emit("claim", this.claim, false);
     this.changed();
   }
 
@@ -582,17 +595,21 @@ export class DeviceNetwork extends EventEmitter {
     // Every connection is checked, not only the newest one per device. A device that changed
     // networks can leave an older connection open that no longer reaches it.
     const open = [...this.sessions.values()].flatMap(set => [...set]).filter(session => !session.closed && !session.retiring);
+    // What each device answered in this check. A check still waiting from an earlier round is not counted.
+    const answered = new Map<string, Summary | undefined>();
     await Promise.all(open.map(async session => {
       const id = session.peer.id;
       if (this.checking.has(session)) return;
       this.checking.add(session);
       try {
         const status = await session.request("status", { claim: this.claim, keys: this.groupKeys.map(key => key.id) }, 5000);
-        this.adopt(status?.claim);
+        this.adopt(status?.claim, this.synced.has(session));
+        this.synced.add(session);
         if (text(status?.name, 100)) this.remember({ id, name: status.name, port: validPort(status.port) ? status.port : undefined, addresses: Array.isArray(status.addresses) ? status.addresses.filter(validAddress).slice(0, 8) : undefined });
         if (Array.isArray(status?.keys) && (status.keys.some((key: string) => !this.groupKeys.some(own => own.id === key)) || this.groupKeys.some(own => !status.keys.includes(own.id)))) await this.sync(session);
         const summary = status?.summary && typeof status.summary.state === "string" ? { state: status.summary.state, song: typeof status.summary.song === "string" ? status.summary.song : undefined, artist: typeof status.summary.artist === "string" ? status.summary.artist : undefined } : undefined;
         if (JSON.stringify(summary) !== JSON.stringify(this.summaries.get(id))) { this.summaries.set(id, summary); this.changed(); }
+        answered.set(id, summary);
         this.missed.delete(session);
       } catch {
         // A computer that went to sleep keeps its connection open but stops answering. Two missed
@@ -602,6 +619,20 @@ export class DeviceNetwork extends EventEmitter {
         if (missed >= 2 && !session.closed) session.end();
       } finally { this.checking.delete(session); }
     }));
+    this.claimUnclaimed(own, answered);
+  }
+
+  // Music can start here without a claim, for example from a Peel that controls this computer over
+  // SSH. Then the other Peels would keep showing the device that played before. This computer
+  // claims the music once it has played at two checks in a row, the device holding the claim
+  // answered this check and does not play, and the claim has stood for a while, so a handover in
+  // progress never bounces back. A device that did not answer may still play, and claiming would
+  // pause it, so an offline or slow device keeps the claim.
+  private claimUnclaimed(own: Summary | undefined, answered: Map<string, Summary | undefined>) {
+    const playing = own?.state === "playing", owner = this.claim.device;
+    const settled = Date.now() - this.claimChanged >= (this.options.claimSettle ?? 10000);
+    if (playing && this.playedBefore && settled && owner !== this.id && answered.has(owner) && answered.get(owner)?.state !== "playing") this.claimOutput(this.id);
+    this.playedBefore = playing;
   }
 
   private async sync(session: Session) {
@@ -612,7 +643,8 @@ export class DeviceNetwork extends EventEmitter {
   // What a paired device may ask this one.
   private async handle(session: Session, op: string, body: any): Promise<unknown> {
     if (op === "status") {
-      this.adopt(body?.claim);
+      this.adopt(body?.claim, this.synced.has(session));
+      this.synced.add(session);
       // The answer does not wait for the engine, so a slow engine does not look like a lost device.
       return { name: this.name, summary: this.summaries.get(this.id), claim: this.claim, keys: this.groupKeys.map(key => key.id), port: this.port, addresses: ownAddresses() };
     }

@@ -244,6 +244,6 @@ API references: [Cider v2 documentation](https://taproom.cider.sh/docs/api), [Op
 
 ## Desktop remote control
 
-Run `peel --remote main` on a computer with SSH access to `main`. Audio and the queue stay on `main`, while the local Peel controls it. The target is saved. Settings lets you switch between saved computers, and `peel --local` returns to this computer's engine. Switching controllers preserves the host queue. Moving playback between engines is not implemented yet.
+Run `peel --remote main` on a computer with SSH access to `main`. Audio and the queue stay on `main`, while the local Peel controls it. The target is saved. Settings lets you switch between saved computers, and `peel --local` returns to this computer's engine. Switching controllers preserves the host queue. When another Peel moves the music to a different computer, this Peel stops controlling the host and shows that computer.
 
 Both computers need this version of Peel. The host needs an Apple Music sign-in and an active desktop session. See [remote setup and limits](docs/remote-play.md).

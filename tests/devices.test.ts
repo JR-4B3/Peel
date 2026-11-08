@@ -27,10 +27,11 @@ const song = (id: string): Song => ({ id, type: "songs", name: id.toUpperCase(),
 // A stand-in for one computer's engine: a queue, a position, and whether it plays.
 function fakeEngine() {
   const state = { items: [] as Song[], position: 0, time: 0, playing: false, added: [] as number[], calls: [] as string[], started: 0 };
+  const instance = crypto.randomUUID();
   const transport = async (path: string, body?: any) => {
     if (path === "/state") {
       const current = state.items[state.position];
-      return { ready: true, playback: { state: !current ? "stopped" : state.playing ? "playing" : "paused", nowPlaying: current ? { name: current.name, artistName: current.artist, playParams: { id: current.id } } : null,
+      return { ready: true, instance, playback: { state: !current ? "stopped" : state.playing ? "playing" : "paused", nowPlaying: current ? { name: current.name, artistName: current.artist, playParams: { id: current.id } } : null,
         time: { currentTime: state.time, duration: 100 }, volume: 0.5, repeatMode: "none", shuffleMode: false } };
     }
     if (path === "/release") return null;
@@ -50,7 +51,7 @@ function fakeEngine() {
 
 // One computer: its engine, its player, and its place on the network. Devices find each other
 // directly in tests rather than by broadcast.
-async function computer(name: string, announceEvery = 60000) {
+async function computer(name: string, announceEvery = 60000, claimSettle?: number) {
   const dir = await mkdtemp(join(tmpdir(), "peel-devices-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const fake = fakeEngine();
   let failImport = false;
@@ -60,7 +61,7 @@ async function computer(name: string, announceEvery = 60000) {
     return inner(path, body);
   };
   const player = new DevicePlayer(undefined, () => {}, fake.engine, async () => { fake.state.started++; });
-  const network = new DeviceNetwork({ local: player.localPlayer(), dir, name, port: 0, discovery: false, announceEvery, allowOwnAddresses: true });
+  const network = new DeviceNetwork({ local: player.localPlayer(), dir, name, port: 0, discovery: false, announceEvery, allowOwnAddresses: true, claimSettle });
   player.attach(network);
   await network.start();
   cleanup.push(() => network.close());
@@ -319,6 +320,148 @@ test("a favourite set on the playing device replaces an earlier answer, in the p
   expect(model.items[0]!.loved).toBe(!known);
   expect(model.lovedRevision).toBeGreaterThan(revision);
 });
+
+test("music started here without a claim, as from a Peel over SSH, makes the other Peels follow", async () => {
+  const mac = await computer("Mac", 60000, 100), main = await computer("main", 60000, 100);
+  mac.player.onRetarget = () => { mac.player.applyTarget(); };
+  await link(mac, main);
+  // The Mac played last, so every Peel shows the Mac.
+  mac.network.claimOutput(mac.network.id);
+  await waitFor(() => main.network.claim.device === mac.network.id, "main following the Mac");
+  // A Peel on the Mac starts music on main over SSH, straight at main's engine.
+  Object.assign(main.fake.state, { items: [song("worth it")], position: 0, playing: true });
+  await waitFor(() => main.network.claim.device === main.network.id, "main claiming the music", 8000);
+  await waitFor(() => mac.player.peer === main.network.id, "the Mac following main");
+  expect(main.fake.state.playing).toBe(true);
+}, 15000);
+
+// The Mac's Peel controls main over SSH, as after peel --remote main: its requests reach main's
+// engine without the device network.
+// A closed connection refuses further requests, as RemoteConnection does. stateDelay slows /state.
+function controlOverSsh(computer: Computer, host: Computer, stateDelay = 0) {
+  let closed = false;
+  (computer.player as any).remote = {
+    request: async (path: string, body?: any) => {
+      if (path === "/state" && stateDelay) await Bun.sleep(stateDelay);
+      if (closed) throw new Error("Remote controller closed.");
+      return (host.fake.engine as any).transport(path, body);
+    },
+    close: () => { closed = true; },
+  };
+  computer.player.host = host.name;
+}
+
+test("a Peel that controls main over SSH follows music another Peel moves to its own computer", async () => {
+  const mac = await computer("Mac"), main = await computer("main");
+  mac.player.onRetarget = () => { mac.player.applyTarget(); };
+  controlOverSsh(mac, main);
+  await link(mac, main);
+  // main's own Peel moves what it plays to the Mac.
+  Object.assign(main.fake.state, { items: [song("24hrs")], position: 0, playing: true });
+  await main.player.playOn(mac.network.id);
+  await waitFor(() => mac.player.host === undefined, "the Mac leaving SSH");
+  expect(mac.player.peer).toBeUndefined();
+  expect((await mac.player.state()).playback?.nowPlaying?.name).toBe("24HRS");
+  expect(mac.fake.state.playing).toBe(true);
+}, 15000);
+
+test("a Peel that controls main over SSH stays when the music moves to main itself", async () => {
+  const mac = await computer("Mac"), main = await computer("main"), laptop = await computer("laptop");
+  let switches = 0;
+  mac.player.onRetarget = () => void mac.player.applyTarget().then(text => { if (text) switches++; });
+  controlOverSsh(mac, main);
+  await link(mac, main); await link(main, laptop); await link(mac, laptop);
+  Object.assign(laptop.fake.state, { items: [song("a")], position: 0, playing: true });
+  await laptop.player.playOn(main.network.id);
+  await waitFor(() => mac.network.claim.device === main.network.id, "the Mac hearing main's claim");
+  await Bun.sleep(300);
+  expect(mac.player.host).toBe("main");
+  expect(switches).toBe(0);
+  expect(main.fake.state.playing).toBe(true);
+}, 15000);
+
+test("a Peel that starts in SSH control keeps it for an old claim, unless that device plays", async () => {
+  for (const playing of [false, true]) {
+    const mac = await computer("Mac"), main = await computer("main");
+    mac.player.onRetarget = () => { mac.player.applyTarget(); };
+    controlOverSsh(mac, main);
+    // While the Mac's Peel was closed, main's Peel had given the music to the Mac. It is still there.
+    Object.assign(mac.fake.state, { items: [song("old")], position: 0, playing });
+    main.network.claimOutput(mac.network.id);
+    await link(mac, main);
+    await waitFor(() => mac.network.claim.device === mac.network.id && mac.network.claim.generation === 1, "the Mac catching up");
+    await Bun.sleep(300);
+    expect(mac.player.host).toBe(playing ? undefined : "main");
+  }
+}, 20000);
+
+test("a move the listener chose runs before or after an SSH check, never during it", async () => {
+  const api = fixture(); cleanup.push(() => api.server.stop(true));
+  const mac = await computer("Mac"), main = await computer("main"), laptop = await computer("laptop");
+  // Wired as in index.ts: both go through the model's command queue.
+  const model = new Model(api.library, api.player, structuredClone(defaults));
+  mac.player.onRetarget = () => void model.retarget(() => mac.player.applyTarget());
+  model.onPlayOn = id => mac.player.playOn(id);
+  controlOverSsh(mac, main, 300);
+  await link(mac, main); await link(main, laptop); await link(mac, laptop);
+  Object.assign(main.fake.state, { items: [song("m")], position: 0, playing: false });
+  Object.assign(laptop.fake.state, { items: [song("l")], position: 0, playing: false });
+  // The laptop takes the music, and while the Mac checks it, its listener moves the music here.
+  laptop.network.claimOutput(laptop.network.id);
+  await waitFor(() => mac.network.claim.device === laptop.network.id, "the Mac hearing the laptop's claim");
+  const errors: unknown[] = [];
+  model.fail = error => { errors.push(error); };
+  await model.playOn(mac.network.id);
+  expect(errors).toEqual([]);
+  expect(mac.player.host).toBeUndefined();
+  expect(mac.network.claim.device).toBe(mac.network.id);
+  expect(mac.fake.state.items.length).toBe(1);
+}, 15000);
+
+test("a Peel in SSH control stays when the claimed device leaves during the check", async () => {
+  const mac = await computer("Mac"), main = await computer("main"), laptop = await computer("laptop");
+  mac.player.onRetarget = () => void mac.player.applyTarget();
+  controlOverSsh(mac, main, 300);
+  await link(mac, main); await link(main, laptop); await link(mac, laptop);
+  Object.assign(laptop.fake.state, { items: [song("l")], position: 0, playing: false });
+  laptop.network.claimOutput(laptop.network.id);
+  await waitFor(() => mac.network.claim.device === laptop.network.id, "the Mac hearing the laptop's claim");
+  laptop.network.close();
+  await waitFor(() => !mac.network.online(laptop.network.id), "the laptop going offline");
+  await Bun.sleep(400);
+  expect(mac.player.host).toBe("main");
+  expect(mac.player.peer).toBeUndefined();
+}, 15000);
+
+test("music here does not take the claim from a device whose answer is late", async () => {
+  const mac = await computer("Mac", 60000, 100), main = await computer("main", 60000, 100);
+  await link(mac, main);
+  Object.assign(mac.fake.state, { items: [song("a")], position: 0, playing: true });
+  mac.network.claimOutput(mac.network.id);
+  await waitFor(() => main.network.claim.device === mac.network.id, "main following the Mac");
+  // The Mac's status answers stop arriving in time, though it still plays.
+  const handle = (mac.network as any).handle.bind(mac.network);
+  (mac.network as any).handle = async (session: unknown, op: string, body: unknown) => {
+    if (op === "status") await Bun.sleep(4500);
+    return handle(session, op, body);
+  };
+  Object.assign(main.fake.state, { items: [song("b")], position: 0, playing: true });
+  await Bun.sleep(6000);
+  expect(main.network.claim.device).toBe(mac.network.id);
+  expect(mac.fake.state.playing).toBe(true);
+}, 20000);
+
+test("a device that plays keeps the claim while another one plays too", async () => {
+  const mac = await computer("Mac", 60000, 100), main = await computer("main", 60000, 100);
+  await link(mac, main);
+  Object.assign(mac.fake.state, { items: [song("a")], position: 0, playing: true });
+  mac.network.claimOutput(mac.network.id);
+  await waitFor(() => main.network.claim.device === mac.network.id, "main following the Mac");
+  Object.assign(main.fake.state, { items: [song("b")], position: 0, playing: true });
+  await Bun.sleep(5000);
+  expect(main.network.claim.device).toBe(mac.network.id);
+  expect(mac.fake.state.playing).toBe(true);
+}, 15000);
 
 test("music started after pairing makes the other Peels follow", async () => {
   const mac = await computer("Mac"), main = await computer("main");
