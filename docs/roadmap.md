@@ -19,7 +19,7 @@ Peel started on 1 October 2026. Everything below is on `main` and in the nightly
 - **Windows.** Install Peel on a Windows PC from scratch and play a song. Windows has been tested much less than Linux and macOS.
 - **Hi-res recovery on real hardware.** Peel now restarts Apple Music in Android when it stops streaming. Confirm it on main after a night of updates.
 - **Less memory.** Peel with hi-res uses about 1.2 GB on main, most of it Android. The goal is as little as possible.
-- **Peel on phones.** First a remote that runs in the phone's browser, then an iPhone app that plays Hi-Res Lossless through a USB DAC and joins the device network. [mobile/README.md](../mobile/README.md) has the design and the open questions.
+- **Peel on phones.** An iPhone and iPad app in SwiftUI that plays Hi-Res Lossless itself through a USB DAC and joins the device network, then Android. [mobile/README.md](../mobile/README.md) has the design and the open questions.
 
 ## Ideas, not scheduled
 
