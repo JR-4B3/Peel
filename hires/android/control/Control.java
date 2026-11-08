@@ -97,7 +97,16 @@ public final class Control {
     // rate [hz]: switches the rate Android mixes at, through Peel's rate helper, and answers the
     // rate it mixes at. Without the helper the rate stays as it is.
     if (name.equals("rate")) return "{\"rate\":" + (arg.isEmpty() ? Rates.mixer() : Rates.set(Integer.parseInt(arg))) + "}";
-    Object c = session(false);
+    // restart: stops Apple Music, for a player that no longer streams. The next command finds no
+    // session, and the host starts Apple Music's playback service again.
+    if (name.equals("restart")) {
+      Runtime.getRuntime().exec(new String[] { "am", "force-stop", APPLE }).waitFor();
+      controller = null;
+      return "{\"ok\":true}";
+    }
+    // Every command looks Apple Music's session up again. The state, which the host reads many
+    // times a second, uses one at most a second old.
+    Object c = session(!name.equals("state"));
     if (c == null) return "{\"error\":\"no-session\"}";
     try { return apply(c, name, arg); }
     catch (java.lang.reflect.InvocationTargetException dead) {
@@ -225,9 +234,13 @@ public final class Control {
 
   // The session's controller binder. Apple Music creates its session when its playback service
   // starts, so a missing session is started with a media button.
-  static Object session(boolean refresh) throws Exception {
-    if (controller != null && !refresh) return controller;
-    controller = null;
+  // A session kept from an Apple Music that was stopped since still answers through system_server,
+  // with its last state, while commands to it go nowhere. So a kept session is at most a second old.
+  static long checked;
+  static synchronized Object session(boolean refresh) throws Exception {
+    long now = System.currentTimeMillis();
+    if (controller != null && !refresh && now - checked < 1000) return controller;
+    controller = null; checked = now;
     Object manager = Class.forName("android.media.session.ISessionManager$Stub").getMethod("asInterface", Class.forName("android.os.IBinder"))
       .invoke(null, Class.forName("android.os.ServiceManager").getMethod("getService", String.class).invoke(null, "media_session"));
     List<?> tokens = (List<?>) call(manager, "getSessions", null, 0);
