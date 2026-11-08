@@ -59,6 +59,7 @@ function apply(name: string, args: string[]): unknown {
 
 let controller: Server, api: ReturnType<typeof Bun.serve>, host: ReturnType<typeof Bun.spawn>, temporary: string;
 let port = 0, key = "";
+const lookups: string[] = [];
 async function send(path: string, body?: unknown, owner = process.pid, remote = false) {
   const response = await fetch(`http://127.0.0.1:${port}${path}`, {
     method: body === undefined ? "GET" : "POST", body: body === undefined ? undefined : JSON.stringify(body),
@@ -99,6 +100,8 @@ beforeAll(async () => {
   // The catalog knows song 301, which the cover test plays without Peel queuing it.
   api = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => {
     const path = new URL(request.url).pathname;
+    lookups.push(path);
+    if (/\/v1\/catalog\/de\/songs\/30[23]$/.test(path)) return new Response("unavailable", { status: 503 });
     if (path.endsWith("/v1/me/storefront")) return Response.json({ data: [{ id: "de", type: "storefronts" }] });
     if (path.endsWith("/v1/catalog/de/songs/301")) return Response.json({ data: [{ id: "301", type: "songs", attributes: { name: "Song 301", artistName: "Catalog", albumName: "Lookup", artwork: { url: "https://art.example/{w}x{h}.jpg" } } }] });
     return Response.json({ results: { songs: { data: [] } } });
@@ -269,6 +272,21 @@ test.skipIf(!supported)("a song Apple Music plays that Peel did not queue gets i
   let song: any;
   for (let attempt = 0; attempt < 100 && !song?.artwork?.url; attempt++) { song = (await send("/state")).body.playback.nowPlaying; await Bun.sleep(20); }
   expect(song).toMatchObject({ name: "Song 301", artwork: { url: "https://art.example/{w}x{h}.jpg" }, playParams: { id: "301" } });
+  const looked = (id: string) => lookups.filter(path => path.endsWith(`/songs/${id}`)).length;
+  expect(looked("301")).toBe(1);
+
+  // A later placeholder of the same song gets the cover without asking again.
+  android.queue = batchOf(["301"]); android.selected = 0;
+  song = (await send("/state")).body.playback.nowPlaying;
+  expect(song.artwork.url).toBe("https://art.example/{w}x{h}.jpg");
+  expect(looked("301")).toBe(1);
+
+  // Songs whose lookup fails are asked for once each, also while they alternate.
+  for (let round = 0; round < 6; round++) {
+    android.queue = batchOf([round % 2 ? "303" : "302"]); android.selected = 0;
+    await send("/state"); await Bun.sleep(30);
+  }
+  expect([looked("302"), looked("303")]).toEqual([1, 1]);
 }, 20000);
 
 const calls = async () => (await readFile(join(temporary, "calls"), "utf8").catch(() => "")).split("\n").filter(Boolean);

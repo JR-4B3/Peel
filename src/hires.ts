@@ -452,22 +452,32 @@ export async function runHiresHost() {
   }
   const playingSong = () => entries.get(current.item ?? -1)?.song;
   // Apple Music can play a song Peel did not queue, such as one a host before this one queued
-  // before it restarted. sync knows only its title. The song is looked up in the catalog once,
-  // for its cover, artist and heart, and a failed lookup is tried again after 30 seconds.
-  let looked: { id: string; failed?: number } | undefined;
+  // before it restarted. sync knows only its title. Each such song is looked up in the catalog
+  // once, for its cover and heart, and the result fills every placeholder of it, also later ones.
+  // A failed lookup of a song is tried again after 30 seconds.
+  const looked = new Map<string, { song?: Media; pending?: boolean; failed?: number }>();
+  const fill = (id: string, song: Media) => {
+    for (const known of entries.values()) if (known.unknown && known.song.id === id) { known.song = song; known.unknown = false; }
+  };
   function lookUp() {
     const entry = entries.get(current.item ?? -1), id = entry?.song.id;
     if (!entry?.unknown || !id || !/^\d+$/.test(id)) return;
-    if (looked?.id === id && (!looked.failed || Date.now() - looked.failed < 30000)) return;
-    const lookup: { id: string; failed?: number } = looked = { id };
+    const known = looked.get(id);
+    if (known?.song) return fill(id, known.song);
+    if (known?.pending || known?.failed && Date.now() - known.failed < 30000) return;
+    const lookup: { song?: Media; pending?: boolean; failed?: number } = { pending: true };
+    looked.delete(id); looked.set(id, lookup);
+    // Keeps the newest 200 songs.
+    for (const old of looked.keys()) { if (looked.size <= 200) break; looked.delete(old); }
     void apple.request(`v1/catalog/$STOREFRONT/songs/${encodeURIComponent(id)}`)
       .then(response => {
         const item = response.data?.[0];
         if (!item) { lookup.failed = Date.now(); return; }
-        const song = media(item);
-        for (const known of entries.values()) if (known.unknown && known.song.id === id) { known.song = song; known.unknown = false; }
+        lookup.song = media(item);
+        fill(id, lookup.song);
       })
-      .catch(() => { lookup.failed = Date.now(); });
+      .catch(() => { lookup.failed = Date.now(); })
+      .finally(() => { lookup.pending = false; });
   }
   async function checkRating() {
     const song = playingSong();
