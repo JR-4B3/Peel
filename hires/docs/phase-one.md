@@ -1,10 +1,10 @@
 # Hi-res Apple Music on Linux: phase one
 
-Result: Apple Music's own Android app, running in Waydroid on `main`, plays Hi-Res Lossless and the samples reach the Scarlett Solo unchanged. Only an Apple Music subscription is needed. No Google account, no Windows, no Mac.
+Result: Apple Music's own Android app, running in Waydroid on a Linux desktop, plays Hi-Res Lossless and the samples reach the USB audio interface unchanged. Only an Apple Music subscription is needed. No Google account, no Windows, no Mac.
 
 Measured on 2026-11-05:
 
-| Song | Apple's ALAC stream | Android mixer | PipeWire stream | Scarlett hardware | Samples exact? |
+| Song | Apple's ALAC stream | Android mixer | PipeWire stream | Audio interface | Samples exact? |
 | --- | --- | --- | --- | --- | --- |
 | Pink Floyd, "Time" (album 1065973699) | 96 kHz / 24-bit | 96 kHz float | F32LE 96 kHz | S32_LE 96 kHz | yes, 2,878,973 of 2,878,973 on the 24-bit grid over 15 s |
 | Miles Davis, "So What" (268443097) | 192 kHz / 24-bit | 192 kHz float | F32LE 192 kHz | S32_LE 192 kHz | yes, 3,837,946 of 3,837,946 over 10 s |
@@ -15,7 +15,7 @@ Measured on 2026-11-05:
 
 Each step below fixed one thing that blocked hi-res. They are all on `main` now.
 
-1. **Waydroid with the VANILLA image.** `dnf install waydroid android-tools`, then `waydroid init -s VANILLA -c https://ota.waydro.id/system -v https://ota.waydro.id/vendor`. Nobara's package ships without default OTA URLs, so `-c` and `-v` are required.
+1. **Waydroid with the VANILLA image.** `dnf install waydroid android-tools`, then `waydroid init -s VANILLA -c https://ota.waydro.id/system -v https://ota.waydro.id/vendor`. Some distributions package Waydroid without default OTA URLs, so `-c` and `-v` are required.
 2. **Apple Music APK without a Google account.** `apkeep -a com.apple.android.music -d apk-pure -o acknowledge_dangers=true,arch=x86_64`. The split APKs are signed by Apple (`CN=Apple Inc`); Android refuses mixed signatures, so the base APK is Apple's too. Installed with `adb install-multiple` (base, `config.x86_64`, `config.xhdpi`). Version 5.1.0-beta.
 3. **Root check.** The app refuses to start on "rooted devices". It checks `ro.build.tags` (`test-keys`), `ro.build.type` (`userdebug`) and a few `su` paths. Waydroid has no `su`; overriding the build props in `[properties]` of `/var/lib/waydroid/waydroid.cfg` and running `waydroid upgrade --offline` was enough. Side effect: Android shows "There's an internal problem with your device" once per boot because the fingerprints no longer match. It is harmless.
 4. **Network type.** The app picks its stream by network: Wi-Fi uses the Wi-Fi quality setting, cellular uses the cellular one, anything else falls back to AAC 256. Waydroid's network is Ethernet. `waydroid prop set persist.waydroid.fake_wifi com.apple.android.music` makes the app see Wi-Fi. This probably also causes the "You're Offline" screens.
