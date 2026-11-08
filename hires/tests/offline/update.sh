@@ -43,7 +43,8 @@ cmd_build() { [ -f "$STATE/play-during-build" ] && touch "$STATE/playing"; echo 
 
 eval "$(sed -n -e '/^build_sources() {/,/^}/p' -e '/^inputs_hash() {/,/^}/p' -e '/^cmd_activate() {/,/^}/p' -e '/^cmd_rollback() {/,/^}/p' \
   -e '/^restore_release() {/,/^}/p' -e '/^postpone() {/,/^}/p' -e '/^cmd_update() {/,/^}/p' \
-  -e '/^stop_unused() {/,/^}/p' -e '/^session_lock() {/,/^}/p' -e '/^release_android() {/,/^}/p' "$HIRES/bin/peel-hires")"
+  -e '/^stop_unused() {/,/^}/p' -e '/^session_lock() {/,/^}/p' -e '/^release_android() {/,/^}/p' -e '/^update_lock() {/,/^}/p' \
+  "$HIRES/bin/peel-hires")"
 
 failures=0
 expect() {  # expect <description> <command...>
@@ -119,5 +120,13 @@ expect "an unchanged update starts Android for the Apple Music check" happened "
 expect "an unchanged update stops Android again" not session_running
 fresh; rm "$STATE/session" "$STATE/host"; touch "$STATE/tests-fail"; update --force
 expect "a failed update stops the Android it started" not session_running
+
+# Setup holds the update lock from its start, so the watchdog can't stop Android under it, and
+# keeps it for the update it runs at the end.
+fresh
+expect "the update lock can be taken again by its holder" bash -c "$(declare -f update_lock); STATE='$STATE'; update_lock && update_lock"
+flock "$STATE/update.lock" sleep 2 & holder=$!; sleep 0.3
+expect "the update lock refuses a second process" not bash -c "$(declare -f update_lock); STATE='$STATE'; update_lock"
+wait "$holder"
 
 [ "$failures" = 0 ]

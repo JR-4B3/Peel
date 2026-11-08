@@ -120,8 +120,7 @@ cmd_session() {
     idle)  # run by Peel's hi-res host when the last Peel closes, while it still answers
       # An update, test or health check holds this lock while it uses Android, and stops Android
       # itself when it ends and no Peel uses it.
-      exec 9>"$STATE/update.lock"
-      flock -n 9 || { log "an update, test or health check is running; it stops Android when it ends"; return 0; }
+      update_lock || { log "an update, test or health check is running; it stops Android when it ends"; return 0; }
       session_lock || return 0
       stop_unused ;;
     status) waydroid status ;;
@@ -143,9 +142,20 @@ stop_unused() {
   cmd_session stop
 }
 
-# True while Peel's hi-res host (src/hires.ts) answers on its port, with any status.
+# True while Peel's hi-res host (src/hires.ts) runs. Peel starts it as the peel-hires-host unit
+# where systemd runs the session, on any port; elsewhere it answers on its port, with any status.
 host_running() {
+  systemctl --user -q is-active peel-hires-host.service 2>/dev/null && return 0
   [ "$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://127.0.0.1:${PEEL_HIRES_PORT:-10769}/state" 2>/dev/null)" != 000 ]
+}
+
+# Updates, setup, tests, builds and the watchdog hold this lock while they use Android, so
+# `session idle` and the watchdog don't stop it under them. Taken once per process: setup keeps
+# it for the update it runs at the end.
+update_lock() {
+  [ -n "${HOLDS_UPDATE_LOCK:-}" ] && return 0
+  exec 9>"$STATE/update.lock"; flock -n 9 || return 1
+  HOLDS_UPDATE_LOCK=1
 }
 
 # Held by cmd_controller while it starts Android for the host, and while Android is checked and
@@ -582,7 +592,7 @@ t_apple_play() {
 # `peel-hires test` by hand: holds the update lock, so Peel closing doesn't stop Android between
 # steps, and starts Android when it is stopped.
 test_standalone() {
-  exec 9>"$STATE/update.lock"; flock -n 9 || die "an update is running; wait for it with: peel-hires wait"
+  update_lock || die "an update is running; wait for it with: peel-hires wait"
   trap release_android EXIT
   session_running || cmd_session start
   cmd_test
@@ -645,6 +655,8 @@ preflight() {
 cmd_setup() {
   local id cur
   preflight
+  update_lock || die "an update is running; wait for it with: peel-hires wait"
+  trap release_android EXIT
   session_running || cmd_session start
   id=$(cmd_build) || die "building the first release failed"
   cur=$(root list | sed -n 's/^current=//p')
@@ -661,7 +673,7 @@ cmd_setup() {
 
 cmd_update() {
   local force=${1:-} id cur rc
-  exec 9>"$STATE/update.lock"; flock -n 9 || die "another update is running"
+  update_lock || die "another update is running"
   # Who runs the update, for `peel-hires wait` and anyone checking by hand.
   echo $$ > "$STATE/update.pid"
   trap 'rm -f "$STATE/update.pid"; release_android' EXIT
@@ -751,7 +763,7 @@ sys.exit(0 if any(s["properties"].get("application.name") == "Waydroid" and not 
 # unless music plays or an update holds the lock.
 cmd_watchdog() {
   systemctl --user -q is-active peel-hires-session@headless.service || systemctl --user -q is-active peel-hires-session@visible.service || return 0
-  exec 9>"$STATE/update.lock"; flock -n 9 || return 0
+  update_lock || return 0
   # Android left running without a Peel, for example after the host was killed, stops here.
   trap release_android EXIT
   local strikes=$STATE/watchdog.strikes problem=
@@ -822,7 +834,7 @@ EOF
 
 case "${1:-help}" in
   status)   cmd_status ;;
-  build)    cmd_build ;;
+  build)    update_lock || die "an update is running; wait for it with: peel-hires wait"; cmd_build ;;
   activate) shift; cmd_activate "$@" ;;
   rollback) cmd_rollback ;;
   test)     test_standalone ;;
@@ -834,7 +846,7 @@ case "${1:-help}" in
   trim)     trim_android ;;
   session)  shift; cmd_session "$@" ;;
   signin)   cmd_signin ;;
-  apple-update) shift; cmd_apple_update "$@" ;;
+  apple-update) shift; update_lock || die "an update is running; wait for it with: peel-hires wait"; cmd_apple_update "$@" ;;
   controller) cmd_controller ;;
   wait)     shift; cmd_wait "$@" ;;
   releases) root list ;;
