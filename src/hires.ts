@@ -15,8 +15,8 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { AppleMusic } from "./apple";
 import { cacheDir, configDir, readAppleSignIn, systemDir } from "./config";
-import { Engine, systemdSession } from "./engine";
-import type { Media, Playback } from "./types";
+import { Engine, ownerRole, systemdSession } from "./engine";
+import { media, type Media, type Playback } from "./types";
 
 export const hiresHome = process.env.PEEL_HIRES_HOME ?? join(systemDir("config"), "peel-hires-host");
 const hiresPort = Number(process.env.PEEL_HIRES_PORT ?? 10769);
@@ -79,7 +79,7 @@ async function launchHost() {
   const args = [process.execPath, "--smol", fileURLToPath(import.meta.url), "--hires-host"];
   // The host uses the folders this Peel resolved, so it writes its key where this Peel reads it.
   // systemd's user manager has its own environment and would otherwise use its defaults.
-  const environment: Record<string, string> = { PEEL_OWNER: String(process.pid), PEEL_HIRES_HOME: hiresHome, PEEL_CONFIG_DIR: configDir, PEEL_CACHE_DIR: cacheDir };
+  const environment: Record<string, string> = { PEEL_OWNER: String(process.pid), ...ownerRole(), PEEL_HIRES_HOME: hiresHome, PEEL_CONFIG_DIR: configDir, PEEL_CACHE_DIR: cacheDir };
   if (systemdSession()) {
     const settings = Object.entries(environment).map(([name, value]) => `--setenv=${name}=${value}`);
     // peel-hires reads the XDG folders for its own cache, state and settings.
@@ -105,7 +105,7 @@ const stopped = (state: { state?: number }) => state.state === PAUSED || state.s
 const repeats = ["none", "one", "all"] as const;
 
 interface Control { state?: number; position?: number; item?: number; title?: string; artist?: string; album?: string; id?: string; duration?: number; error?: string }
-interface Entry { queueId: number; song: Media; added: boolean }
+interface Entry { queueId: number; song: Media; added: boolean; unknown?: boolean }
 
 // A command that changes the queue or the playing song, sent when the connection closed or the
 // controller did not answer. Android may or may not have applied it, so it is not sent again: the
@@ -240,7 +240,7 @@ export async function runHiresHost() {
     if (!queue.length) { order = []; entries.clear(); synced = Date.now(); return; }
     const playing = queue[0]!.queueId, at = order.indexOf(playing);
     order = [...(at >= 0 ? order.slice(0, at) : []), ...queue.map(item => item.queueId)];
-    for (const item of queue) if (!entries.has(item.queueId)) entries.set(item.queueId, { queueId: item.queueId, added: false, song: { id: item.id, type: "songs", name: item.title, artist: "", album: "", duration: 0, catalogId: item.id } });
+    for (const item of queue) if (!entries.has(item.queueId)) entries.set(item.queueId, { queueId: item.queueId, added: false, unknown: true, song: { id: item.id, type: "songs", name: item.title, artist: "", album: "", duration: 0, catalogId: item.id } });
     // Songs of queues that were replaced are forgotten.
     const kept = new Set(order);
     for (const id of entries.keys()) if (!kept.has(id)) entries.delete(id);
@@ -451,6 +451,24 @@ export async function runHiresHost() {
     catch { return undefined; }
   }
   const playingSong = () => entries.get(current.item ?? -1)?.song;
+  // Apple Music can play a song Peel did not queue, such as one a host before this one queued
+  // before it restarted. sync knows only its title. The song is looked up in the catalog once,
+  // for its cover, artist and heart, and a failed lookup is tried again after 30 seconds.
+  let looked: { id: string; failed?: number } | undefined;
+  function lookUp() {
+    const entry = entries.get(current.item ?? -1), id = entry?.song.id;
+    if (!entry?.unknown || !id || !/^\d+$/.test(id)) return;
+    if (looked?.id === id && (!looked.failed || Date.now() - looked.failed < 30000)) return;
+    const lookup: { id: string; failed?: number } = looked = { id };
+    void apple.request(`v1/catalog/$STOREFRONT/songs/${encodeURIComponent(id)}`)
+      .then(response => {
+        const item = response.data?.[0];
+        if (!item) { lookup.failed = Date.now(); return; }
+        const song = media(item);
+        for (const known of entries.values()) if (known.unknown && known.song.id === id) { known.song = song; known.unknown = false; }
+      })
+      .catch(() => { lookup.failed = Date.now(); });
+  }
   async function checkRating() {
     const song = playingSong();
     if (!song) return;
@@ -460,6 +478,7 @@ export async function runHiresHost() {
   }
 
   function playback(): Playback {
+    if (current.title) lookUp();
     const song = playingSong();
     const playing = current.state === PLAYING || wanted && (current.state === BUFFERING || current.state === CONNECTING);
     if (song && Date.now() - rated.checked > (rated.id !== song.id || rated.value === undefined ? 3000 : 30000)) void checkRating();
@@ -636,9 +655,19 @@ export async function runHiresHost() {
   // Each Peel sends its process ID. Once every Peel that used the host has exited, the music
   // pauses, Android stops and the host exits. Android holds about 1.6 GB while it runs, and the
   // next Peel boots it again in about 7 seconds while the listener browses.
-  const owners = new Set<number>();
+  // An SSH helper marks itself remote. When the last Peel on this computer closes while only SSH
+  // controllers remain, the music pauses, as it does when that Peel is the last one. Android keeps
+  // running for the controllers, which can read the state and start the music again.
+  const owners = new Map<number, boolean>();
   const launcher = Number(process.env.PEEL_OWNER);
-  if (Number.isInteger(launcher) && launcher > 0) owners.add(launcher);
+  if (Number.isInteger(launcher) && launcher > 0) owners.set(launcher, process.env.PEEL_OWNER_REMOTE === "1");
+  // Removes owners, and pauses when the last Peel on this computer left and only SSH controllers
+  // remain. With no owner left, quitUnowned pauses and stops Android instead.
+  const leave = (pids: number[]) => {
+    let local = false;
+    for (const pid of pids) if (owners.has(pid)) { local ||= !owners.get(pid); owners.delete(pid); }
+    if (owners.size && local && ![...owners.values()].includes(false)) void call("pause").catch(() => {});
+  };
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } };
   // `peel-hires session idle` leaves Android running while an update or a sign-in uses it. It runs
   // between controller requests, so a Peel that attaches meanwhile waits and its first request
@@ -672,7 +701,7 @@ export async function runHiresHost() {
   };
   setInterval(() => {
     if (!owners.size) return;
-    for (const pid of owners) if (!alive(pid)) owners.delete(pid);
+    leave([...owners.keys()].filter(pid => !alive(pid)));
     if (!owners.size) void quitUnowned();
   }, 1000).unref();
 
@@ -706,11 +735,11 @@ export async function runHiresHost() {
       const known = Number.isInteger(owner) && owner > 0;
       const path = new URL(request.url).pathname;
       if (request.method === "POST" && path === "/release") {
-        if (known) owners.delete(owner);
+        if (known) leave([owner]);
         if (!owners.size) setTimeout(() => void quitUnowned(), 10);
         return reply(200, null);
       }
-      if (known) owners.add(owner);
+      if (known && !owners.has(owner)) owners.set(owner, request.headers.get("x-peel-remote") === "1");
       try {
         if (path === "/retain") return reply(200, null);
         if (path === "/state") {
