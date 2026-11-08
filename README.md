@@ -55,7 +55,7 @@ Apple's web player streams AAC at 256 kbps, and Apple decrypts Hi-Res Lossless o
 
 - Each song plays at its own rate, from 44.1 to 192 kHz. Measured bit-exact to a Focusrite Scarlett at 96 and 192 kHz.
 - Once it's set up, Peel uses it by itself. Search, the queue, lyrics and devices work the same.
-- The first start boots Android, which takes about 37 seconds. After that a new queue starts in about 50 ms.
+- Android runs only while Peel is open. Peel starts it as it opens, which takes about 7 seconds, so it is usually ready by the first song. After that a new queue starts in about 50 ms.
 - Android and Apple Music update themselves at night when nothing plays, and go back to the last working version if an update fails its tests.
 
 It needs an x86_64 PC and sudo once. [hires/README.md](hires/README.md) has the steps.

@@ -190,6 +190,15 @@ class Controller {
     this.chain = result;
     return result;
   }
+
+  // Runs task between requests: after those sent before it, and before any sent while it runs.
+  // The task may stop Android, so the connection is dropped after it and the next request starts
+  // Android again.
+  exclusive(task: () => Promise<void>): Promise<void> {
+    const result = this.chain.catch(() => {}).then(task).finally(() => { this.socket?.end(); this.drop(); });
+    this.chain = result;
+    return result;
+  }
 }
 
 function catalogOf(song: Media) {
@@ -631,15 +640,17 @@ export async function runHiresHost() {
   const launcher = Number(process.env.PEEL_OWNER);
   if (Number.isInteger(launcher) && launcher > 0) owners.add(launcher);
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } };
-  // `peel-hires session idle` leaves Android running while an update or a sign-in uses it.
-  const stopAndroid = async () => {
+  // `peel-hires session idle` leaves Android running while an update or a sign-in uses it. It runs
+  // between controller requests, so a Peel that attaches meanwhile waits and its first request
+  // starts Android again, instead of playing into an Android that is stopping.
+  const stopAndroid = () => control.exclusive(async () => {
     const command = hiresCommand();
     if (!command) return;
     const run = Bun.spawn([...command, "session", "idle"], { stdout: "ignore", stderr: "ignore" });
-    const timer = setTimeout(() => run.kill(), 60000);
+    const timer = setTimeout(() => run.kill(), 150000);
     await run.exited;
     clearTimeout(timer);
-  };
+  });
   const quit = async () => {
     await control.request("pause").catch(() => {});
     await stopAndroid();

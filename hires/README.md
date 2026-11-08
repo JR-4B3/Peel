@@ -76,7 +76,7 @@ The audio tests play into a temporary silent sink and put Waydroid's streams bac
 
 After a passing release it updates the Apple Music app and runs the tests again. Android won't downgrade an app without wiping its data, so a bad Apple Music version is reported, not undone. Last, if nothing is playing, it restarts Apple Music and stops Android's background apps (`peel-hires trim`). Apple Music grows from about 115 to 475 MB over a day of use.
 
-`peel-hires-watchdog.timer` runs `peel-hires watchdog` every 5 minutes. If Android stops answering over adb, isn't booted, or has no `system_server` in two checks in a row, it restarts the session and sends a notification. It waits while music plays or an update runs.
+`peel-hires-watchdog.timer` runs `peel-hires watchdog` every 5 minutes. If Android stops answering over adb, isn't booted, or has no `system_server` in two checks in a row, it restarts the session and sends a notification. It waits while music plays or an update runs. It also stops an Android that runs without a Peel, for example after Peel's host was killed.
 
 ## Playback from Peel
 
@@ -104,7 +104,7 @@ Turning off Android apps that playback doesn't use saved about 60 MB, but Androi
 
 Releases leave out SystemUI, the status bars and notifications, which saves about 150 MB. Android's default wallpaper is part of SystemUI, and Android 13's window manager holds the end of boot until a wallpaper is drawn. Without SystemUI it waited for its 30-second timeout, so Android booted in about 37 seconds. The framework overlay sets `config_checkWallpaperAtBoot` to false, and Android boots in about 6 seconds, also right after the PC starts with nothing cached. All tests pass without SystemUI.
 
-Android runs only while Peel uses it. When the last Peel closes, Peel's hi-res host pauses the music and runs `peel-hires session idle`, which stops Android unless an update or test holds the update lock, the sign-in window is open, or Android plays audio. The next Peel starts Android as it opens, and `peel-hires controller` answers about 7 seconds later. An update that starts Android stops it again when it ends, unless a Peel started using it meanwhile. The nightly update starts Android even when nothing changed, to check Apple Music's version.
+Android runs only while Peel uses it. When the last Peel closes, Peel's hi-res host pauses the music and runs `peel-hires session idle` between two controller requests, so a Peel that attaches meanwhile waits and then starts Android again. `session idle` stops Android unless the sign-in window is open or Android plays audio. An update, `peel-hires test` and the watchdog hold the update lock while they use Android; `session idle` then leaves Android to them, and each stops it when it ends unless a Peel's host answers on its port. Starting the controller and stopping Android take a second lock, so a stop that found no host finishes before that host's controller starts Android again. The next Peel starts Android as it opens, and `peel-hires controller` answers about 7 seconds later. The nightly update starts Android even when nothing changed, to check Apple Music's version.
 
 While it runs, Android's container holds about 1.6 GB: about 800 MiB of anonymous and kernel memory after Apple Music has played, and about 800 MiB of file cache, which the kernel can reclaim.
 

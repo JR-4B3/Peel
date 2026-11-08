@@ -117,9 +117,12 @@ cmd_session() {
       systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service peel-hires-display.service 2>/dev/null || true
       session_running && waydroid session stop >/dev/null 2>&1 || true
       log "session stopped" ;;
-    idle)  # run by Peel's hi-res host when the last Peel closes
-      # An update or test holds this lock while it uses Android. It stops Android itself when done.
-      exec 9>"$STATE/update.lock"; flock -n 9 || { log "an update is running; Android keeps running"; return 0; }
+    idle)  # run by Peel's hi-res host when the last Peel closes, while it still answers
+      # An update, test or health check holds this lock while it uses Android, and stops Android
+      # itself when it ends and no Peel uses it.
+      exec 9>"$STATE/update.lock"
+      flock -n 9 || { log "an update, test or health check is running; it stops Android when it ends"; return 0; }
+      session_lock || return 0
       stop_unused ;;
     status) waydroid status ;;
     run)  # used by the systemd unit: peel-hires session run <headless|visible>
@@ -145,13 +148,20 @@ host_running() {
   [ "$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://127.0.0.1:${PEEL_HIRES_PORT:-10769}/state" 2>/dev/null)" != 000 ]
 }
 
-# An update that started Android stops it again when it ends, unless Peel started using it.
-release_after_update() {
-  [ -n "${UPDATE_STARTED_ANDROID:-}" ] || return 0
-  host_running && return 0
-  stop_unused || true
+# Held by cmd_controller while it starts Android for the host, and while Android is checked and
+# stopped. The host listens before it asks for the controller, so a stop that finds no host
+# finishes before that host's controller starts Android again.
+session_lock() {
+  exec 7>"$STATE/session.lock"
+  flock -w 120 7 || { log "Android is being started or stopped elsewhere; leaving it as it is"; return 1; }
 }
 
+# Run by everything that holds the update lock, when it ends: stops Android unless a Peel uses it.
+release_android() {
+  session_lock || return 0
+  host_running || stop_unused || true
+  flock -u 7
+}
 # An earlier version turned these apps off to save about 60 MB. Without a home screen app or
 # with the persistent Phone app off, Android's boot slowed by 2 seconds or stalled, so they are
 # turned on again. The nightly trim stops the ones that linger instead. Without the boot
@@ -261,6 +271,7 @@ build_overlay() {  # prints the path of the overlay APK for the current source
       die "could not copy Android's framework"
   fi
   if [ ! -s "$work/key.p12" ]; then
+    rm -f "$work/key.p12.part"
     keytool -genkeypair -keystore "$work/key.p12.part" -storetype pkcs12 -storepass peel-overlay -alias peel -keyalg RSA -keysize 2048 \
       -validity 36500 -dname CN=Peel >/dev/null 2>&1 && mv "$work/key.p12.part" "$work/key.p12" || die "could not make the overlay's signing key"
   fi
@@ -446,6 +457,7 @@ apple_apk() { A shell pm path "$APPLE" 2>/dev/null | head -1 | sed 's/^package:/
 # left alone. The controller loads Apple's classes from its APK, so an update replaces it.
 cmd_controller() {
   local host dex build apk=""
+  session_lock || die "Android is being started or stopped elsewhere"
   dex=$(build_dex Control) || exit 1
   build=$(basename "$(dirname "$dex")")
   if session_running && adb_connect >/dev/null 2>&1; then apk=$(apple_apk); fi
@@ -567,6 +579,15 @@ t_apple_play() {
   python3 "$HIRES/tests/apple-play.py" --adb "$(adb_target)" --rate "$TEST_RATE"
 }
 
+# `peel-hires test` by hand: holds the update lock, so Peel closing doesn't stop Android between
+# steps, and starts Android when it is stopped.
+test_standalone() {
+  exec 9>"$STATE/update.lock"; flock -n 9 || die "an update is running; wait for it with: peel-hires wait"
+  trap release_android EXIT
+  session_running || cmd_session start
+  cmd_test
+}
+
 cmd_test() {
   local id; id=$(root list | sed -n 's/^current=//p')
   log "testing release ${id:-unknown}"
@@ -643,8 +664,7 @@ cmd_update() {
   exec 9>"$STATE/update.lock"; flock -n 9 || die "another update is running"
   # Who runs the update, for `peel-hires wait` and anyone checking by hand.
   echo $$ > "$STATE/update.pid"
-  UPDATE_STARTED_ANDROID=; session_running || UPDATE_STARTED_ANDROID=1
-  trap 'rm -f "$STATE/update.pid"; release_after_update' EXIT
+  trap 'rm -f "$STATE/update.pid"; release_android' EXIT
   if postpone "$force"; then return 75; fi
   local key; key="$(latest | awk '{print $2}' | tr '\n' ' ')$(inputs_hash) $(host_versions | sha256sum | cut -c1-8)"
   if [ "$force" = --force ] || [ "$(cat "$STATE/seen" 2>/dev/null)" != "$key" ]; then
@@ -732,6 +752,8 @@ sys.exit(0 if any(s["properties"].get("application.name") == "Waydroid" and not 
 cmd_watchdog() {
   systemctl --user -q is-active peel-hires-session@headless.service || systemctl --user -q is-active peel-hires-session@visible.service || return 0
   exec 9>"$STATE/update.lock"; flock -n 9 || return 0
+  # Android left running without a Peel, for example after the host was killed, stops here.
+  trap release_android EXIT
   local strikes=$STATE/watchdog.strikes problem=
   if ! session_running; then problem="the session is not running"
   elif ! adb_connect; then problem="adb can't reach Android"
@@ -803,7 +825,7 @@ case "${1:-help}" in
   build)    cmd_build ;;
   activate) shift; cmd_activate "$@" ;;
   rollback) cmd_rollback ;;
-  test)     cmd_test ;;
+  test)     test_standalone ;;
   update)   shift; cmd_update "$@" ;;
   setup)    cmd_setup ;;
   preflight) preflight; log "ready for setup" ;;
@@ -828,7 +850,7 @@ peel-hires: Apple Music in hi-res through a slimmed Waydroid
   activate ID         switch to a release; it becomes the fallback once Android boots on it
                       (waits if music is playing; --force to override)
   rollback            switch back to the last confirmed release
-  test                run the test suite against the running release
+  test                run the test suite against the active release, starting Android if needed
   session start [--visible] | stop | idle | status
                       idle stops Android unless an update, a sign-in or Android's audio uses it
   signin              open Apple Music visibly to sign in; hides it again when done
