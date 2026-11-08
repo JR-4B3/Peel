@@ -122,6 +122,7 @@ The last sidebar entry. Enter changes the highlighted row, and Peel saves it to 
 | Audio quality | High (AAC, 256 kbps) or Standard (AAC, 64 kbps, a quarter of the data). With hi-res, Apple Music's Android app chooses, and the row says Hi-Res Lossless. |
 | Updates | Stable or Nightly, and a row that checks now and restarts into a new version. |
 | Hearts in Favourite Songs | Show the heart on every row there, or hide it. |
+| Memory | On Linux, what Peel uses on this computer: the interface, its players and Android, without file cache that Linux can free. |
 | Devices, Forget paired devices | Open the devices popup, or take this computer out of its group. |
 | Control over SSH | Appears after `peel --remote <host>`. |
 
