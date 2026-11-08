@@ -108,12 +108,15 @@ if [[ -e "$peel_desktop" ]] && ! grep -q '^X-Peel-Launcher=true$' "$peel_desktop
   echo 'An existing peel.desktop belongs to another program. Leaving it in place.' >&2
   exit 1
 fi
-# Desktop Exec fields have their own quoting rules, separate from shell quoting.
+# Desktop Exec fields have their own quoting rules, separate from shell quoting. Inside double
+# quotes a backslash escapes \, ", ` and $. The whole value is then a desktop entry string, whose
+# own escapes double every backslash, and % is doubled for the field codes.
 desktop_quote() {
   local value=${1//\\/\\\\}
   value=${value//\"/\\\"}
   value=${value//\$/\\\$}
   value=${value//\`/\\\`}
+  value=${value//\\/\\\\}
   printf '%s' "${value//%/%%}"
 }
 peel_desktop_launcher=$(desktop_quote "$peel_launcher")

@@ -105,3 +105,10 @@ export async function saveTerminalConfig(preferences: Preferences, dir = configD
   await writeFile(partial, lines.join("\n") + "\n");
   await rename(partial, path);
 }
+
+// Saves the settings, and Ghostty's config first when the Text size changes, so a failed write
+// saves neither. Windows opens Peel in Windows Terminal and has no Ghostty config.
+export async function savePreferences(value: Preferences, previous: Preferences, dir = configDir) {
+  if (process.platform !== "win32" && value.textSize !== previous.textSize) await saveTerminalConfig(value, dir);
+  await saveJson("layout.json", value, dir);
+}

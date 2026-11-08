@@ -1,6 +1,6 @@
 import { createCliRenderer } from "@opentui/core";
 import { AppleMusic } from "./apple";
-import { cacheDir, readAppleSignIn, readCache, readPreferences, saveJson, saveTerminalConfig } from "./config";
+import { cacheDir, readAppleSignIn, readCache, readPreferences, saveJson, savePreferences, saveTerminalConfig } from "./config";
 import { Engine, ensureEngine, stopEngine } from "./engine";
 import { Hires, ensureHires, hiresSelected } from "./hires";
 import { DevicePlayer, validHost } from "./remote";
@@ -71,13 +71,9 @@ try {
       },
     });
     const renderer = await createCliRenderer({ exitOnCtrlC: false, useMouse: true, targetFps: 10 });
-    // The Ghostty config follows the Text size setting, and is written only when that changes.
-    let textSize = preferences.textSize;
-    const save = async (value: typeof preferences) => {
-      await saveJson("layout.json", value);
-      if (value.textSize !== textSize) { await saveTerminalConfig(value); textSize = value.textSize; }
-    };
-    const model = new Model(library, player, preferences, save, {
+    // Ghostty's config is written again at each start, so it matches the saved Text size.
+    if (process.platform !== "win32") await saveTerminalConfig(preferences).catch(() => {});
+    const model: Model = new Model(library, player, preferences, (value): Promise<void> => savePreferences(value, model.preferences), {
       read: () => readCache("home.json"), write: value => saveJson("home.json", value, cacheDir),
     });
     model.wake = wake;

@@ -239,9 +239,12 @@ describe("the rendered player", () => {
     await app.mockMouse.scroll(title.x, title.y, "down"); await app.mockMouse.scroll(title.x, title.y, "down");
     await waitFor(() => Math.abs(app.model.playback.volume - 0.45) < 0.001);
     expect(called(app, "volume").at(-1)!.args).toEqual([0.45]);
-    // Sideways scrolling leaves it alone, and a list under the wheel scrolls instead.
-    await app.mockMouse.scroll(title.x, title.y, "left"); await app.mockMouse.scroll(app.ui.grid.x + 2, app.ui.grid.y + 2, "down");
+    // Sideways scrolling leaves it alone, and the song list under the wheel scrolls instead.
+    expect(app.ui.tracks.visible && app.ui.tracks.rows.length).toBeGreaterThan(1);
+    const before = app.ui.tracks.index;
+    await app.mockMouse.scroll(title.x, title.y, "left"); await app.mockMouse.scroll(app.ui.tracks.x + 2, app.ui.tracks.y + 1, "down");
     await app.flush(); await Bun.sleep(50);
+    expect(app.ui.tracks.index).toBeGreaterThan(before);
     expect(Math.abs(app.model.playback.volume - 0.45)).toBeLessThan(0.001);
   });
 
