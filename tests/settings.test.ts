@@ -120,11 +120,16 @@ async function releases() {
   const server: ReturnType<typeof Bun.serve> = Bun.serve({ port: 0, fetch(request): Response {
     const url = new URL(request.url), [, , channel, file] = url.pathname.split("/");
     const base: string = `http://127.0.0.1:${server.port}/files`;
-    if (url.pathname === "/releases/latest" || url.pathname === "/releases/tags/nightly") {
-      const name = url.pathname.endsWith("nightly") ? "nightly" : "stable";
-      if (!builds[name]) return new Response("", { status: 404 });
-      return Response.json({ assets: ["peel.tar.gz", "SHASUMS256.txt", "version.json"].map(asset => ({ name: asset, browser_download_url: `${base}/${name}/${asset}` })) });
-    }
+    const assets = (name: string) => ["peel.tar.gz", "SHASUMS256.txt", "version.json"].map(asset => ({ name: asset, browser_download_url: `${base}/${name}/${asset}` }));
+    // As on GitHub, the engine's release is the "latest" one and has no Peel files.
+    const engine = { tag_name: "engine-v44.5.1+wvcus", prerelease: false, assets: [{ name: "SHASUMS256.txt", browser_download_url: `${base}/engine/SHASUMS256.txt` }] };
+    if (url.pathname === "/releases/latest") return Response.json(engine);
+    if (url.pathname === "/releases") return Response.json([
+      ...builds.nightly ? [{ tag_name: "nightly", prerelease: true, assets: assets("nightly") }] : [],
+      engine,
+      ...builds.stable ? [{ tag_name: `v${builds.stable.version}`, prerelease: false, assets: assets("stable") }] : [],
+    ]);
+    if (url.pathname === "/releases/tags/nightly") return builds.nightly ? Response.json({ tag_name: "nightly", prerelease: true, assets: assets("nightly") }) : new Response("", { status: 404 });
     const release = builds[channel ?? ""];
     if (!release) return new Response("", { status: 404 });
     if (file === "peel.tar.gz") return new Response(release.archive);
@@ -161,6 +166,8 @@ test("a release installs beside the running one and becomes current, and a damag
 test("a channel without a release says so", async () => {
   const { update } = await releases();
   await expect(update.latestRelease("nightly")).rejects.toThrow("no nightly release");
+  // The engine's release and the nightly prerelease are not stable releases.
+  await expect(update.latestRelease("stable")).rejects.toThrow("no stable release");
 });
 
 

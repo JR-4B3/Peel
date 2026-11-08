@@ -512,16 +512,18 @@ export class Model extends EventEmitter {
   async activate(item: Media) {
     if (item.type.includes("artists")) return this.openArtist(item);
     if (item.type.includes("albums") || item.type.includes("playlists")) return this.openCollection(item);
-    const key = JSON.stringify([this.view, item.type, item.id, item.queueIndex]);
+    const collection = this.collection;
+    // A filtered list plays in its displayed order. Cider can only queue whole collections, so it plays the song alone.
+    const list = this.shown;
+    const index = list === this.items || this.player.queuesItems ? list.indexOf(item) : -1;
+    // A double-click on one row starts it once. The row's place is part of the key, so another
+    // copy of the same song in the list is a new choice.
+    const key = JSON.stringify([this.view, item.type, item.id, item.queueIndex, list.indexOf(item)]);
     const previous = this.activation;
     if (previous?.key === key && (previous.pending || Date.now() - previous.started < 500)) {
       await previous.promise;
       return;
     }
-    const collection = this.collection;
-    // A filtered list plays in its displayed order. Cider can only queue whole collections, so it plays the song alone.
-    const list = this.shown;
-    const index = list === this.items || this.player.queuesItems ? list.indexOf(item) : -1;
     const activation = { key, started: Date.now(), pending: true, promise: Promise.resolve() };
     this.activation = activation;
     activation.promise = (async () => {
@@ -774,15 +776,17 @@ export class Model extends EventEmitter {
   }
 
   async reorder(id: string, direction: number) {
-    const entries = this.entries(true).map(item => item.id);
-    const index = entries.indexOf(id), target = index + direction;
-    if (index < 0 || target < 0 || target >= entries.length) return;
-    [entries[index], entries[target]] = [entries[target], entries[index]];
-    await this.persist({ ...this.preferences, order: entries });
+    await this.persist(current => {
+      // entries() sorts by this.preferences, which is the saved order this change builds on.
+      const entries = this.entries(true).map(item => item.id);
+      const index = entries.indexOf(id), target = index + direction;
+      if (index < 0 || target < 0 || target >= entries.length) return current;
+      [entries[index], entries[target]] = [entries[target], entries[index]];
+      return { ...current, order: entries };
+    });
   }
   async hide(id: string) {
-    const hidden = this.preferences.hidden.includes(id) ? this.preferences.hidden.filter(value => value !== id) : [...this.preferences.hidden, id];
-    await this.persist({ ...this.preferences, hidden });
+    await this.persist(current => ({ ...current, hidden: current.hidden.includes(id) ? current.hidden.filter(value => value !== id) : [...current.hidden, id] }));
   }
   // Peels on the network, for the devices popup. index.ts fills them from src/devices.ts.
   devices: DeviceView[] = [];
@@ -801,7 +805,7 @@ export class Model extends EventEmitter {
     const device = this.devices.find(device => device.id === id);
     return this.switchTarget(async () => {
       await this.onPlayOn?.(id);
-      if (this.preferences.remote) await this.persist({ ...this.preferences, remote: undefined });
+      if (this.preferences.remote) await this.persist({ remote: undefined });
       return device?.self ? "Playing on this computer" : `Playing on ${device?.name ?? "the other device"}`;
     });
   }
@@ -842,7 +846,7 @@ export class Model extends EventEmitter {
         await this.refreshing;
         const previous = this.preferences.remote;
         await this.onOutput?.(host);
-        if (!await this.persist({ ...this.preferences, remote: host }, `Controlling ${host ?? "this computer"}`)) {
+        if (!await this.persist({ remote: host }, `Controlling ${host ?? "this computer"}`)) {
           await this.onOutput?.(previous);
           return;
         }
@@ -868,16 +872,24 @@ export class Model extends EventEmitter {
 
   // Changes one setting on the settings page and saves it with the layout.
   async setPreference(change: Partial<Preferences>, message: string) {
-    const previous = this.preferences;
-    if (!await this.persist({ ...previous, ...change }, message)) return;
+    let previous = this.preferences;
+    if (!await this.persist(current => { previous = current; return { ...current, ...change }; }, message)) return;
     if (change.quality && change.quality !== previous.quality && this.connected) {
       await this.player.setQuality?.(change.quality).catch(error => this.fail(error));
     }
     if (change.channel && change.channel !== previous.channel) this.onChannel();
   }
 
-  private async persist(value: Preferences, message = "Layout saved") {
-    try { await this.save(value); this.preferences = value; this.status = message; this.changed(); return true; }
-    catch (error) { this.fail(error); return false; }
+  // Saves a change to the preferences. Changes save one at a time, and each one applies to what the
+  // one before it saved, so a second change made during a save never writes over the first.
+  private saving: Promise<unknown> = Promise.resolve();
+  private persist(change: Partial<Preferences> | ((current: Preferences) => Preferences), message = "Layout saved") {
+    const result = this.saving.then(async () => {
+      const value = typeof change === "function" ? change(this.preferences) : { ...this.preferences, ...change };
+      try { await this.save(value); this.preferences = value; this.status = message; this.changed(); return true; }
+      catch (error) { this.fail(error); return false; }
+    });
+    this.saving = result;
+    return result;
   }
 }
