@@ -117,14 +117,39 @@ cmd_session() {
       systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service peel-hires-display.service 2>/dev/null || true
       session_running && waydroid session stop >/dev/null 2>&1 || true
       log "session stopped" ;;
+    idle)  # run by Peel's hi-res host when the last Peel closes
+      # An update or test holds this lock while it uses Android. It stops Android itself when done.
+      exec 9>"$STATE/update.lock"; flock -n 9 || { log "an update is running; Android keeps running"; return 0; }
+      stop_unused ;;
     status) waydroid status ;;
     run)  # used by the systemd unit: peel-hires session run <headless|visible>
       if [ "${2:-}" = headless ]; then export WAYLAND_DISPLAY=$HEADLESS_DISPLAY
       else export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-$(systemctl --user show-environment | sed -n 's/^WAYLAND_DISPLAY=//p')}; fi
       export XDG_SESSION_TYPE=wayland
       exec waydroid session start ;;
-    *) die "usage: peel-hires session start [--visible] | stop | status" ;;
+    *) die "usage: peel-hires session start [--visible] | stop | idle | status" ;;
   esac
+}
+
+# Android holds about 1.6 GB while it runs and boots in about 7 seconds, so it runs only while
+# Peel plays through it. Stops the session unless a sign-in window is open or Android plays audio.
+stop_unused() {
+  session_running || return 0
+  systemctl --user -q is-active peel-hires-session@visible.service && { log "the sign-in window is open; Android keeps running"; return 0; }
+  android_streaming && { log "Android is playing audio; it keeps running"; return 0; }
+  cmd_session stop
+}
+
+# True while Peel's hi-res host (src/hires.ts) answers on its port, with any status.
+host_running() {
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://127.0.0.1:${PEEL_HIRES_PORT:-10769}/state" 2>/dev/null)" != 000 ]
+}
+
+# An update that started Android stops it again when it ends, unless Peel started using it.
+release_after_update() {
+  [ -n "${UPDATE_STARTED_ANDROID:-}" ] || return 0
+  host_running && return 0
+  stop_unused || true
 }
 
 # An earlier version turned these apps off to save about 60 MB. Without a home screen app or
@@ -618,7 +643,8 @@ cmd_update() {
   exec 9>"$STATE/update.lock"; flock -n 9 || die "another update is running"
   # Who runs the update, for `peel-hires wait` and anyone checking by hand.
   echo $$ > "$STATE/update.pid"
-  trap 'rm -f "$STATE/update.pid"' EXIT
+  UPDATE_STARTED_ANDROID=; session_running || UPDATE_STARTED_ANDROID=1
+  trap 'rm -f "$STATE/update.pid"; release_after_update' EXIT
   if postpone "$force"; then return 75; fi
   local key; key="$(latest | awk '{print $2}' | tr '\n' ' ')$(inputs_hash) $(host_versions | sha256sum | cut -c1-8)"
   if [ "$force" = --force ] || [ "$(cat "$STATE/seen" 2>/dev/null)" != "$key" ]; then
@@ -652,6 +678,8 @@ cmd_update() {
     log "images, inputs and host software unchanged"
   fi
   postpone "$force" && return 75
+  # The Apple Music update reads the installed version through Android.
+  session_running || cmd_session start
   update_apple
   trim_android
 }
@@ -801,7 +829,8 @@ peel-hires: Apple Music in hi-res through a slimmed Waydroid
                       (waits if music is playing; --force to override)
   rollback            switch back to the last confirmed release
   test                run the test suite against the running release
-  session start [--visible] | stop | status
+  session start [--visible] | stop | idle | status
+                      idle stops Android unless an update, a sign-in or Android's audio uses it
   signin              open Apple Music visibly to sign in; hides it again when done
   apple-update        update the Apple Music app (checks Apple's signature)
   controller          start Android and Peel's playback controller if needed; prints where it listens

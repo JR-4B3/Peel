@@ -2,6 +2,6 @@
 <resources>
   <!-- Android's window manager holds the end of boot until a wallpaper is drawn. The default
        wallpaper lives in SystemUI, which releases leave out, so boot waited 30 seconds for a
-       timeout. Without this check Android boots in about 10 seconds instead of 37. -->
+       timeout. Without this check Android boots in about 6 seconds instead of 37. -->
   <bool name="config_checkWallpaperAtBoot">false</bool>
 </resources>

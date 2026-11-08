@@ -2,7 +2,7 @@
 // Android or Apple. The simulated controller applies commands as Apple Music does, and each test
 // can make it fail a command, ignore it, or drop the connection after applying it.
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -100,8 +100,9 @@ beforeAll(async () => {
   const cache = join(temporary, "cache");
   await mkdir(cache);
   await writeFile(join(cache, "apple-developer-token.json"), JSON.stringify({ token: "offline", expires: Date.now() + 7 * 86400000 }));
+  // The simulated peel-hires records each call, and answers `controller` with the controller's address.
   const command = join(temporary, "controller");
-  await writeFile(command, `#!/bin/sh\nprintf '%s\\n' '{"host":"127.0.0.1","port":${controlPort},"key":"offline"}'\n`, { mode: 0o700 });
+  await writeFile(command, `#!/bin/sh\necho "$*" >> '${join(temporary, "calls")}'\n[ "$1" = controller ] && printf '%s\\n' '{"host":"127.0.0.1","port":${controlPort},"key":"offline"}'\nexit 0\n`, { mode: 0o700 });
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   port = reservation.port!; reservation.stop(true);
   const home = join(temporary, "host");
@@ -250,12 +251,18 @@ test.skipIf(!supported)("a start that stays buffering restarts Apple Music once 
 }, 20000);
 
 // Last: the host exits at the end.
-test.skipIf(!supported)("a Peel that attaches while the last one leaves keeps the host", async () => {
+test.skipIf(!supported)("a Peel that attaches while the last one leaves keeps the host and Android", async () => {
+  const calls = async () => (await readFile(join(temporary, "calls"), "utf8").catch(() => "")).split("\n").filter(Boolean);
   const other = Bun.spawn(["sleep", "30"]);
   try {
     await Promise.all([send("/release", {}), send("/retain", undefined, other.pid)]);
     expect(await Promise.race([host.exited, Bun.sleep(1000).then(() => "running")])).toBe("running");
+    expect(await calls()).not.toContain("session idle");
+    // The last Peel leaves: the music pauses, Android stops, and the host exits.
+    android.state = 3;
     await send("/release", {}, other.pid);
     expect(await Promise.race([host.exited, Bun.sleep(3000).then(() => "running")])).toBe(0);
+    expect(android.state).toBe(2);
+    expect(await calls()).toContain("session idle");
   } finally { other.kill(); }
 }, 20000);
