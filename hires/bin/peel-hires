@@ -117,16 +117,61 @@ cmd_session() {
       systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service peel-hires-display.service 2>/dev/null || true
       session_running && waydroid session stop >/dev/null 2>&1 || true
       log "session stopped" ;;
+    idle)  # run by Peel's hi-res host when the last Peel closes, while it still answers
+      # An update, test or health check holds this lock while it uses Android, and stops Android
+      # itself when it ends and no Peel uses it.
+      update_lock || { log "an update, test or health check is running; it stops Android when it ends"; return 0; }
+      session_lock || return 0
+      stop_unused ;;
     status) waydroid status ;;
     run)  # used by the systemd unit: peel-hires session run <headless|visible>
       if [ "${2:-}" = headless ]; then export WAYLAND_DISPLAY=$HEADLESS_DISPLAY
       else export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-$(systemctl --user show-environment | sed -n 's/^WAYLAND_DISPLAY=//p')}; fi
       export XDG_SESSION_TYPE=wayland
       exec waydroid session start ;;
-    *) die "usage: peel-hires session start [--visible] | stop | status" ;;
+    *) die "usage: peel-hires session start [--visible] | stop | idle | status" ;;
   esac
 }
 
+# Android holds about 1.6 GB while it runs and boots in about 7 seconds, so it runs only while
+# Peel plays through it. Stops the session unless a sign-in window is open or Android plays audio.
+stop_unused() {
+  session_running || return 0
+  systemctl --user -q is-active peel-hires-session@visible.service && { log "the sign-in window is open; Android keeps running"; return 0; }
+  android_streaming && { log "Android is playing audio; it keeps running"; return 0; }
+  cmd_session stop
+}
+
+# True while Peel's hi-res host (src/hires.ts) runs. Peel starts it as the peel-hires-host unit
+# where systemd runs the session, on any port; elsewhere it answers on its port, with any status.
+host_running() {
+  systemctl --user -q is-active peel-hires-host.service 2>/dev/null && return 0
+  [ "$(curl -s -o /dev/null -w '%{http_code}' -m 2 "http://127.0.0.1:${PEEL_HIRES_PORT:-10769}/state" 2>/dev/null)" != 000 ]
+}
+
+# Updates, setup, tests, builds and the watchdog hold this lock while they use Android, so
+# `session idle` and the watchdog don't stop it under them. Taken once per process: setup keeps
+# it for the update it runs at the end.
+update_lock() {
+  [ -n "${HOLDS_UPDATE_LOCK:-}" ] && return 0
+  exec 9>"$STATE/update.lock"; flock -n 9 || return 1
+  HOLDS_UPDATE_LOCK=1
+}
+
+# Held by cmd_controller while it starts Android for the host, and while Android is checked and
+# stopped. The host listens before it asks for the controller, so a stop that finds no host
+# finishes before that host's controller starts Android again.
+session_lock() {
+  exec 7>"$STATE/session.lock"
+  flock -w 120 7 || { log "Android is being started or stopped elsewhere; leaving it as it is"; return 1; }
+}
+
+# Run by everything that holds the update lock, when it ends: stops Android unless a Peel uses it.
+release_android() {
+  session_lock || return 0
+  host_running || stop_unused || true
+  flock -u 7
+}
 # An earlier version turned these apps off to save about 60 MB. Without a home screen app or
 # with the persistent Phone app off, Android's boot slowed by 2 seconds or stalled, so they are
 # turned on again. The nightly trim stops the ones that linger instead. Without the boot
@@ -188,7 +233,8 @@ host_versions() { { waydroid --version; lxc-start --version; uname -r; } 2>/dev/
 # decide whether to build; cmd_build hashes what they compile to, to name the release.
 build_sources() {
   echo "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$HIRES/android/audio_hw.c" \
-    "$HIRES/android/build-hal.sh" "$HIRES/android/control/RateServe.java" "$ROOT_HELPER"
+    "$HIRES/android/build-hal.sh" "$HIRES/android/control/RateServe.java" "$HIRES/android/overlay/AndroidManifest.xml" \
+    "$HIRES/android/overlay/res/values/config.xml" "$ROOT_HELPER"
 }
 # A missing or unreadable file hashes differently from its content, so it never matches by mistake.
 inputs_hash() {
@@ -209,24 +255,66 @@ build_hal() {  # prints the directory holding the two driver builds for the curr
   echo "$out"
 }
 
+# android/overlay: framework settings the release needs, as a static resource overlay. Google's
+# aapt2 compiles it (downloaded once and checked against its SHA-256), linked against the running
+# Android's framework, and the JDK's jarsigner signs it with a key made once for this machine.
+# Android needs some signature on every package; which key signs an overlay doesn't matter.
+AAPT2_VERSION=9.4.1-15978811
+AAPT2_SHA256=f5bebd466ecf14d341fd465f2756a16d86052f29eb4532003d5ff7bcffd08de5
+build_overlay() {  # prints the path of the overlay APK for the current source
+  local src="$HIRES/android/overlay" h out work="$CACHE/overlay-work" aapt2="$CACHE/bin/aapt2-$AAPT2_VERSION"
+  h=$( (cd "$src" && find . -type f | LC_ALL=C sort | xargs sha256sum; echo "$AAPT2_VERSION") | sha256sum | cut -c1-12)
+  out="$CACHE/overlay/$h"
+  [ -f "$out/peel-overlay.apk" ] && { echo "$out/peel-overlay.apk"; return 0; }
+  log "building the framework overlay"
+  if [ ! -x "$aapt2" ]; then
+    mkdir -p "$CACHE/bin"
+    curl -fsSL -o "$aapt2.jar" "https://dl.google.com/android/maven2/com/android/tools/build/aapt2/$AAPT2_VERSION/aapt2-$AAPT2_VERSION-linux.jar" || die "could not download aapt2"
+    [ "$(sha256sum "$aapt2.jar" | cut -d' ' -f1)" = "$AAPT2_SHA256" ] || { rm -f "$aapt2.jar"; die "aapt2 did not match its checksum"; }
+    unzip -p "$aapt2.jar" aapt2 > "$aapt2.part" && chmod 755 "$aapt2.part" && mv "$aapt2.part" "$aapt2" || die "could not unpack aapt2"
+    rm -f "$aapt2.jar"
+  fi
+  mkdir -p "$work"
+  if [ ! -s "$work/framework-res.apk" ]; then
+    session_running && adb_connect || die "the overlay build needs Android's framework; start the session first"
+    A pull /system/framework/framework-res.apk "$work/framework-res.apk.part" >/dev/null && mv "$work/framework-res.apk.part" "$work/framework-res.apk" ||
+      die "could not copy Android's framework"
+  fi
+  if [ ! -s "$work/key.p12" ]; then
+    rm -f "$work/key.p12.part"
+    keytool -genkeypair -keystore "$work/key.p12.part" -storetype pkcs12 -storepass peel-overlay -alias peel -keyalg RSA -keysize 2048 \
+      -validity 36500 -dname CN=Peel >/dev/null 2>&1 && mv "$work/key.p12.part" "$work/key.p12" || die "could not make the overlay's signing key"
+  fi
+  rm -rf "$out.part"; mkdir -p "$out.part"
+  "$aapt2" compile --dir "$src/res" -o "$out.part/res.zip" >&2 &&
+    "$aapt2" link --manifest "$src/AndroidManifest.xml" -I "$work/framework-res.apk" -o "$out.part/peel-overlay.apk" "$out.part/res.zip" >&2 ||
+    die "compiling the overlay failed"
+  java -m jdk.jartool/sun.security.tools.jarsigner.Main -keystore "$work/key.p12" -storepass peel-overlay -sigalg SHA256withRSA -digestalg SHA-256 \
+    "$out.part/peel-overlay.apk" peel >/dev/null 2>&1 || die "signing the overlay failed (needs the JDK's jdk.jartool module)"
+  rm -f "$out.part/res.zip"; rm -rf "$out"; mv "$out.part" "$out"
+  echo "$out/peel-overlay.apk"
+}
+
 # Callers run this as `id=$(cmd_build) || ...`, which turns off set -e inside it, so every step
 # checks its own failure.
 cmd_build() {
-  local images hal rate sys ven id in f
+  local images hal rate overlay sys ven id in f
   images=$(latest) || exit 1
   hal=$(build_hal) || exit 1
   rate=$(build_dex RateServe) || exit 1
+  overlay=$(build_overlay) || exit 1
   sys=$(awk '$1=="system"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
   ven=$(awk '$1=="vendor"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
   [ -n "$sys" ] && [ -n "$ven" ] || die "unexpected image list: $images"
   # The root helper builds the release, so a new helper, which may add to releases, builds anew.
-  id="s$sys-v$ven-$(cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$rate" "$ROOT_HELPER" | sha256sum | cut -c1-8)"
+  id="s$sys-v$ven-$(cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$rate" "$overlay" "$ROOT_HELPER" | sha256sum | cut -c1-8)"
   local built; built=$(root list) || die "could not list the releases"
   if grep -q "\"id\":\"$id\"" <<<"$built"; then log "release $id already built"; echo "$id"; return; fi
   # The helper reads these with the user's permissions and fetches and verifies the images itself.
   in="$CACHE/inputs/$id"; rm -rf "$in"; mkdir -p "$in" || die "cannot create $in"
   cp "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$in/" || die "cannot stage the inputs"
   cp "$rate" "$in/peel-rate.dex" || die "cannot stage the rate helper"
+  cp "$overlay" "$in/peel-overlay.apk" || die "cannot stage the overlay"
   log "repacking release $id"
   root repack "$in" "$id" >&2 || die "repacking $id failed"
   rm -rf "$in"
@@ -379,6 +467,7 @@ apple_apk() { A shell pm path "$APPLE" 2>/dev/null | head -1 | sed 's/^package:/
 # left alone. The controller loads Apple's classes from its APK, so an update replaces it.
 cmd_controller() {
   local host dex build apk=""
+  session_lock || die "Android is being started or stopped elsewhere"
   dex=$(build_dex Control) || exit 1
   build=$(basename "$(dirname "$dex")")
   if session_running && adb_connect >/dev/null 2>&1; then apk=$(apple_apk); fi
@@ -500,6 +589,15 @@ t_apple_play() {
   python3 "$HIRES/tests/apple-play.py" --adb "$(adb_target)" --rate "$TEST_RATE"
 }
 
+# `peel-hires test` by hand: holds the update lock, so Peel closing doesn't stop Android between
+# steps, and starts Android when it is stopped.
+test_standalone() {
+  update_lock || die "an update is running; wait for it with: peel-hires wait"
+  trap release_android EXIT
+  session_running || cmd_session start
+  cmd_test
+}
+
 cmd_test() {
   local id; id=$(root list | sed -n 's/^current=//p')
   log "testing release ${id:-unknown}"
@@ -543,6 +641,7 @@ preflight() {
   done
   [ -x /usr/bin/weston ] || missing+=(/usr/bin/weston)
   if command -v java >/dev/null && ! java -m jdk.compiler/com.sun.tools.javac.Main -version >/dev/null 2>&1; then missing+=("a JDK 17 or later with javac"); fi
+  if command -v java >/dev/null && ! java --list-modules 2>/dev/null | grep -q '^jdk\.jartool@'; then missing+=("a JDK with jarsigner (jdk.jartool)"); fi
   [ ${#missing[@]} = 0 ] || die "missing: ${missing[*]}. On Fedora, sudo hires/install.sh \"\$USER\" installs them. Elsewhere, install them with your distribution's packages (see hires/README.md)."
   [ -f /var/lib/waydroid/waydroid.cfg ] || die "Waydroid is not initialized. Run: sudo waydroid init -s VANILLA (sudo hires/install.sh does this)"
   systemctl -q is-active waydroid-container || die "Waydroid's container is not running. Run: sudo systemctl enable --now waydroid-container"
@@ -556,6 +655,8 @@ preflight() {
 cmd_setup() {
   local id cur
   preflight
+  update_lock || die "an update is running; wait for it with: peel-hires wait"
+  trap release_android EXIT
   session_running || cmd_session start
   id=$(cmd_build) || die "building the first release failed"
   cur=$(root list | sed -n 's/^current=//p')
@@ -572,10 +673,10 @@ cmd_setup() {
 
 cmd_update() {
   local force=${1:-} id cur rc
-  exec 9>"$STATE/update.lock"; flock -n 9 || die "another update is running"
+  update_lock || die "another update is running"
   # Who runs the update, for `peel-hires wait` and anyone checking by hand.
   echo $$ > "$STATE/update.pid"
-  trap 'rm -f "$STATE/update.pid"' EXIT
+  trap 'rm -f "$STATE/update.pid"; release_android' EXIT
   if postpone "$force"; then return 75; fi
   local key; key="$(latest | awk '{print $2}' | tr '\n' ' ')$(inputs_hash) $(host_versions | sha256sum | cut -c1-8)"
   if [ "$force" = --force ] || [ "$(cat "$STATE/seen" 2>/dev/null)" != "$key" ]; then
@@ -609,6 +710,8 @@ cmd_update() {
     log "images, inputs and host software unchanged"
   fi
   postpone "$force" && return 75
+  # The Apple Music update reads the installed version through Android.
+  session_running || cmd_session start
   update_apple
   trim_android
 }
@@ -660,7 +763,9 @@ sys.exit(0 if any(s["properties"].get("application.name") == "Waydroid" and not 
 # unless music plays or an update holds the lock.
 cmd_watchdog() {
   systemctl --user -q is-active peel-hires-session@headless.service || systemctl --user -q is-active peel-hires-session@visible.service || return 0
-  exec 9>"$STATE/update.lock"; flock -n 9 || return 0
+  update_lock || return 0
+  # Android left running without a Peel, for example after the host was killed, stops here.
+  trap release_android EXIT
   local strikes=$STATE/watchdog.strikes problem=
   if ! session_running; then problem="the session is not running"
   elif ! adb_connect; then problem="adb can't reach Android"
@@ -729,10 +834,10 @@ EOF
 
 case "${1:-help}" in
   status)   cmd_status ;;
-  build)    cmd_build ;;
+  build)    update_lock || die "an update is running; wait for it with: peel-hires wait"; cmd_build ;;
   activate) shift; cmd_activate "$@" ;;
   rollback) cmd_rollback ;;
-  test)     cmd_test ;;
+  test)     test_standalone ;;
   update)   shift; cmd_update "$@" ;;
   setup)    cmd_setup ;;
   preflight) preflight; log "ready for setup" ;;
@@ -741,7 +846,7 @@ case "${1:-help}" in
   trim)     trim_android ;;
   session)  shift; cmd_session "$@" ;;
   signin)   cmd_signin ;;
-  apple-update) shift; cmd_apple_update "$@" ;;
+  apple-update) shift; update_lock || die "an update is running; wait for it with: peel-hires wait"; cmd_apple_update "$@" ;;
   controller) cmd_controller ;;
   wait)     shift; cmd_wait "$@" ;;
   releases) root list ;;
@@ -757,8 +862,9 @@ peel-hires: Apple Music in hi-res through a slimmed Waydroid
   activate ID         switch to a release; it becomes the fallback once Android boots on it
                       (waits if music is playing; --force to override)
   rollback            switch back to the last confirmed release
-  test                run the test suite against the running release
-  session start [--visible] | stop | status
+  test                run the test suite against the active release, starting Android if needed
+  session start [--visible] | stop | idle | status
+                      idle stops Android unless an update, a sign-in or Android's audio uses it
   signin              open Apple Music visibly to sign in; hides it again when done
   apple-update        update the Apple Music app (checks Apple's signature)
   controller          start Android and Peel's playback controller if needed; prints where it listens

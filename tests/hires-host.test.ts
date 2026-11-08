@@ -2,7 +2,7 @@
 // Android or Apple. The simulated controller applies commands as Apple Music does, and each test
 // can make it fail a command, ignore it, or drop the connection after applying it.
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { mkdir, mkdtemp, rm, writeFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -100,8 +100,16 @@ beforeAll(async () => {
   const cache = join(temporary, "cache");
   await mkdir(cache);
   await writeFile(join(cache, "apple-developer-token.json"), JSON.stringify({ token: "offline", expires: Date.now() + 7 * 86400000 }));
-  const command = join(temporary, "controller");
-  await writeFile(command, `#!/bin/sh\nprintf '%s\\n' '{"host":"127.0.0.1","port":${controlPort},"key":"offline"}'\n`, { mode: 0o700 });
+  // The simulated peel-hires records each call, answers `controller` with the controller's
+  // address, and takes half a second to stop Android.
+  const command = join(temporary, "controller"), log = join(temporary, "calls");
+  await writeFile(command, [
+    "#!/bin/sh",
+    `echo "$*" >> '${log}'`,
+    `[ "$1" = controller ] && printf '%s\\n' '{"host":"127.0.0.1","port":${controlPort},"key":"offline"}'`,
+    `[ "$1 $2" = "session idle" ] && { /bin/sleep 0.5; echo stopped >> '${log}'; }`,
+    "exit 0", "",
+  ].join("\n"), { mode: 0o700 });
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   port = reservation.port!; reservation.stop(true);
   const home = join(temporary, "host");
@@ -249,13 +257,34 @@ test.skipIf(!supported)("a start that stays buffering restarts Apple Music once 
   expect(android.restarts).toBe(2);
 }, 20000);
 
+const calls = async () => (await readFile(join(temporary, "calls"), "utf8").catch(() => "")).split("\n").filter(Boolean);
+
+test.skipIf(!supported)("a Peel that attaches while Android stops plays after Android starts again", async () => {
+  await send("/release", {});
+  for (let attempt = 0; attempt < 100 && !(await calls()).includes("session idle"); attempt++) await Bun.sleep(20);
+  const before = (await calls()).length;
+  // Attaches and plays while Android is still stopping.
+  await play("201");
+  const after = (await calls()).slice(before - 1);
+  expect(after.indexOf("stopped")).toBeGreaterThanOrEqual(0);
+  expect(after.indexOf("controller")).toBeGreaterThan(after.indexOf("stopped"));
+  expect(android.queue.map(item => item.id)).toEqual(["201"]);
+  expect(await Promise.race([host.exited, Bun.sleep(1500).then(() => "running")])).toBe("running");
+}, 20000);
+
 // Last: the host exits at the end.
-test.skipIf(!supported)("a Peel that attaches while the last one leaves keeps the host", async () => {
+test.skipIf(!supported)("a Peel that attaches while the last one leaves keeps the host and Android", async () => {
   const other = Bun.spawn(["sleep", "30"]);
+  const stops = async () => (await calls()).filter(call => call === "session idle").length, earlier = await stops();
   try {
     await Promise.all([send("/release", {}), send("/retain", undefined, other.pid)]);
     expect(await Promise.race([host.exited, Bun.sleep(1000).then(() => "running")])).toBe("running");
+    expect(await stops()).toBe(earlier);
+    // The last Peel leaves: the music pauses, Android stops, and the host exits.
+    android.state = 3;
     await send("/release", {}, other.pid);
     expect(await Promise.race([host.exited, Bun.sleep(3000).then(() => "running")])).toBe(0);
+    expect(android.state).toBe(2);
+    expect(await stops()).toBe(earlier + 1);
   } finally { other.kill(); }
 }, 20000);

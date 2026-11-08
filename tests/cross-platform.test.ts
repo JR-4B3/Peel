@@ -192,6 +192,40 @@ test.skipIf(process.platform === "win32")("#14 the Mac launcher's Ghostty comman
 });
 
 
+// A desktop entry's Exec value as the Desktop Entry spec reads it: string escapes first, then
+// arguments, where double quotes group and a backslash inside them escapes the next character.
+function desktopArgs(exec: string) {
+  const text = exec.replace(/\\(.)/g, (escape, next: string) => ({ s: " ", n: "\n", t: "\t", r: "\r", "\\": "\\" } as Record<string, string>)[next] ?? escape);
+  const args: string[] = [];
+  let current = "", quoted = false, started = false;
+  for (let index = 0; index < text.length; index++) {
+    const char = text[index]!;
+    if (quoted) {
+      if (char === "\\") current += text[++index];
+      else if (char === '"') quoted = false;
+      else current += char;
+    } else if (char === '"') { quoted = true; started = true; }
+    else if (char === " ") { if (started) args.push(current); current = ""; started = false; }
+    else { current += char; started = true; }
+  }
+  if (started) args.push(current);
+  return args.map(arg => arg.replaceAll("%%", "%"));
+}
+
+// Issue #78: the Linux menu entry passes Peel's ghostty.conf to Ghostty, quoted for the desktop entry.
+test.skipIf(process.platform !== "linux")("the Linux menu entry opens Ghostty with Peel's ghostty.conf, whatever the folder names", async () => {
+  const dir = await temporary(), bin = join(dir, "bin"), home = join(dir, "home's \\ 100%"), config = join(dir, 'my $config "q" `b`');
+  await mkdir(bin, { recursive: true }); await mkdir(home, { recursive: true });
+  for (const name of ["bun", "ghostty"]) await writeFile(join(bin, name), "#!/bin/sh\nexit 0\n", { mode: 0o755 });
+  const run = Bun.spawnSync(["bash", new URL("../scripts/install-local.sh", import.meta.url).pathname], {
+    env: { HOME: home, PATH: `${bin}:/usr/bin:/bin`, XDG_CONFIG_HOME: config }, stdout: "pipe", stderr: "pipe",
+  });
+  expect(run.exitCode, run.stderr.toString()).toBe(0);
+  const entry = await readFile(join(home, ".local/share/applications/peel.desktop"), "utf8");
+  const args = desktopArgs(entry.split("\n").find(line => line.startsWith("Exec="))!.slice(5));
+  expect(args.slice(-3)).toEqual([`--config-file=?${join(config, "peel", "ghostty.conf")}`, "-e", join(home, ".local/bin/peel")]);
+});
+
 test("the engine installer accepts castlabs binary-mode checksum filenames", async () => {
   const target = join(await temporary(), "engine");
   const archive = zip([{ name: "version", data: electronVersion.slice(1) }]);

@@ -44,7 +44,7 @@ SYSTEM_OTA=https://ota.waydro.id/system/lineage/waydroid_x86_64/VANILLA.json
 VENDOR_OTA=https://ota.waydro.id/vendor/waydroid_x86_64/MAINLINE.json
 INPUTS=(manifest.conf audio.primary.waydroid.32.so audio.primary.waydroid.64.so audio_policy_configuration.xml)
 # Optional inputs: a release without them still builds.
-OPTIONAL_INPUTS=(peel-rate.dex)
+OPTIONAL_INPUTS=(peel-rate.dex peel-overlay.apk)
 
 die() { echo "peel-hires-root: $*" >&2; exit 1; }
 [ "$(id -u)" = 0 ] || die "must run as root (through sudo)"
@@ -231,6 +231,10 @@ for name, rel in (("audio.primary.waydroid.32.so", "lib/hw/audio.primary.waydroi
 # caller's code and runs only inside Android.
 if os.path.exists(os.path.join(inputs, "peel-rate.dex")):
     write("vendor", "etc/peel-rate.dex", open(os.path.join(inputs, "peel-rate.dex"), "rb").read())
+# Peel's framework overlay (android/overlay). Android applies static overlays in the product
+# partition from the first boot. Like the rate helper, it only changes Android itself.
+if os.path.exists(os.path.join(inputs, "peel-overlay.apk")):
+    write("system", "system/product/overlay/PeelOverlay.apk", open(os.path.join(inputs, "peel-overlay.apk"), "rb").read())
 
 # A 64-bit-only zygote: the primary block of the stock 64/32 configuration.
 stock = read("system", "system/etc/init/hw/init.zygote64_32.rc")

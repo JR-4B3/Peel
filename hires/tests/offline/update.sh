@@ -25,6 +25,9 @@ settle_container() { :; }
 cmd_session() { echo "session $1" >>"$STATE/events"; [ "$1" = stop ] && rm -f "$STATE/session"; [ "$1" = start ] && touch "$STATE/session"; return 0; }
 session_running() { [ -f "$STATE/session" ]; }
 apple_playing() { [ -f "$STATE/playing" ]; }
+host_running() { [ -f "$STATE/host" ]; }
+android_streaming() { [ -f "$STATE/playing" ]; }
+systemctl() { return 1; }
 # The root helper's records. Activation fails when asked to and then restores what was current,
 # as the real helper's transaction does.
 root() {
@@ -39,17 +42,20 @@ root() {
 cmd_build() { [ -f "$STATE/play-during-build" ] && touch "$STATE/playing"; echo built >>"$STATE/events"; echo C; }
 
 eval "$(sed -n -e '/^build_sources() {/,/^}/p' -e '/^inputs_hash() {/,/^}/p' -e '/^cmd_activate() {/,/^}/p' -e '/^cmd_rollback() {/,/^}/p' \
-  -e '/^restore_release() {/,/^}/p' -e '/^postpone() {/,/^}/p' -e '/^cmd_update() {/,/^}/p' "$HIRES/bin/peel-hires")"
+  -e '/^restore_release() {/,/^}/p' -e '/^postpone() {/,/^}/p' -e '/^cmd_update() {/,/^}/p' \
+  -e '/^stop_unused() {/,/^}/p' -e '/^session_lock() {/,/^}/p' -e '/^release_android() {/,/^}/p' -e '/^update_lock() {/,/^}/p' \
+  "$HIRES/bin/peel-hires")"
 
 failures=0
 expect() {  # expect <description> <command...>
   local name=$1; shift
   if "$@"; then echo "pass $name"; else echo "FAIL $name"; failures=$((failures + 1)); fi
 }
-# A, the confirmed release, is current, and B is the fallback before it. The session runs.
+# A, the confirmed release, is current, and B is the fallback before it. The session runs, and
+# a Peel's hi-res host uses it.
 fresh() {
   rm -f "$STATE"/*
-  echo A >"$STATE/current"; echo A >"$STATE/good"; echo B >"$STATE/previous"; touch "$STATE/session" "$STATE/events"
+  echo A >"$STATE/current"; echo A >"$STATE/good"; echo B >"$STATE/previous"; touch "$STATE/session" "$STATE/events" "$STATE/host"
 }
 # Not inside || or if: bash would ignore set -e in cmd_update, as it never does when peel-hires runs it.
 update() { local rc; set +e; (cmd_update "$@") >/dev/null 2>&1; rc=$?; set -e; echo "$rc" >"$STATE/rc"; }
@@ -94,5 +100,33 @@ expect "failed tests fail the update" rc 1
 expect "failed tests switch back to A" happened "activate A"
 expect "failed tests do not use the relative rollback" not happened rollback
 expect "failed tests keep A, confirmed, with B before it" records "A A B"
+
+# Android runs only while Peel uses it: an update stops it when it ends, unless a Peel's host
+# answers. This covers a Peel that closed during the update, whose host left Android to it.
+fresh; rm "$STATE/session" "$STATE/host"; update --force
+expect "an update stops the Android it started" not session_running
+expect "an update that started Android passes" rc 0
+fresh; rm "$STATE/session"; update --force
+expect "an update leaves Android running for a Peel that started meanwhile" session_running
+fresh; rm "$STATE/host"; update --force
+expect "an update stops Android that no Peel uses" not session_running
+fresh; update --force
+expect "an update leaves Android running for a Peel" session_running
+fresh; touch "$STATE/playing"; update
+expect "a postponed update leaves Android running for the Peel playing" session_running
+fresh; rm "$STATE/session" "$STATE/host"; echo "$(latest | awk '{print $2}' | tr '\n' ' ')$(inputs_hash) $(host_versions | sha256sum | cut -c1-8)" >"$STATE/seen"
+update
+expect "an unchanged update starts Android for the Apple Music check" happened "session start"
+expect "an unchanged update stops Android again" not session_running
+fresh; rm "$STATE/session" "$STATE/host"; touch "$STATE/tests-fail"; update --force
+expect "a failed update stops the Android it started" not session_running
+
+# Setup holds the update lock from its start, so the watchdog can't stop Android under it, and
+# keeps it for the update it runs at the end.
+fresh
+expect "the update lock can be taken again by its holder" bash -c "$(declare -f update_lock); STATE='$STATE'; update_lock && update_lock"
+flock "$STATE/update.lock" sleep 2 & holder=$!; sleep 0.3
+expect "the update lock refuses a second process" not bash -c "$(declare -f update_lock); STATE='$STATE'; update_lock"
+wait "$holder"
 
 [ "$failures" = 0 ]

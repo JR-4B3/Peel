@@ -15,7 +15,7 @@ hires/install.sh --user         # peel-hires CLI, systemd units, PipeWire sample
 peel-hires setup                # first release, Apple Music, sign-in, then the full test
 ```
 
-`sudo hires/install.sh` installs the commands the pipeline runs with `dnf` on Fedora and its derivatives: Waydroid, LXC, erofs-utils, Weston, android-tools, a JDK with `javac` and `keytool` (java-21-openjdk-devel), python3, curl, unzip, git, pulseaudio-utils and pipewire-utils. On other distributions it lists the commands that are missing and stops before it changes anything, so install those packages first and run it again. It then initializes stock Waydroid with `waydroid init -s VANILLA` when `/var/lib/waydroid/waydroid.cfg` does not exist yet, which downloads about 1 GB, and enables `waydroid-container`.
+`sudo hires/install.sh` installs the commands the pipeline runs with `dnf` on Fedora and its derivatives: Waydroid, LXC, erofs-utils, Weston, android-tools, a JDK 17 or later whose `java` has the compiler and jarsigner modules, and `keytool` (java-headless, the release's default JDK), python3, curl, unzip, git, pulseaudio-utils and pipewire-utils. On other distributions it lists the commands that are missing and stops before it changes anything, so install those packages first and run it again. It then initializes stock Waydroid with `waydroid init -s VANILLA` when `/var/lib/waydroid/waydroid.cfg` does not exist yet, which downloads about 1 GB, and enables `waydroid-container`.
 
 `peel-hires setup` first runs `peel-hires preflight`, which checks the architecture, these commands, the JDK, an initialized and running Waydroid, the root helper and the user units. It names whatever is missing and stops before it starts Android or builds anything.
 
@@ -33,6 +33,7 @@ Setup authorizes this machine's adb key inside Android through the root helper, 
 - runs Android with only the 64-bit zygote;
 - adds Peel's audio driver ([`android/audio_hw.c`](android/audio_hw.c), built by [`android/build-hal.sh`](android/build-hal.sh)), which opens streams at the rate and format Android asks for;
 - adds the audio policy ([`android/audio_policy_configuration.xml`](android/audio_policy_configuration.xml)) that runs Android's mixer at 192 kHz float;
+- adds Peel's framework overlay ([`android/overlay`](android/overlay)), a static resource overlay in the product partition. It turns off the window manager's wait for a wallpaper at boot. `peel-hires` builds it with Google's aapt2, downloaded once and checked against its SHA-256, and signs it with the JDK's jarsigner and a key made once in `~/.cache/peel-hires/overlay-work`;
 - sets release build tags, which Apple Music requires;
 - skips Android's boot animation, which nobody sees on the invisible display and which held back each boot by about 5 seconds;
 - writes both images as EROFS, compressed as the manifest's `[build]` section says: zstd at level 15, which makes a release 796 MB instead of 1,055 MB with LZ4HC and boots as fast. The build runs at low priority on half the cores.
@@ -75,7 +76,7 @@ The audio tests play into a temporary silent sink and put Waydroid's streams bac
 
 After a passing release it updates the Apple Music app and runs the tests again. Android won't downgrade an app without wiping its data, so a bad Apple Music version is reported, not undone. Last, if nothing is playing, it restarts Apple Music and stops Android's background apps (`peel-hires trim`). Apple Music grows from about 115 to 475 MB over a day of use.
 
-`peel-hires-watchdog.timer` runs `peel-hires watchdog` every 5 minutes. If Android stops answering over adb, isn't booted, or has no `system_server` in two checks in a row, it restarts the session and sends a notification. It waits while music plays or an update runs.
+`peel-hires-watchdog.timer` runs `peel-hires watchdog` every 5 minutes. If Android stops answering over adb, isn't booted, or has no `system_server` in two checks in a row, it restarts the session and sends a notification. It waits while music plays or an update runs. It also stops an Android that runs without a Peel, for example after Peel's host was killed.
 
 ## Playback from Peel
 
@@ -101,7 +102,11 @@ The controller uses about 42 MB (PSS). Apple Music without its screen uses about
 
 Turning off Android apps that playback doesn't use saved about 60 MB, but Android then booted 2 seconds slower without a home screen app, and stalled when the persistent Phone app was off. `peel-hires` therefore keeps all apps on, and the nightly trim stops the ones that linger.
 
-Releases leave out SystemUI, the status bars and notifications, which saves about 150 MB. Android then boots in about 37 seconds instead of 11, because its window manager waits for a lock screen that SystemUI would draw until a timeout. Android boots once and then keeps running, so only the first start after the PC starts waits longer. All tests pass without SystemUI. With Apple Music playing, Android uses about 450 to 500 MiB of anonymous and kernel memory.
+Releases leave out SystemUI, the status bars and notifications, which saves about 150 MB. Android's default wallpaper is part of SystemUI, and Android 13's window manager holds the end of boot until a wallpaper is drawn. Without SystemUI it waited for its 30-second timeout, so Android booted in about 37 seconds. The framework overlay sets `config_checkWallpaperAtBoot` to false, and Android boots in about 6 seconds, also right after the PC starts with nothing cached. All tests pass without SystemUI.
+
+Android runs only while Peel uses it. When the last Peel closes, Peel's hi-res host pauses the music and runs `peel-hires session idle` between two controller requests, so a Peel that attaches meanwhile waits and then starts Android again. `session idle` stops Android unless the sign-in window is open or Android plays audio. Setup, updates, `peel-hires test`, `build`, `apple-update` and the watchdog hold the update lock while they use Android, so `session idle` and the watchdog leave Android to them. Setup, updates, tests and the watchdog stop it when they end unless Peel's host runs: the `peel-hires-host` unit is active, or something answers on the host's port. Starting the controller and stopping Android take a second lock, so a stop that found no host finishes before that host's controller starts Android again. The next Peel starts Android as it opens, and `peel-hires controller` answers about 7 seconds later. The nightly update starts Android even when nothing changed, to check Apple Music's version.
+
+While it runs, Android's container holds about 1.6 GB: about 800 MiB of anonymous and kernel memory after Apple Music has played, and about 800 MiB of file cache, which the kernel can reclaim.
 
 `peel-hires prune` deletes stock Waydroid's images (2.4 GB) once no release state refers to them, and the image zips in `~/.cache/peel-hires/downloads`, which the root helper keeps its own verified copies of. It and every passing update also remove releases that are neither active, confirmed, nor the fallback.
 

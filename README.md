@@ -55,7 +55,7 @@ Apple's web player streams AAC at 256 kbps, and Apple decrypts Hi-Res Lossless o
 
 - Each song plays at its own rate, from 44.1 to 192 kHz. Measured bit-exact to a Focusrite Scarlett at 96 and 192 kHz.
 - Once it's set up, Peel uses it by itself. Search, the queue, lyrics and devices work the same.
-- The first start boots Android, which takes about 37 seconds. After that a new queue starts in about 50 ms.
+- Android runs only while Peel is open. Peel starts it as it opens, which takes about 7 seconds, so it is usually ready by the first song. After that a new queue starts in about 50 ms.
 - Android and Apple Music update themselves at night when nothing plays, and go back to the last working version if an update fails its tests.
 
 It needs an x86_64 PC and sudo once. [hires/README.md](hires/README.md) has the steps.
@@ -78,7 +78,7 @@ Everything also works with the mouse. `?` lists the keys for the current screen,
 | Play or pause | Space, or Ctrl+P while typing |
 | Previous, next | `p`, `n` |
 | Seek ten seconds | Left, Right. Shift+Left and Shift+Right on covers |
-| Volume | `-`, `+` |
+| Volume | `-`, `+`, or the mouse wheel over the player |
 | Shuffle, repeat | `s`, `r` |
 | Move around | Tab and Shift+Tab, arrow keys, Enter. Page Up, Page Down, Home, End in long lists |
 | Back | Escape or Backspace |
@@ -103,6 +103,7 @@ The last entry in the sidebar.
 | Audio quality | High (256 kbps) or Standard (64 kbps, a quarter of the data). With hi-res, Apple Music's own setting chooses. |
 | Updates | Stable or Nightly, and a row that checks now and restarts into a new version. |
 | Hearts in Favourite Songs | Show the heart on every row there, or hide it. |
+| Text size | Ghostty's font size when Peel opens from its menu entry or app, on Linux and macOS. A menu entry installed before 0.1.1 needs `peel --install-launcher` once. |
 | Memory | On Linux, how much memory Peel uses, Android included. |
 | Devices | Pair a device, or forget the paired ones. |
 

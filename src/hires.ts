@@ -55,8 +55,8 @@ export class Hires extends Engine {
   async appleTokens(): Promise<{ userToken: string; storefront?: string }> { throw new Error("The hi-res player has no Apple sign-in."); }
 }
 
-// Starts the host when it is not running and waits until Android and Apple Music answer. The first
-// start boots Android, which takes about ten seconds.
+// Starts the host when it is not running and waits until Android and Apple Music answer. Android
+// runs only while a Peel uses it, so this usually boots it, which takes about 7 seconds.
 export async function ensureHires(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal) {
   const state = () => engine.state().catch(() => undefined);
   let current = await state();
@@ -187,6 +187,15 @@ class Controller {
       return value;
     };
     const result = this.chain.catch(() => {}).then(() => run(true));
+    this.chain = result;
+    return result;
+  }
+
+  // Runs task between requests: after those sent before it, and before any sent while it runs.
+  // The task may stop Android, so the connection is dropped after it and the next request starts
+  // Android again.
+  exclusive(task: () => Promise<void>): Promise<void> {
+    const result = this.chain.catch(() => {}).then(task).finally(() => { this.socket?.end(); this.drop(); });
     this.chain = result;
     return result;
   }
@@ -625,21 +634,41 @@ export async function runHiresHost() {
   const playbackMethods = new Set(["pause", "stop", "resume", "toggle", "next", "previous", "seek", "play", "jump", "enqueue", "importPlayback", "recover"]);
 
   // Each Peel sends its process ID. Once every Peel that used the host has exited, the music
-  // pauses and the host exits. Android keeps running for the next start.
+  // pauses, Android stops and the host exits. Android holds about 1.6 GB while it runs, and the
+  // next Peel boots it again in about 7 seconds while the listener browses.
   const owners = new Set<number>();
   const launcher = Number(process.env.PEEL_OWNER);
   if (Number.isInteger(launcher) && launcher > 0) owners.add(launcher);
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } };
+  // `peel-hires session idle` leaves Android running while an update or a sign-in uses it. It runs
+  // between controller requests, so a Peel that attaches meanwhile waits and its first request
+  // starts Android again, instead of playing into an Android that is stopping.
+  const stopAndroid = () => control.exclusive(async () => {
+    const command = hiresCommand();
+    if (!command) return;
+    const run = Bun.spawn([...command, "session", "idle"], { stdout: "ignore", stderr: "ignore" });
+    const timer = setTimeout(() => run.kill(), 150000);
+    await run.exited;
+    clearTimeout(timer);
+  });
   const quit = async () => {
     await control.request("pause").catch(() => {});
+    await stopAndroid();
     process.exit(0);
   };
   // A Peel that attaches while the last one leaves keeps the host: ownership is checked again
-  // before the pause and once more before exiting.
+  // before the pause, before Android stops, and once more before exiting. A Peel that attached
+  // while Android stopped starts it again through the controller.
+  let leaving = false;
   const quitUnowned = async () => {
-    if (owners.size) return;
-    await control.request("pause").catch(() => {});
-    if (!owners.size) process.exit(0);
+    if (owners.size || leaving) return;
+    leaving = true;
+    try {
+      await control.request("pause").catch(() => {});
+      if (owners.size) return;
+      await stopAndroid();
+      if (!owners.size) process.exit(0);
+    } finally { leaving = false; }
   };
   setInterval(() => {
     if (!owners.size) return;

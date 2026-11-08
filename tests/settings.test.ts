@@ -5,7 +5,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { defaults, type Preferences } from "../src/config";
+import { defaults, readPreferences, savePreferences, saveTerminalConfig, type Preferences } from "../src/config";
 import { Model } from "../src/model";
 import { PeelUI } from "../src/ui";
 import { fixture } from "./fixture";
@@ -49,6 +49,35 @@ test("the settings page switches quality, update channel, and hearts, and saves 
   await Bun.sleep(20); await app.flush();
   expect(app.saved.at(-1)).toMatchObject({ quality: "standard", channel: "nightly", heartsInFavourites: true });
   expect(app.captureCharFrame()).toContain("Shown");
+});
+
+// Issue #78: Peel's menu entry opens Ghostty with ghostty.conf, which follows the Text size row.
+test.skipIf(process.platform === "win32")("the text size row cycles sizes, and the Ghostty config follows it", async () => {
+  const app = await settings();
+  expect(app.captureCharFrame()).toContain("Ghostty's");
+  for (let row = 0; row < 4; row++) app.mockInput.pressKey("j");
+  app.mockInput.pressEnter(); await Bun.sleep(20); await app.flush();
+  expect(app.saved.at(-1)!.textSize).toBe(10);
+  expect(app.captureCharFrame()).toContain("10 pt");
+  const dir = await mkdtemp(join(tmpdir(), "peel-terminal-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  await saveTerminalConfig(app.saved.at(-1)!, dir);
+  expect(await readFile(join(dir, "ghostty.conf"), "utf8")).toContain("\nfont-size = 10\n");
+  await saveTerminalConfig({ ...app.saved.at(-1)!, textSize: 0 }, dir);
+  expect(await readFile(join(dir, "ghostty.conf"), "utf8")).not.toContain("font-size");
+});
+
+test.skipIf(process.platform === "win32")("a failed Ghostty config write saves no text size, and a start writes it again", async () => {
+  const dir = await mkdtemp(join(tmpdir(), "peel-terminal-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
+  // Something in the way of ghostty.conf: neither file changes, and the save fails as a whole.
+  await mkdir(join(dir, "ghostty.conf"));
+  await expect(savePreferences({ ...defaults, textSize: 14 }, defaults, dir)).rejects.toThrow();
+  expect((await readPreferences(dir)).textSize).toBe(0);
+  // Once it is out of the way the save works, and a start rewrites the config from layout.json.
+  await rm(join(dir, "ghostty.conf"), { recursive: true });
+  await savePreferences({ ...defaults, textSize: 14 }, defaults, dir);
+  await writeFile(join(dir, "ghostty.conf"), "stale\n");
+  await saveTerminalConfig(await readPreferences(dir), dir);
+  expect(await readFile(join(dir, "ghostty.conf"), "utf8")).toContain("\nfont-size = 14\n");
 });
 
 test("with hi-res, the quality setting shows lossless and changes nothing", async () => {

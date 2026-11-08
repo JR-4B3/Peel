@@ -53,4 +53,5 @@ export const icon = {
   link: "\u{F0337}",
   console: "\u{F018D}",
   memory: "\u{F035B}",
+  textSize: "\u{F0254}",
 };
