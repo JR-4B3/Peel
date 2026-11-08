@@ -1,6 +1,8 @@
 // For Peel's maintainer: signs castlabs' Electron for Widevine through castlabs EVS and publishes
 // it as the engine-<version> release, which Peel downloads on Windows and macOS. Run it once per
-// Electron version on a Mac, for both Mac architectures, and once on Windows. It needs the gh CLI,
+// Electron version on a Mac, which signs both Mac architectures, and again with --windows, on the
+// Mac or on Windows, for both Windows architectures. EVS signs Windows builds from any system, but
+// the Mac signature needs codesign, so the Mac builds need a Mac. It needs the gh CLI,
 // signed in with access to the repository, and castlabs-evs with an EVS account:
 //   python3 -m pip install --upgrade castlabs-evs
 //   python3 -m castlabs_evs.account signup
@@ -65,9 +67,10 @@ export async function publish(exec: Command, work: string, platform: string, sum
 }
 
 if (import.meta.main) {
-  const platform = process.platform;
-  if (platform !== "darwin" && platform !== "win32") throw new Error("Sign the engine on macOS or Windows. Linux uses castlabs' build unsigned.");
-  const python = process.env.PEEL_PYTHON ? [process.env.PEEL_PYTHON] : platform === "win32" ? (Bun.which("py") ? ["py", "-3"] : ["python"]) : ["python3"];
+  const platform = process.argv.includes("--windows") ? "win32" : process.platform;
+  if (platform !== "darwin" && platform !== "win32") throw new Error("Sign the Mac engine on macOS, or the Windows engine with --windows. Linux uses castlabs' build unsigned.");
+  if (process.platform !== "darwin" && process.platform !== "win32") throw new Error("Run this on macOS or Windows. The archives are packed with ditto or Windows' tar.");
+  const python = process.env.PEEL_PYTHON ? [process.env.PEEL_PYTHON] : process.platform === "win32" ? (Bun.which("py") ? ["py", "-3"] : ["python"]) : ["python3"];
   const run = async (args: string[], interactive = true) => {
     const result = await command(args, interactive);
     if (result.code) throw new Error(`${args.join(" ")} failed. ${result.error.trim()}`);
@@ -88,7 +91,7 @@ if (import.meta.main) {
       // Prints how long the signature stays valid. Sign and publish again before it runs out.
       // Peel compares checksums once a day and downloads the renewed build by itself.
       await run([...python, "-m", "castlabs_evs.vmp", "verify-pkg", dir]);
-      await run(platform === "darwin" ? ["ditto", "-c", "-k", dir, archive] : ["tar", "-a", "-c", "-f", archive, "-C", dir, "."]);
+      await run(process.platform === "darwin" ? ["ditto", "-c", "-k", dir, archive] : ["tar", "-a", "-c", "-f", archive, "-C", dir, "."]);
       sums[name] = new Bun.CryptoHasher("sha256").update(await Bun.file(archive).arrayBuffer()).digest("hex");
     }
     await publish(command, work, platform, sums);
