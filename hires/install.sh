@@ -8,7 +8,18 @@ set -euo pipefail
 HIRES=$(cd "$(dirname "$0")" && pwd)
 if [ "${1:-}" = --user ]; then
   mkdir -p ~/.local/bin ~/.config/systemd/user ~/.config/pipewire/pipewire.conf.d
-  ln -sfn "$HIRES/bin/peel-hires" ~/.local/bin/peel-hires
+  # In a release install, $HIRES is <root>/versions/<version>/hires. The command then runs the
+  # version <root>/current names, so the timers use the newest release after each Peel update
+  # instead of the one that ran this script. A source checkout links its own copy.
+  versions=$(dirname "$(dirname "$HIRES")")
+  if [ "$(basename "$versions")" = versions ] && [ -f "$(dirname "$versions")/current" ]; then
+    root=$(dirname "$versions")
+    rm -f ~/.local/bin/peel-hires
+    printf '#!/bin/sh\n# Runs peel-hires from the Peel release that %s/current names.\nexec "%s/versions/$(cat "%s/current")/hires/bin/peel-hires" "$@"\n' "$root" "$root" "$root" >~/.local/bin/peel-hires
+    chmod 755 ~/.local/bin/peel-hires
+  else
+    ln -sfn "$HIRES/bin/peel-hires" ~/.local/bin/peel-hires
+  fi
   cp "$HIRES"/systemd/*.service "$HIRES"/systemd/*.timer ~/.config/systemd/user/
   cp "$HIRES/systemd/50-peel-hires.conf" ~/.config/pipewire/pipewire.conf.d/
   systemctl --user daemon-reload
