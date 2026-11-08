@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!-- Peel's settings for Android's framework, as a static resource overlay in the release's product
+     partition. Android applies it from the first boot. Target SDK 29 lets a v1 (JAR) signature,
+     which the JDK can make, suffice. -->
+<manifest xmlns:android="http://schemas.android.com/apk/res/android"
+    package="org.peel.hires.overlay" android:versionCode="1" android:versionName="1">
+  <uses-sdk android:minSdkVersion="29" android:targetSdkVersion="29" />
+  <overlay android:targetPackage="android" android:isStatic="true" android:priority="1" />
+  <application android:hasCode="false" />
+</manifest>

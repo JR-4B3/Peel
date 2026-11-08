@@ -188,7 +188,8 @@ host_versions() { { waydroid --version; lxc-start --version; uname -r; } 2>/dev/
 # decide whether to build; cmd_build hashes what they compile to, to name the release.
 build_sources() {
   echo "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$HIRES/android/audio_hw.c" \
-    "$HIRES/android/build-hal.sh" "$HIRES/android/control/RateServe.java" "$ROOT_HELPER"
+    "$HIRES/android/build-hal.sh" "$HIRES/android/control/RateServe.java" "$HIRES/android/overlay/AndroidManifest.xml" \
+    "$HIRES/android/overlay/res/values/config.xml" "$ROOT_HELPER"
 }
 # A missing or unreadable file hashes differently from its content, so it never matches by mistake.
 inputs_hash() {
@@ -209,24 +210,65 @@ build_hal() {  # prints the directory holding the two driver builds for the curr
   echo "$out"
 }
 
+# android/overlay: framework settings the release needs, as a static resource overlay. Google's
+# aapt2 compiles it (downloaded once and checked against its SHA-256), linked against the running
+# Android's framework, and the JDK's jarsigner signs it with a key made once for this machine.
+# Android needs some signature on every package; which key signs an overlay doesn't matter.
+AAPT2_VERSION=9.4.1-15978811
+AAPT2_SHA256=f5bebd466ecf14d341fd465f2756a16d86052f29eb4532003d5ff7bcffd08de5
+build_overlay() {  # prints the path of the overlay APK for the current source
+  local src="$HIRES/android/overlay" h out work="$CACHE/overlay-work" aapt2="$CACHE/bin/aapt2-$AAPT2_VERSION"
+  h=$( (cd "$src" && find . -type f | LC_ALL=C sort | xargs sha256sum; echo "$AAPT2_VERSION") | sha256sum | cut -c1-12)
+  out="$CACHE/overlay/$h"
+  [ -f "$out/peel-overlay.apk" ] && { echo "$out/peel-overlay.apk"; return 0; }
+  log "building the framework overlay"
+  if [ ! -x "$aapt2" ]; then
+    mkdir -p "$CACHE/bin"
+    curl -fsSL -o "$aapt2.jar" "https://dl.google.com/android/maven2/com/android/tools/build/aapt2/$AAPT2_VERSION/aapt2-$AAPT2_VERSION-linux.jar" || die "could not download aapt2"
+    [ "$(sha256sum "$aapt2.jar" | cut -d' ' -f1)" = "$AAPT2_SHA256" ] || { rm -f "$aapt2.jar"; die "aapt2 did not match its checksum"; }
+    unzip -p "$aapt2.jar" aapt2 > "$aapt2.part" && chmod 755 "$aapt2.part" && mv "$aapt2.part" "$aapt2" || die "could not unpack aapt2"
+    rm -f "$aapt2.jar"
+  fi
+  mkdir -p "$work"
+  if [ ! -s "$work/framework-res.apk" ]; then
+    session_running && adb_connect || die "the overlay build needs Android's framework; start the session first"
+    A pull /system/framework/framework-res.apk "$work/framework-res.apk.part" >/dev/null && mv "$work/framework-res.apk.part" "$work/framework-res.apk" ||
+      die "could not copy Android's framework"
+  fi
+  if [ ! -s "$work/key.p12" ]; then
+    keytool -genkeypair -keystore "$work/key.p12.part" -storetype pkcs12 -storepass peel-overlay -alias peel -keyalg RSA -keysize 2048 \
+      -validity 36500 -dname CN=Peel >/dev/null 2>&1 && mv "$work/key.p12.part" "$work/key.p12" || die "could not make the overlay's signing key"
+  fi
+  rm -rf "$out.part"; mkdir -p "$out.part"
+  "$aapt2" compile --dir "$src/res" -o "$out.part/res.zip" >&2 &&
+    "$aapt2" link --manifest "$src/AndroidManifest.xml" -I "$work/framework-res.apk" -o "$out.part/peel-overlay.apk" "$out.part/res.zip" >&2 ||
+    die "compiling the overlay failed"
+  java -m jdk.jartool/sun.security.tools.jarsigner.Main -keystore "$work/key.p12" -storepass peel-overlay -sigalg SHA256withRSA -digestalg SHA-256 \
+    "$out.part/peel-overlay.apk" peel >/dev/null 2>&1 || die "signing the overlay failed (needs the JDK's jdk.jartool module)"
+  rm -f "$out.part/res.zip"; rm -rf "$out"; mv "$out.part" "$out"
+  echo "$out/peel-overlay.apk"
+}
+
 # Callers run this as `id=$(cmd_build) || ...`, which turns off set -e inside it, so every step
 # checks its own failure.
 cmd_build() {
-  local images hal rate sys ven id in f
+  local images hal rate overlay sys ven id in f
   images=$(latest) || exit 1
   hal=$(build_hal) || exit 1
   rate=$(build_dex RateServe) || exit 1
+  overlay=$(build_overlay) || exit 1
   sys=$(awk '$1=="system"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
   ven=$(awk '$1=="vendor"{print $3}' <<<"$images" | grep -o '[0-9]\{8\}' | head -1)
   [ -n "$sys" ] && [ -n "$ven" ] || die "unexpected image list: $images"
   # The root helper builds the release, so a new helper, which may add to releases, builds anew.
-  id="s$sys-v$ven-$(cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$rate" "$ROOT_HELPER" | sha256sum | cut -c1-8)"
+  id="s$sys-v$ven-$(cat "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$rate" "$overlay" "$ROOT_HELPER" | sha256sum | cut -c1-8)"
   local built; built=$(root list) || die "could not list the releases"
   if grep -q "\"id\":\"$id\"" <<<"$built"; then log "release $id already built"; echo "$id"; return; fi
   # The helper reads these with the user's permissions and fetches and verifies the images itself.
   in="$CACHE/inputs/$id"; rm -rf "$in"; mkdir -p "$in" || die "cannot create $in"
   cp "$HIRES/manifest.conf" "$HIRES/android/audio_policy_configuration.xml" "$hal"/*.so "$in/" || die "cannot stage the inputs"
   cp "$rate" "$in/peel-rate.dex" || die "cannot stage the rate helper"
+  cp "$overlay" "$in/peel-overlay.apk" || die "cannot stage the overlay"
   log "repacking release $id"
   root repack "$in" "$id" >&2 || die "repacking $id failed"
   rm -rf "$in"
@@ -543,6 +585,7 @@ preflight() {
   done
   [ -x /usr/bin/weston ] || missing+=(/usr/bin/weston)
   if command -v java >/dev/null && ! java -m jdk.compiler/com.sun.tools.javac.Main -version >/dev/null 2>&1; then missing+=("a JDK 17 or later with javac"); fi
+  if command -v java >/dev/null && ! java --list-modules 2>/dev/null | grep -q '^jdk\.jartool@'; then missing+=("a JDK with jarsigner (jdk.jartool)"); fi
   [ ${#missing[@]} = 0 ] || die "missing: ${missing[*]}. On Fedora, sudo hires/install.sh \"\$USER\" installs them. Elsewhere, install them with your distribution's packages (see hires/README.md)."
   [ -f /var/lib/waydroid/waydroid.cfg ] || die "Waydroid is not initialized. Run: sudo waydroid init -s VANILLA (sudo hires/install.sh does this)"
   systemctl -q is-active waydroid-container || die "Waydroid's container is not running. Run: sudo systemctl enable --now waydroid-container"
