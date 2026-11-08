@@ -6,6 +6,7 @@ import type { Preferences } from "./config";
 export interface UpdateState { version?: string; channel?: string; installed: boolean; message: string; ready?: string; older?: boolean; newEngine?: boolean; checking?: boolean }
 import { defaults } from "./config";
 import type { DeviceView, Pairing } from "./devices";
+import type { MemoryUse } from "./memory";
 import { stopped, type ArtistShelf, type Home, type Library, type Media, type Page, type Playback, type Player } from "./types";
 
 export interface Navigation { id: string; name: string; media?: Media; hidden?: boolean }
@@ -155,8 +156,21 @@ export class Model extends EventEmitter {
   // The engine's last reason for stopping that the status line showed.
   private shownError?: string;
 
+  // How much memory Peel uses on this computer, for the settings page. index.ts reads it on Linux.
+  memory?: MemoryUse;
+  readMemory?: () => Promise<MemoryUse | undefined>;
+  private memoryRead = 0;
+  private async updateMemory() {
+    if (!this.readMemory || Date.now() - this.memoryRead < 5000) return;
+    this.memoryRead = Date.now();
+    this.memory = await this.readMemory().catch(() => undefined);
+    this.changed();
+  }
+
   // Concurrent callers share one playback request and its result.
   refresh() {
+    // The settings page shows memory, read again every five seconds while it is open.
+    if (this.view === "settings") void this.updateMemory();
     if (this.switchingOutput) return Promise.resolve();
     if (!this.browsingReady && Date.now() - this.navigationTried > navigationRetry) void this.loadNavigation();
     return this.refreshing ??= (async () => {
@@ -216,7 +230,7 @@ export class Model extends EventEmitter {
     }
     if (id === "settings") {
       this.generation++; this.loader = undefined; this.items = []; this.more = false; this.loading = false;
-      this.changed(); return;
+      this.changed(); void this.updateMemory(); return;
     }
     if (id === "favourites" || id.startsWith("playlist:")) {
       if (!navigation?.media) {

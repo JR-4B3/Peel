@@ -52,4 +52,5 @@ export const icon = {
   laptop: "\u{F0322}",
   link: "\u{F0337}",
   console: "\u{F018D}",
+  memory: "\u{F035B}",
 };

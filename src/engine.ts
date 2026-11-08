@@ -387,7 +387,7 @@ async function launchEngine(): Promise<{ failed: Promise<string> } | undefined> 
     for (const name of ["WAYLAND_DISPLAY", "DISPLAY", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS"]) if (process.env[name]) settings.push(`--setenv=${name}=${process.env[name]}`);
     // KillMode=mixed sends SIGTERM to Electron's main process only. When Chromium's helper
     // processes get it too, they exit first and Electron crashes with a core dump.
-    const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-engine", "--property=KillMode=mixed", ...settings, "--", ...args], { stdout: "ignore", stderr: "pipe" });
+    const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-engine", "--slice=app-peel.slice", "--property=KillMode=mixed", ...settings, "--", ...args], { stdout: "ignore", stderr: "pipe" });
     if (await child.exited !== 0) {
       const active = Bun.spawn(["systemctl", "--user", "is-active", "--quiet", "peel-engine.service"]);
       if (await active.exited !== 0) throw new Error(`Could not start the playback engine: ${(await new Response(child.stderr).text()).trim()}`);

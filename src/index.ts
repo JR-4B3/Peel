@@ -8,6 +8,7 @@ import { DevicePlayer, validHost } from "./remote";
 import { DeviceNetwork } from "./devices";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
+import { memoryUse } from "./memory";
 import { ensureCider } from "./startup";
 import { checkForUpdate, currentBuild, readyVersion, restartCommand } from "./update";
 
@@ -102,6 +103,7 @@ try {
       read: () => readCache("home.json"), write: value => saveJson("home.json", value, cacheDir),
     });
     model.wake = wake;
+    model.readMemory = () => memoryUse();
     if (player instanceof DevicePlayer) {
       const devices = player;
       model.outputTargets = preferences.remotes ?? [];

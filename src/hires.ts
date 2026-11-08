@@ -84,7 +84,7 @@ async function launchHost() {
     const settings = Object.entries(environment).map(([name, value]) => `--setenv=${name}=${value}`);
     // peel-hires reads the XDG folders for its own cache, state and settings.
     for (const name of ["PATH", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "PEEL_HIRES_PORT", "PEEL_HIRES_COMMAND", "APPLE_MUSIC_API_BASE"]) if (process.env[name]) settings.push(`--setenv=${name}=${process.env[name]}`);
-    const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-hires-host", ...settings, "--", ...args], { stdout: "ignore", stderr: "pipe" });
+    const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-hires-host", "--slice=app-peel.slice", ...settings, "--", ...args], { stdout: "ignore", stderr: "pipe" });
     if (await child.exited !== 0) {
       const active = Bun.spawn(["systemctl", "--user", "is-active", "--quiet", "peel-hires-host.service"]);
       if (await active.exited !== 0) throw new Error(`Could not start hi-res playback: ${(await new Response(child.stderr).text()).trim()}`);
