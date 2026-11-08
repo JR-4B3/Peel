@@ -123,13 +123,17 @@ try {
     }
     // Updates install in the background and start the next time Peel opens. The settings page
     // shows the result, and choosing another channel checks it at once.
+    // A Peel that plays through the web engine while hi-res has since been set up restarts into
+    // hi-res. The new Peel never uses the web engine, so the restart counts as a new engine: the
+    // row says the music stops, and this Peel releases the web engine instead of keeping it.
+    const switchesToHires = () => !useCider && !useHires && hiresSelected();
     const updates = (force: boolean) => {
       const channel = model.preferences.channel;
       model.update = { ...model.update, checking: true }; model.changed();
       void checkForUpdate(channel, force).then(result => {
         if (channel !== model.preferences.channel) return;
         const announce = result.ready && !result.older && result.ready !== model.update.ready;
-        model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message, ready: result.ready, older: result.older, newEngine: result.newEngine };
+        model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message, ready: result.ready, older: result.older, newEngine: result.newEngine || switchesToHires() };
         if (announce) model.status = `Peel ${result.ready} is ready. Restart Peel from Settings to start it.`;
         model.changed();
       }, error => {
@@ -146,6 +150,7 @@ try {
     // The version to start is read again, since another Peel window may have changed it. A change
     // updates the row, so the listener sees what the restart would do before choosing it again.
     model.onRestart = () => void readyVersion().then(next => {
+      if (next.ready) next.newEngine ||= switchesToHires();
       const shown = model.update;
       if (next.ready && next.ready === shown.ready && next.newEngine === shown.newEngine && next.older === shown.older) { restartInto = next.ready; renderer.destroy(); return; }
       model.update = { ...shown, ...next, ready: next.ready };
@@ -153,7 +158,9 @@ try {
       model.changed();
     }, error => model.fail(error));
     const restart = async (version: string) => {
+      const release = switchesToHires();
       if (player instanceof DevicePlayer) player.detach();
+      if (release) await (player as Engine).release().catch(() => {});
       // OpenTUI restores the terminal right after its destroy event, so the new Peel starts after that.
       await new Promise(resolve => setTimeout(resolve, 0));
       const { cmd, cwd } = restartCommand(version);

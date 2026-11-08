@@ -37,15 +37,19 @@ export function defaultRoot() {
   return join(process.env.XDG_DATA_HOME ?? join(homedir(), ".local", "share"), "peel");
 }
 
-// The newest release on a channel. Stable is GitHub's latest release; nightly is the release
-// tagged nightly, which the nightly workflow replaces each night that main changed.
+// The newest release on a channel. Stable is the newest release tagged v<version> that is not a
+// prerelease. GitHub's "latest" release can be the playback engine's, which has no Peel files.
+// Nightly is the release tagged nightly, which the nightly workflow replaces each night that main changed.
+interface GitHubRelease { tag_name?: string; draft?: boolean; prerelease?: boolean; assets: { name: string; browser_download_url: string }[] }
 export async function latestRelease(channel: Channel): Promise<Release> {
-  const response = await fetch(channel === "nightly" ? `${api}/tags/nightly` : `${api}/latest`, {
+  const response = await fetch(channel === "nightly" ? `${api}/tags/nightly` : `${api}?per_page=30`, {
     headers: { accept: "application/vnd.github+json" }, signal: AbortSignal.timeout(15000),
   });
   if (response.status === 404) throw new Error(`There is no ${channel} release yet.`);
   if (!response.ok) throw new Error(`GitHub answered HTTP ${response.status}.`);
-  const release = await response.json() as { assets: { name: string; browser_download_url: string }[] };
+  const answer = await response.json() as GitHubRelease | GitHubRelease[];
+  const release = Array.isArray(answer) ? answer.find(item => !item.draft && !item.prerelease && /^v\d/.test(item.tag_name ?? "")) : answer;
+  if (!release) throw new Error(`There is no ${channel} release yet.`);
   const asset = (name: string) => release.assets.find(item => item.name === name)?.browser_download_url;
   const info = asset("version.json"), archive = asset("peel.tar.gz"), sums = asset("SHASUMS256.txt");
   if (!info || !archive || !sums) throw new Error(`The ${channel} release is missing files. It may still be uploading.`);
