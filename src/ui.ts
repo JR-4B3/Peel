@@ -1,5 +1,6 @@
 import { BoxRenderable, TextRenderable, InputRenderable, ImageRenderable, RGBA, StyledText, t, fg, bold, type CliRenderer, type KeyEvent, type MouseEvent, type OptimizedBuffer, type RenderContext } from "@opentui/core";
 import { shortVersion } from "./update";
+import { formatBytes } from "./memory";
 import { Model, sorts, type Sort } from "./model";
 import { duration, type Media } from "./types";
 import { cover, largeCover, largeCoverSize } from "./artwork";
@@ -1183,6 +1184,14 @@ export class PeelUI {
         activate: () => void model.setPreference({ heartsInFavourites: !hearts }, `Hearts in Favourite Songs: ${hearts ? "hidden" : "shown"}`),
       },
     ];
+    if (model.memory) {
+      const parts = model.memory.parts.map(part => `${part.name} ${formatBytes(part.bytes)}`).join(", ");
+      rows.push({
+        id: "memory", lead: icon.memory, name: "Memory", right: formatBytes(model.memory.total),
+        description: `${parts[0]!.toUpperCase()}${parts.slice(1)}, on this computer. File cache that Linux can free is left out.`,
+        activate: () => {},
+      });
+    }
     if (model.onPlayOn) {
       const paired = model.devices.filter(device => device.paired && !device.self);
       rows.push({
