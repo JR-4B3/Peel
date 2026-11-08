@@ -36,9 +36,11 @@ USER_NAME=${1:-${SUDO_USER:?give the user name}}
 [ "$(uname -m)" = x86_64 ] || { echo "hi-res needs an x86_64 PC" >&2; exit 1; }
 
 # Each command the pipeline runs, and the Fedora package that has it. dnf installs what is
-# missing. Other distributions install them by hand first; the list says what to look for.
+# missing. Other distributions install them by hand first; the list says what to look for. The
+# pipeline runs the JDK's compiler and jarsigner as modules of `java`, which Fedora's headless
+# JDK has; java-headless installs the release's default version.
 PACKAGES="waydroid:waydroid lxc-start:lxc mkfs.erofs:erofs-utils weston:weston adb:android-tools
-  javac:java-21-openjdk-devel keytool:java-21-openjdk-devel python3:python3 curl:curl unzip:unzip
+  java:java-headless keytool:java-headless python3:python3 curl:curl unzip:unzip
   git:git tar:tar flock:util-linux pactl:pulseaudio-utils pw-metadata:pipewire-utils"
 missing=() packages=()
 for entry in $PACKAGES; do
