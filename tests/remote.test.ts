@@ -63,8 +63,8 @@ test("the SSH helper refuses lifecycle commands and malformed messages", async (
 });
 
 test("SSH targets cannot become options or remote shell commands", () => {
-  for (const host of ["main", "rabe@main", "mac.local", "192.168.1.20", "::1"]) expect(validHost(host)).toBe(true);
-  for (const host of ["", "-oProxyCommand=bad", "main;touch /tmp/x", "main$(id)", "main\nwhoami", "main other"]) expect(validHost(host)).toBe(false);
+  for (const host of ["desktop", "user@desktop", "mac.local", "192.168.1.20", "::1"]) expect(validHost(host)).toBe(true);
+  for (const host of ["", "-oProxyCommand=bad", "desktop;touch /tmp/x", "desktop$(id)", "desktop\nwhoami", "desktop other"]) expect(validHost(host)).toBe(false);
 });
 
 test("an open queue follows edits from another controller without a song change", async () => {
@@ -85,19 +85,19 @@ test("settings switch controllers, show the host, and keep the previous target a
   const app = await createTestRenderer({ width: 120, height: 36 }); cleanup.push(() => app.renderer.destroy());
   const model = new Model(api.library, api.player, structuredClone(defaults));
   const selected: (string | undefined)[] = [];
-  model.outputTargets = ["main", "offline"];
+  model.outputTargets = ["desktop", "offline"];
   model.onOutput = async host => { selected.push(host); if (host === "offline") throw new Error("Host unavailable"); };
   const ui = new PeelUI(app.renderer, model); cleanup.push(() => ui.dispose());
   await model.start(); await model.open("settings");
-  await model.selectOutput("main"); await app.flush();
-  expect(model.preferences.remote).toBe("main");
+  await model.selectOutput("desktop"); await app.flush();
+  expect(model.preferences.remote).toBe("desktop");
   expect(app.captureCharFrame()).toContain("Control over SSH");
   // The controlled computer is named beside the devices button, not before the artist.
-  expect(app.captureCharFrame()).toContain("d  main");
-  expect(app.captureCharFrame()).not.toContain("On main");
+  expect(app.captureCharFrame()).toContain("d  desktop");
+  expect(app.captureCharFrame()).not.toContain("On desktop");
   await model.selectOutput("offline");
-  expect(model.preferences.remote).toBe("main");
-  expect(selected).toEqual(["main", "offline"]);
+  expect(model.preferences.remote).toBe("desktop");
+  expect(selected).toEqual(["desktop", "offline"]);
 });
 
 

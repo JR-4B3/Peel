@@ -45,7 +45,7 @@ Add `--channel nightly` to `install` for each night's build, with the newest fea
 
 | System | Notes |
 | --- | --- |
-| Linux | Any glibc distribution, such as Fedora, Nobara, Ubuntu, Debian, Arch or openSUSE. Alpine (musl) isn't supported. On NixOS, use nix-ld. |
+| Linux | Any glibc distribution, such as Fedora, Ubuntu, Debian, Arch or openSUSE. Alpine (musl) isn't supported. On NixOS, use nix-ld. |
 | macOS | The first start may ask whether your terminal may find devices on the local network. Allow it, or devices won't appear. |
 | Windows | Works, but a fresh install on a Windows PC hasn't been tested much yet. Please report anything that goes wrong. |
 
@@ -53,7 +53,7 @@ Add `--channel nightly` to `install` for each night's build, with the newest fea
 
 Apple's web player streams AAC at 256 kbps, and Apple decrypts Hi-Res Lossless only inside its own apps. On Linux, Peel runs Apple Music's Android app in a slimmed-down Android on an invisible display, and its audio reaches your sound card unchanged.
 
-- Each song plays at its own rate, from 44.1 to 192 kHz. Measured bit-exact to a Focusrite Scarlett at 96 and 192 kHz.
+- Each song plays at its own rate, from 44.1 to 192 kHz. Measured bit-exact at a USB audio interface at 96 and 192 kHz.
 - Once it's set up, Peel uses it by itself. Search, the queue, lyrics and devices work the same.
 - Android runs only while Peel is open. Peel starts it as it opens, which takes about 7 seconds, so it is usually ready by the first song. After that a new queue starts in about 50 ms.
 - Android and Apple Music update themselves at night when nothing plays, and go back to the last working version if an update fails its tests.

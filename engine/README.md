@@ -8,7 +8,7 @@ The engine loads `https://music.apple.com/robots.txt`, because Apple accepts the
 
 Each request from Peel carries its process ID. Once every Peel that sent one has exited, the engine quits. `POST /release` removes the calling Peel and quits when no other Peel is left. `POST /quit` stops it at once.
 
-Measured on main on 8 October 2026:
+Measured on a Linux desktop on 8 October 2026:
 
 | Step | Time after launch |
 | --- | --- |

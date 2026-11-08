@@ -11,7 +11,7 @@ The concept keeps the terminal app's look: panels with their titles in the borde
 - Four tabs at the bottom: Home, Library, Queue and Settings.
 - Library holds songs, albums, artists and playlists, switched by a row at the top.
 - Screens opened on top of a tab, such as lyrics or an album, show a `‹` back arrow in their panel title. There are no text hints like "swipe down to close".
-- The player sits above the tabs and says where the music plays, for example "Playing on main". Tapping the device name sends the music to another device.
+- The player sits above the tabs and says where the music plays, for example "Playing on Desktop". Tapping the device name sends the music to another device.
 - Settings has the desktop's settings: audio quality, update channel, and hearts in Favourite Songs.
 
 The app is SwiftUI. Peel's panels, cover grids and rows are custom views with Peel's colours and JetBrains Mono. Apple's standard controls around them, such as the tab bar, navigation bar and search field, get iOS 26's Liquid Glass by themselves. The same layout adapts to the iPad's larger screen.
@@ -34,7 +34,7 @@ Work after that:
 
 - The device protocol in Swift. `src/link.ts` uses X25519, HKDF, HMAC, SHA-256, AES-256-GCM and raw deflate. CryptoKit has the first five, and Apple's Compression framework has raw deflate.
 - The screens from the concept, and the library and search through Apple's MusicKit catalog API.
-- Builds on the Mac with Xcode.
+- Builds on a Mac with Xcode.
 
 ### Sideloading
 
