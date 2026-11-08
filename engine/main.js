@@ -53,9 +53,9 @@ async function developerToken() {
 // Each Peel sends its process ID. Once every Peel that used the engine has exited, the engine
 // quits, so music stops even when a terminal closes before Peel can stop it. The Peel that
 // started the engine counts from the start, so a Peel closed while the engine loads stops it too.
-// An SSH helper marks itself remote. When the last Peel on this computer closes while only SSH
-// controllers remain, the music pauses, as it does when that Peel is the last one. The
-// controllers can still read the state and start the music again.
+// An SSH helper marks itself remote. When the last Peel on this computer closes while only Peels
+// controlling it over SSH remain, the music pauses, as it does when that Peel is the last one.
+// The remote Peels can still read the state and start the music again.
 const owners = new Map();
 let pauseForRemote = () => {};
 const launcher = Number(process.env.PEEL_OWNER);
@@ -64,7 +64,7 @@ function alive(pid) {
   try { process.kill(pid, 0); return true; } catch (error) { return error.code === "EPERM"; }
 }
 // Removes an owner and says what follows: quit when none is left, pause when the last Peel on
-// this computer left and only SSH controllers remain.
+// this computer left and only Peels controlling it over SSH remain.
 function leave(pids) {
   let local = false;
   for (const pid of pids) if (owners.has(pid)) { local ||= !owners.get(pid); owners.delete(pid); }
@@ -73,7 +73,7 @@ function leave(pids) {
 }
 function afterLeaving(outcome, reason) {
   if (outcome === "quit") { log(reason); app.quit(); }
-  else if (outcome === "pause") { log("the last Peel on this computer has closed; pausing for the SSH controllers"); pauseForRemote(); }
+  else if (outcome === "pause") { log("the last Peel on this computer has closed; pausing for the Peels controlling it over SSH"); pauseForRemote(); }
 }
 setInterval(() => {
   if (!owners.size) return;

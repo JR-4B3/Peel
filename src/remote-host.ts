@@ -3,9 +3,9 @@ import { createInterface } from "node:readline";
 import { Engine, ensureEngine } from "./engine";
 import { Hires, ensureHires, hiresSelected } from "./hires";
 
-// The SSH helper uses its own PID on the host and marks itself remote. Client PIDs never enter
-// the host's owner list. When the last Peel on the host closes, the music pauses, even while a
-// controller stays connected. Once the controller has closed too, the engine quits.
+// The SSH helper uses its own PID on the SSH host and marks itself remote. Client PIDs never
+// enter the SSH host's owner list. When the last Peel on the SSH host closes, the music pauses,
+// even while a remote Peel stays connected. Once that Peel has closed too, the engine quits.
 export async function serveRemote(lines: AsyncIterable<string>, reply: (value: unknown) => void, engine = new Engine(), ready: () => Promise<void> = () => ensureEngine(engine, text => reply({ status: text }))) {
   // Attach before startup awaits, because readline otherwise drops early SSH requests.
   const input = lines[Symbol.asyncIterator]();
@@ -24,7 +24,7 @@ export async function serveRemote(lines: AsyncIterable<string>, reply: (value: u
 }
 
 export async function runRemoteHost() {
-  // Marks this helper's requests as a remote controller's (see remoteOwner in engine.ts).
+  // Marks this helper's requests as coming from a remote Peel (see remoteOwner in engine.ts).
   process.env.PEEL_REMOTE_HOST = "1";
   // SSH logins often omit the desktop session variables that systemd-run needs.
   if (process.platform === "linux" && process.getuid) {

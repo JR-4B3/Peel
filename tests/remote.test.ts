@@ -42,7 +42,7 @@ function host() {
   return { ...api, local, client, commands, retained: () => retained, releases: () => releases, ready: () => ready };
 }
 
-test("remote controllers share host playback, and each one releases its helper's hold when it disconnects", async () => {
+test("remote Peels share the SSH host's playback, and each one releases its helper's hold when it disconnects", async () => {
   const app = host(), first = app.client(), second = app.client();
   await first.command("/playback/toggle");
   expect((await second.snapshot()).state).toBe("playing");
@@ -70,7 +70,7 @@ test("SSH targets cannot become options or remote shell commands", () => {
   for (const host of ["", "-oProxyCommand=bad", "desktop;touch /tmp/x", "desktop$(id)", "desktop\nwhoami", "desktop other"]) expect(validHost(host)).toBe(false);
 });
 
-test("an open queue follows edits from another controller without a song change", async () => {
+test("an open queue follows edits from another Peel without a song change", async () => {
   const api = fixture(); cleanup.push(() => api.server.stop(true));
   let revision = "before", queue = [{ id: "a", type: "songs", name: "A", artist: "", album: "", duration: 10 }];
   api.player.snapshot = async () => ({ ...api.playback, queueRevision: revision });
@@ -83,7 +83,7 @@ test("an open queue follows edits from another controller without a song change"
   expect(model.items.map(item => item.id)).toEqual(["b"]);
 });
 
-test("settings switch controllers, show the host, and keep the previous target after failure", async () => {
+test("settings switch between SSH hosts, show the SSH host, and keep the previous target after failure", async () => {
   const api = fixture(); cleanup.push(() => api.server.stop(true));
   const app = await createTestRenderer({ width: 120, height: 36 }); cleanup.push(() => app.renderer.destroy());
   const model = new Model(api.library, api.player, structuredClone(defaults));
@@ -116,7 +116,7 @@ test("the host buffers the first SSH request while its engine starts", async () 
   expect(replies).toMatchObject([{ id: 1, value: { ready: true } }]);
 });
 
-test("the SSH helper's requests, and an engine it starts, mark it as a remote controller", async () => {
+test("the SSH helper's requests, and an engine it starts, mark it as a remote Peel", async () => {
   const home = await mkdtemp(join(tmpdir(), "peel-remote-owner-")); cleanup.push(() => rm(home, { recursive: true, force: true }));
   const seen: (string | null)[] = [];
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => { seen.push(request.headers.get("x-peel-remote")); return Response.json({ ready: true }); } });

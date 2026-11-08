@@ -396,7 +396,7 @@ export async function runHiresHost() {
     }
     // Apple may name a song by an equivalent catalog ID. Exactly as many new entries as songs
     // pair in order. Otherwise each song needs a new entry with its own ID, and the rest of the
-    // new entries, which another controller may have added, keep the queue's own names.
+    // new entries, which another Peel may have added, keep the queue's own names.
     const reported = (id: number) => entries.get(id)?.song.catalogId;
     let pairs: [number, Media][] = [];
     if (fresh.length === playable.length) pairs = fresh.map((id, at) => [id, playable[at]!]);
@@ -430,7 +430,7 @@ export async function runHiresHost() {
   const position = () => Math.max(0, order.indexOf(current.item ?? -1));
   const songAt = (index: number) => entries.get(order[index]!)?.song;
   const check = (index: number, expected?: string) => {
-    if (expected && songAt(index)?.id !== expected) throw new Error("The queue changed on another controller. Try again.");
+    if (expected && songAt(index)?.id !== expected) throw new Error("The queue changed in another Peel. Try again.");
   };
 
   function revision() {
@@ -665,13 +665,13 @@ export async function runHiresHost() {
   // Each Peel sends its process ID. Once every Peel that used the host has exited, the music
   // pauses, Android stops and the host exits. Android holds about 1.6 GB while it runs, and the
   // next Peel boots it again in about 7 seconds while the listener browses.
-  // An SSH helper marks itself remote. When the last Peel on this computer closes while only SSH
-  // controllers remain, the music pauses, as it does when that Peel is the last one. Android keeps
-  // running for the controllers, which can read the state and start the music again.
+  // An SSH helper marks itself remote. When the last Peel on this computer closes while only Peels
+  // controlling it over SSH remain, the music pauses, as it does when that Peel is the last one.
+  // Android keeps running for those remote Peels, which can read the state and start the music.
   const owners = new Map<number, boolean>();
   const launcher = Number(process.env.PEEL_OWNER);
   if (Number.isInteger(launcher) && launcher > 0) owners.set(launcher, process.env.PEEL_OWNER_REMOTE === "1");
-  // Removes owners, and pauses when the last Peel on this computer left and only SSH controllers
+  // Removes owners, and pauses when the last Peel on this computer left and only remote Peels
   // remain. With no owner left, quitUnowned pauses and stops Android instead.
   const leave = (pids: number[]) => {
     let local = false;

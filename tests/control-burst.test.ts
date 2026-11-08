@@ -9,7 +9,7 @@ afterEach(() => { for (const fn of cleanup.splice(0).reverse()) fn(); });
 
 // A player whose first command hangs until release, as a slow remote device or a busy engine
 // would. Every later key press arrives while it waits.
-function controller() {
+function slowApp() {
   const api = fixture();
   cleanup.push(() => api.server.stop(true));
   let release!: () => void, started!: () => void;
@@ -36,7 +36,7 @@ function controller() {
 }
 
 test("twenty seek presses during a slow seek run as one more seek, at the sum of the presses", async () => {
-  const app = controller();
+  const app = slowApp();
   const first = app.model.seek(-10);
   await app.firstStarted;
   const burst = Array.from({ length: 20 }, () => app.model.seek(-10));
@@ -46,7 +46,7 @@ test("twenty seek presses during a slow seek run as one more seek, at the sum of
 });
 
 test("waiting skips add up into one jump, and Previous then Next skip nothing", async () => {
-  const app = controller();
+  const app = slowApp();
   const first = app.model.act("/playback/pause");
   await app.firstStarted;
   const pending = [app.model.skip(1), app.model.skip(1), app.model.skip(1), app.model.skip(-1)];
@@ -54,7 +54,7 @@ test("waiting skips add up into one jump, and Previous then Next skip nothing", 
   await Promise.all([first, ...pending]);
   // Two skips are one jump, two songs ahead.
   expect(app.calls.map(call => [call.method, call.args[0]])).toEqual([["pause", undefined], ["jump", 2]]);
-  const again = controller();
+  const again = slowApp();
   const busy = again.model.act("/playback/pause");
   await again.firstStarted;
   const cancelled = [again.model.skip(-1), again.model.skip(1)];
@@ -64,14 +64,14 @@ test("waiting skips add up into one jump, and Previous then Next skip nothing", 
 });
 
 test("play/pause pressed twice while waiting cancels out, three times toggles once", async () => {
-  const app = controller();
+  const app = slowApp();
   const first = app.model.seek(5);
   await app.firstStarted;
   const twice = [app.model.act("/playback/toggle"), app.model.act("/playback/toggle")];
   app.release();
   await Promise.all([first, ...twice]);
   expect(app.calls.map(call => call.method)).toEqual(["seek"]);
-  const again = controller();
+  const again = slowApp();
   const busy = again.model.seek(5);
   await again.firstStarted;
   const thrice = [again.model.act("/playback/toggle"), again.model.act("/playback/toggle"), again.model.act("/playback/toggle")];
@@ -81,7 +81,7 @@ test("play/pause pressed twice while waiting cancels out, three times toggles on
 });
 
 test("volume presses while waiting become one change, and other commands keep their order", async () => {
-  const app = controller();
+  const app = slowApp();
   const first = app.model.seek(5);
   await app.firstStarted;
   const pending = [app.model.volume(0.05), app.model.volume(0.05), app.model.act("/playback/pause"), app.model.volume(0.05)];
@@ -92,7 +92,7 @@ test("volume presses while waiting become one change, and other commands keep th
 });
 
 test("a seek meant for a song that stopped playing is dropped", async () => {
-  const app = controller();
+  const app = slowApp();
   const first = app.model.skip(1);
   await app.firstStarted;
   const seek = app.model.seek(30);
@@ -102,7 +102,7 @@ test("a seek meant for a song that stopped playing is dropped", async () => {
 });
 
 test("a failed command does not stop later presses from running", async () => {
-  const app = controller();
+  const app = slowApp();
   app.failFirst();
   const first = app.model.seek(10);
   await app.firstStarted;
@@ -113,7 +113,7 @@ test("a failed command does not stop later presses from running", async () => {
 });
 
 test("twenty Next presses during a slow command are one jump, so a later Pause is not held up", async () => {
-  const app = controller();
+  const app = slowApp();
   const first = app.model.act("/playback/pause");
   await app.firstStarted;
   const presses = Array.from({ length: 20 }, () => app.model.skip(1));
@@ -125,14 +125,14 @@ test("twenty Next presses during a slow command are one jump, so a later Pause i
 });
 
 test("a seek or volume press builds on the change still running", async () => {
-  const app = controller();
+  const app = slowApp();
   const first = app.model.seek(10);
   await app.firstStarted;
   const second = app.model.seek(10), louder = [app.model.volume(0.05)];
   app.release();
   await Promise.all([first, second, ...louder]);
   expect(app.calls.filter(call => call.method === "seek").map(call => call.args[0])).toEqual([40, 50]);
-  const again = controller();
+  const again = slowApp();
   const busy = again.model.volume(0.05);
   await again.firstStarted;
   const next = again.model.volume(0.05);
@@ -143,7 +143,7 @@ test("a seek or volume press builds on the change still running", async () => {
 });
 
 test("a seek target for one song never carries over to the next song", async () => {
-  const app = controller();
+  const app = slowApp();
   const first = app.model.seek(10);
   await app.firstStarted;
   // Another song starts at five seconds while the first seek still runs.

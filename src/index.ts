@@ -95,7 +95,7 @@ try {
       // network after a restart too, as if its listener had chosen the device.
       player.onRetarget = () => void model.retarget(async () => {
         const text = await player.applyTarget(); model.target = player.target; model.targetId = player.peer;
-        if (!player.host) await model.forgetRemote();
+        if (!player.sshHost) await model.forgetRemote();
         return text;
       });
       void network.start().catch(error => model.fail(new Error(`Devices on the network are unavailable: ${error instanceof Error ? error.message : String(error)}`)));
@@ -125,7 +125,7 @@ try {
     // A restart keeps this computer's engine, so the new Peel finds the music still playing. This
     // process waits for the new one, which keeps the engine owned until the new Peel closes.
     let restartInto: string | undefined;
-    model.playsLocally = () => !player.host && !player.peer;
+    model.playsLocally = () => !player.sshHost && !player.peer;
     // The version to start is read again, since another Peel window may have changed it. A change
     // updates the row, so the listener sees what the restart would do before choosing it again.
     model.onRestart = () => void readyVersion().then(next => {

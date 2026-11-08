@@ -291,7 +291,7 @@ test.skipIf(!supported)("a song Apple Music plays that Peel did not queue gets i
 
 const calls = async () => (await readFile(join(temporary, "calls"), "utf8").catch(() => "")).split("\n").filter(Boolean);
 
-test.skipIf(!supported)("the last Peel on this computer closing pauses the music while an SSH controller stays, and Android keeps running", async () => {
+test.skipIf(!supported)("the last Peel on this computer closing pauses the music while a Peel controlling it over SSH stays, and Android keeps running", async () => {
   const helper = Bun.spawn(["sleep", "30"]);
   const stops = async () => (await calls()).filter(call => call === "session idle").length, earlier = await stops();
   try {
@@ -303,12 +303,12 @@ test.skipIf(!supported)("the last Peel on this computer closing pauses the music
     expect(android.state).toBe(2);
     expect(await Promise.race([host.exited, Bun.sleep(500).then(() => "running")])).toBe("running");
     expect(await stops()).toBe(earlier);
-    // The controller can start the music again.
+    // The remote Peel can start the music again.
     expect((await send("/call", { method: "resume", args: [] }, helper.pid, true)).status).toBe(200);
     expect(android.state).toBe(3);
   } finally {
     await send("/state");
-    // A controller that leaves while a Peel on this computer stays changes nothing.
+    // A remote Peel that leaves while a Peel on this computer stays changes nothing.
     await send("/release", {}, helper.pid, true);
     helper.kill();
   }

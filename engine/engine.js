@@ -154,7 +154,7 @@
     // Queue edits move MusicKit's own entries, so a moved song stays marked as added.
     // Only songs after the playing one change.
     move: (from, to, expected, target) => {
-      if (expected && music.queue.items[from]?.id !== expected || target && music.queue.items[to]?.id !== target) throw new Error("The queue changed on another controller. Try again.");
+      if (expected && music.queue.items[from]?.id !== expected || target && music.queue.items[to]?.id !== target) throw new Error("The queue changed in another Peel. Try again.");
       if (Math.min(from, to) <= music.queue.position) return;
       const [entry] = music.queue.spliceQueueItems(from, 1);
       music.queue.spliceQueueItems(to, 0, [entry]);
@@ -167,12 +167,12 @@
       return music.bitrate;
     },
     remove: (index, expected) => {
-      if (expected && music.queue.items[index]?.id !== expected) throw new Error("The queue changed on another controller. Try again.");
+      if (expected && music.queue.items[index]?.id !== expected) throw new Error("The queue changed in another Peel. Try again.");
       if (index > music.queue.position) music.queue.spliceQueueItems(index, 1);
     },
     jump: async (index, expected) => {
       want(true);
-      if (expected && music.queue.items[index]?.id !== expected) throw new Error("The queue changed on another controller. Try again.");
+      if (expected && music.queue.items[index]?.id !== expected) throw new Error("The queue changed in another Peel. Try again.");
       await music.changeToMediaAtIndex(index);
     },
     queue: () => ({ position: music.queue.position, items: music.queue.items.map(item => ({ ...describe(item), added: pending().includes(item) })) }),
