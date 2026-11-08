@@ -371,6 +371,21 @@ test("a Peel that controls main over SSH stays when the music moves to main itse
   expect(main.fake.state.playing).toBe(true);
 }, 15000);
 
+test("a Peel that starts in SSH control keeps it for an old claim, unless that device plays", async () => {
+  for (const playing of [false, true]) {
+    const mac = await computer("Mac"), main = await computer("main");
+    mac.player.onRetarget = () => { mac.player.applyTarget(); };
+    controlOverSsh(mac, main);
+    // While the Mac's Peel was closed, main's Peel had given the music to the Mac. It is still there.
+    Object.assign(mac.fake.state, { items: [song("old")], position: 0, playing });
+    main.network.claimOutput(mac.network.id);
+    await link(mac, main);
+    await waitFor(() => mac.network.claim.device === mac.network.id && mac.network.claim.generation === 1, "the Mac catching up");
+    await Bun.sleep(300);
+    expect(mac.player.host).toBe(playing ? undefined : "main");
+  }
+}, 20000);
+
 test("a device that plays keeps the claim while another one plays too", async () => {
   const mac = await computer("Mac", 60000, 100), main = await computer("main", 60000, 100);
   await link(mac, main);

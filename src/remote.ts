@@ -111,7 +111,7 @@ export class DevicePlayer extends Engine {
   attach(network: DeviceNetwork) {
     this.network = network;
     const follow = () => { if (this.wanted() !== this.peer) this.onRetarget?.(); };
-    network.on("claim", (claim: Claim) => { if (this.remote) void this.leaveSsh(claim); else follow(); });
+    network.on("claim", (claim: Claim, live: boolean) => { if (this.remote) void this.leaveSsh(claim, live); else follow(); });
     network.on("online", follow); network.on("offline", follow);
   }
 
@@ -122,7 +122,9 @@ export class DevicePlayer extends Engine {
   // A Peel that controls an SSH host still shows the music that plays. When another Peel moves
   // the music to a different computer, or it starts on this one, this Peel follows it, as if the
   // listener had chosen that device. A move to the SSH host's own engine changes nothing here.
-  private async leaveSsh(claim: Claim) {
+  // A claim learned while catching up, such as right after Peel starts, counts only when that
+  // device plays: a song paused there long ago does not end SSH control the listener just chose.
+  private async leaveSsh(claim: Claim, live: boolean) {
     const network = this.network!, remote = this.remote!, here = claim.device === network.id;
     if (!here && !network.online(claim.device)) return;
     const [host, claimed] = await Promise.all([
@@ -130,6 +132,7 @@ export class DevicePlayer extends Engine {
       (here ? this.local.state() : network.request(claim.device, "/state")).catch(() => undefined),
     ]);
     if (this.remote !== remote || network.claim !== claim || !claimed?.playback?.nowPlaying) return;
+    if (!live && claimed.playback.state !== "playing") return;
     if (claimed.instance && claimed.instance === host?.instance) return;
     this.remote.close(); this.remote = undefined; this.host = undefined;
     this.peer = this.wanted(); this.sshLeft = true;

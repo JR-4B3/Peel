@@ -328,6 +328,9 @@ export class DeviceNetwork extends EventEmitter {
   private turns = new Map<string, number>();
   private missed = new WeakMap<Session, number>();
   private checking = new WeakSet<Session>();
+  // Sessions that exchanged a status once. The first exchange catches up on claims made while the
+  // two devices were apart. Later claims are moves happening now.
+  private synced = new WeakSet<Session>();
   private sockets = new Set<Line>();
   private clients = new Set<Line>();
   private server?: Server;
@@ -437,11 +440,12 @@ export class DeviceNetwork extends EventEmitter {
     this.claimChanged = Date.now();
     void this.persist();
     for (const sessions of this.sessions.values()) for (const session of sessions) if (!session.closed) void session.request("claim", { claim: this.claim }).catch(() => {});
-    this.emit("claim", this.claim);
+    this.emit("claim", this.claim, true);
     this.changed();
   }
 
-  adopt(claim: unknown) {
+  // live is false when the claim comes from catching up with a device, not from a move just made.
+  adopt(claim: unknown, live = true) {
     // Generation 0 is every device's own starting point, not a choice anyone made.
     if (!validClaim(claim) || claim.generation < 1 || !newer(claim, this.claim)) return;
     this.claim = { device: claim.device, generation: claim.generation };
@@ -449,7 +453,7 @@ export class DeviceNetwork extends EventEmitter {
     void this.persist();
     // The music moved to another device, so this one stops.
     if (claim.device !== this.id) void this.options.local.pause().catch(() => {});
-    this.emit("claim", this.claim);
+    this.emit("claim", this.claim, live);
     this.changed();
   }
 
@@ -504,7 +508,7 @@ export class DeviceNetwork extends EventEmitter {
     this.claim = { device: this.id, generation: 1 };
     this.claimChanged = Date.now();
     await this.persist();
-    this.emit("claim", this.claim);
+    this.emit("claim", this.claim, false);
     this.changed();
   }
 
@@ -597,7 +601,8 @@ export class DeviceNetwork extends EventEmitter {
       this.checking.add(session);
       try {
         const status = await session.request("status", { claim: this.claim, keys: this.groupKeys.map(key => key.id) }, 5000);
-        this.adopt(status?.claim);
+        this.adopt(status?.claim, this.synced.has(session));
+        this.synced.add(session);
         if (text(status?.name, 100)) this.remember({ id, name: status.name, port: validPort(status.port) ? status.port : undefined, addresses: Array.isArray(status.addresses) ? status.addresses.filter(validAddress).slice(0, 8) : undefined });
         if (Array.isArray(status?.keys) && (status.keys.some((key: string) => !this.groupKeys.some(own => own.id === key)) || this.groupKeys.some(own => !status.keys.includes(own.id)))) await this.sync(session);
         const summary = status?.summary && typeof status.summary.state === "string" ? { state: status.summary.state, song: typeof status.summary.song === "string" ? status.summary.song : undefined, artist: typeof status.summary.artist === "string" ? status.summary.artist : undefined } : undefined;
@@ -633,7 +638,8 @@ export class DeviceNetwork extends EventEmitter {
   // What a paired device may ask this one.
   private async handle(session: Session, op: string, body: any): Promise<unknown> {
     if (op === "status") {
-      this.adopt(body?.claim);
+      this.adopt(body?.claim, this.synced.has(session));
+      this.synced.add(session);
       // The answer does not wait for the engine, so a slow engine does not look like a lost device.
       return { name: this.name, summary: this.summaries.get(this.id), claim: this.claim, keys: this.groupKeys.map(key => key.id), port: this.port, addresses: ownAddresses() };
     }
