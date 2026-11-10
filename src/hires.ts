@@ -231,9 +231,9 @@ export async function runHiresHost() {
   let order: number[] = [];
   const entries = new Map<number, Entry>();
   // The batches the host queued as a list or as a later part, by batch number, so entries Apple
-  // does not list yet still have their song. The entries Apple listed at some point are heard.
+  // does not list still have their song. removed holds the sent entries the listener took out.
   const sent = new Map<number, { song: Media; added: boolean }[]>();
-  const heard = new Set<number>();
+  const removed = new Set<number>();
   // The songs of a long list that Apple has not been sent yet, in play order.
   let rest: Listed[] = [];
   let current: Control = {};
@@ -254,11 +254,10 @@ export async function runHiresHost() {
     const queue: { queueId: number; id: string; title: string }[] = (await control.request("queue")).queue ?? [];
     // An empty queue means Apple has nothing queued any more, so Peel's mirror empties too. Songs
     // of a long list not sent yet stay, so the list continues.
-    if (!queue.length) { order = []; entries.clear(); sent.clear(); heard.clear(); synced = Date.now(); return; }
+    if (!queue.length) { order = []; entries.clear(); sent.clear(); removed.clear(); synced = Date.now(); return; }
     // The entries before the playing one are history, also those Apple skipped before listing them.
     const before = [...order, ...hidden()], playing = queue[0]!.queueId, at = before.indexOf(playing);
     order = [...(at >= 0 ? before.slice(0, at) : []), ...queue.map(item => item.queueId)];
-    for (const id of order) heard.add(id);
     for (const item of queue) {
       if (entries.has(item.queueId)) continue;
       const queued = sent.get(batchOf(item.queueId))?.[item.queueId % 2 ** 32];
@@ -461,7 +460,7 @@ export async function runHiresHost() {
     const base = current.item! - start;
     order = playable.map((_, at) => base + at);
     playable.forEach((entry, at) => entries.set(base + at, { queueId: base + at, song: entry.song, added: marks.has(entry.at) }));
-    sent.clear(); heard.clear();
+    sent.clear(); removed.clear();
     sent.set(batchOf(base), playable.map(entry => ({ song: entry.song, added: marks.has(entry.at) })));
     rest = listed.slice(to).map((song, at) => ({ song, added: marks.has(to + at), at: to + at }));
     if (shuffle) mix(rest);
@@ -472,10 +471,11 @@ export async function runHiresHost() {
 
   // The songs Apple has queued after the playing one, also those its answer does not list yet.
   const upcoming = () => order.length - position() - 1 + hidden().length;
-  // Entries the host sent that Apple has not listed yet, in the order they were sent.
+  // Entries the host sent that Apple's answer does not list, in the order they were sent: those
+  // beyond its 101 entries, also ones an added song pushed back out of them.
   function hidden() {
-    const ids: number[] = [];
-    for (const [batch, songs] of sent) songs.forEach((_, index) => { const id = batch * 2 ** 32 + index; if (!heard.has(id)) ids.push(id); });
+    const listed = new Set(order), ids: number[] = [];
+    for (const [batch, songs] of sent) songs.forEach((_, index) => { const id = batch * 2 ** 32 + index; if (!listed.has(id) && !removed.has(id)) ids.push(id); });
     return ids;
   }
   const mix = (list: Listed[]) => { for (let i = list.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [list[i], list[j]] = [list[j]!, list[i]!]; } };
@@ -544,7 +544,8 @@ export async function runHiresHost() {
     let fresh: number[] = [];
     for (const until = Date.now() + 5000; ; await sleep(100)) {
       await sync();
-      fresh = order.filter(id => !known.has(id));
+      // A song of the list that Apple lists only now, because the playing song changed, is not new.
+      fresh = order.filter(id => !known.has(id) && !sent.has(batchOf(id)));
       if (fresh.length >= playable.length || Date.now() > until) break;
     }
     // Apple may name a song by an equivalent catalog ID. Exactly as many new entries as songs
@@ -761,7 +762,7 @@ export async function runHiresHost() {
       if (id === undefined) { rest.splice(index - (list.length - rest.length), 1); return; }
       await control.request(`remove ${id}`).catch(unless);
       await syncUntil(() => !order.includes(id), "Apple Music did not remove the song.");
-      heard.add(id);
+      removed.add(id);
     },
     // A song Apple has queued plays from its queue. One not sent yet starts a new window there.
     jump: async (index: number, expected?: string) => {

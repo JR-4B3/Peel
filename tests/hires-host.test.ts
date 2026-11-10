@@ -240,6 +240,16 @@ test.skipIf(!supported)("a long list moves to another device whole, and a song n
   expect(queue.items.at(-1).id).toBe("1059");
 }, 30000);
 
+test.skipIf(!supported)("a song added to a long list pushes none of its songs out of the queue", async () => {
+  expect((await call("importPlayback", { items: longList.map(id => song(id)), position: 0, playing: true })).status).toBe(200);
+  // The added song moves the last song Apple listed out of its answer.
+  expect((await call("enqueue", [song("777")], true)).status).toBe(200);
+  const queue = (await call("queue")).body.items.map((item: any) => item.id);
+  expect(queue).toEqual(["1000", "777", ...longList.slice(1)]);
+  expect((await call("position")).body).toEqual({ position: 0, total: 61 });
+  expect((await call("exportPlayback")).body.items).toHaveLength(61);
+}, 20000);
+
 test.skipIf(!supported)("a dropped connection after an addition or a skip applies it once", async () => {
   await play("101", "102", "103");
   android.dropAfter.add("add");
