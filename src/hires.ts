@@ -430,11 +430,12 @@ export async function runHiresHost() {
     const a = normal(library), b = normal(catalog);
     return a.length >= 2 && b.length >= 2 && (a === b || ` ${b} `.includes(` ${a} `) || ` ${a} `.includes(` ${b} `));
   };
-  let searching = 0;
+  let searching = 0, searchAfter = 0;
   const waiting: (() => void)[] = [];
   async function match(song: Media): Promise<string | undefined> {
     if (matches.has(song.id)) return matches.get(song.id) ?? undefined;
     if (!normal(song.name) || !normal(song.artist)) return undefined;
+    if (Date.now() < searchAfter) return undefined;
     while (searching >= 4) await new Promise<void>(resolve => waiting.push(resolve));
     searching++;
     try {
@@ -449,8 +450,29 @@ export async function runHiresHost() {
       const id = found.length === 1 ? String(found[0].id) : null;
       matches.set(song.id, id);
       return id ?? undefined;
-    } catch { return undefined; }
+    } catch {
+      // Apple refuses searches for a while after many, so the host asks none for 30 seconds.
+      searchAfter = Date.now() + 30000;
+      return undefined;
+    }
     finally { searching--; waiting.shift()?.(); }
+  }
+  // Songs to match while nothing waits on them, one every half second, so a later list has them.
+  const unmatched: Media[] = [];
+  let matching = false;
+  function matchLater(songs: Media[]) {
+    for (const song of songs) if (!matches.has(song.id) && !unmatched.some(other => other.id === song.id)) unmatched.push(song);
+    if (matching || !unmatched.length) return;
+    matching = true;
+    void (async () => {
+      try {
+        while (unmatched.length) {
+          if (Date.now() < searchAfter) { await sleep(searchAfter - Date.now()); continue; }
+          await match(unmatched.shift()!);
+          await sleep(500);
+        }
+      } finally { matching = false; }
+    })();
   }
   // A library song can keep a catalog ID that Apple's catalog no longer has. Apple Music's Android
   // app then drops the song from a queue without a word, and every later song moves up one place,
@@ -468,14 +490,20 @@ export async function runHiresHost() {
       } catch {}
     }));
   }
-  async function playableSongs(songs: Media[]) {
+  // A song that needs a match and that now says nothing waits on is left out this time and matched
+  // later, so a long list starts without a search for each such song.
+  async function playableSongs(songs: Media[], now: (at: number) => boolean = () => true) {
     await checkCatalog(songs.map(catalogOf).filter((id): id is string => !!id));
-    return Promise.all(songs.map(async song => {
+    const later: Media[] = [];
+    const playable = await Promise.all(songs.map(async (song, at) => {
       const id = catalogOf(song);
       if (id && inCatalog.get(id) !== false) return song;
       // An empty catalog ID marks a song with no playable match, so catalogOf leaves it out.
+      if (!now(at) && !matches.has(song.id)) { later.push(song); return { ...song, catalogId: "" }; }
       return { ...song, catalogId: await match(song) ?? "" };
     }));
+    matchLater(later);
+    return playable;
   }
 
   // Replaces the queue with songs and plays the one at index. A song Apple's catalog lacks is left
@@ -484,7 +512,7 @@ export async function runHiresHost() {
   // window are left out, as if they had played before this queue.
   async function playList(listed: Media[], index: number, marks: Set<number> = new Set()) {
     const from = Math.max(0, Math.min(index - windowBefore, listed.length - windowSize)), to = from + windowSize;
-    const songs = await playableSongs(listed.slice(from, to));
+    const songs = await playableSongs(listed.slice(from, to), at => from + at === index);
     let playable = songs.map((song, at) => ({ song, at: from + at, id: catalogOf(song) })).filter(entry => entry.id);
     if (!playable.length) {
       if (to < listed.length) return playList(listed, to, marks);
@@ -782,7 +810,8 @@ export async function runHiresHost() {
     play: async (items: Media[], index = 0) => {
       wanted = true; notice = undefined;
       const at = position(), waiting = order.slice(at + 1).map(id => entries.get(id)).filter(entry => entry?.added).map(entry => entry!.song);
-      await playList(items, index);
+      const playing = await playList(items, index);
+      if (playing !== index && items[index]) notice = `Apple Music no longer has "${items[index]!.name}", so the next song plays.`;
       // The new songs play either way, so a song that could not be queued again is only reported.
       if (waiting.length) await insert(waiting, true).catch(error => { notice = error instanceof Error ? error.message : String(error); });
     },

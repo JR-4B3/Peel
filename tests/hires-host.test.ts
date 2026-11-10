@@ -286,6 +286,22 @@ test.skipIf(!supported)("a song Apple drops before the chosen one, although the 
   expect(queue.items[queue.position].id).toBe("413");
 }, 20000);
 
+test.skipIf(!supported)("a list starts without a search for each lost song, and says when the chosen one cannot play", async () => {
+  await call("importPlayback", { items: [song("999")], playing: true });
+  android.commands = [];
+  android.gone.add("432"); android.gone.add("434");
+  lookups.length = 0;
+  expect((await call("play", ["431", "432", "433", "434", "435"].map(id => song(id)), 0)).status).toBe(200);
+  // Only the chosen song may wait on a search. The lost songs are left out and looked up later.
+  expect(android.commands.filter(command => command.startsWith("list "))).toEqual(["list 0 431,433,435"]);
+  expect((await send("/state")).body.playback.error).toBeUndefined();
+
+  // The catalog search finds no match for a chosen song it lost, so the next song plays and Peel says why.
+  expect((await call("play", ["431", "432", "433"].map(id => song(id)), 1)).status).toBe(200);
+  expect(android.queue[android.selected]?.id).toBe("433");
+  expect((await send("/state")).body.playback.error).toBe('Apple Music no longer has "Song 432", so the next song plays.');
+}, 20000);
+
 test.skipIf(!supported)("a song Apple drops after the chosen one leaves the later songs in their places", async () => {
   await call("importPlayback", { items: [song("999")], playing: true });
   android.commands = [];
