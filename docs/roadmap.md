@@ -19,7 +19,7 @@ Peel started on 1 October 2026. Everything below is on `main` and in the nightly
 
 - **The song-list filter.** The filter works, but not the way it should yet. It gets redesigned before anything else.
 - **Windows.** Install Peel on a Windows PC from scratch and play a song. Windows has been tested much less than Linux and macOS.
-- **Hi-res recovery on real hardware.** Peel now restarts Apple Music in Android when it stops streaming. Confirm it on a real computer after a night of updates.
+- **Hi-res recovery after a night of updates.** Peel restarts Apple Music in Android when it stops streaming (#60) or plays only silence (#94), and continues the song where it was. Both work on a real computer. Confirm them after a night of updates.
 - **Less memory while listening.** Android's container holds about 1.6 GB while hi-res plays, and Apple Music takes 325 to 515 MB of that. Peel should stay light next to a browser on an ordinary computer ([#72](https://github.com/JR-4B3/Peel/issues/72)).
 - **Peel on phones.** An iPhone and iPad app in SwiftUI that plays Hi-Res Lossless itself through a USB DAC and joins the device network, then Android. [mobile/README.md](../mobile/README.md) has the design and the open questions.
 

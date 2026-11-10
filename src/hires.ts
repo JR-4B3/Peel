@@ -106,6 +106,16 @@ const repeats = ["none", "one", "all"] as const;
 
 interface Control { state?: number; position?: number; item?: number; title?: string; artist?: string; album?: string; id?: string; duration?: number; error?: string }
 interface Entry { queueId: number; song: Media; added: boolean; unknown?: boolean }
+interface Listed { song: Media; added: boolean; at: number }
+
+// Apple Music's Android app ignores a new queue of more than about 500 songs (#96), and its queue
+// answer lists only the playing entry and the next 100. A longer list goes to Apple as a window
+// around the chosen song, with windowBefore songs before it, and the host adds the rest at the end
+// of Apple's queue in parts of partSize once fewer than partAt songs are left.
+const windowSize = Number(process.env.PEEL_HIRES_WINDOW) || 500;
+const windowBefore = Math.floor(windowSize / 5), partSize = windowSize - windowBefore, partAt = Math.ceil(windowSize / 8);
+// Apple numbers each batch of songs it queues. An entry's ID is its batch times 2^32 plus its index.
+const batchOf = (id: number) => Math.floor(id / 2 ** 32);
 
 // A command that changes the queue or the playing song, sent when the connection closed or the
 // controller did not answer. Android may or may not have applied it, so it is not sent again: the
@@ -220,6 +230,12 @@ export async function runHiresHost() {
   // The whole queue in Apple Music's order, history included, and Peel's song for each entry.
   let order: number[] = [];
   const entries = new Map<number, Entry>();
+  // The batches the host queued as a list or as a later part, by batch number, so entries Apple
+  // does not list yet still have their song. The entries Apple listed at some point are heard.
+  const sent = new Map<number, { song: Media; added: boolean }[]>();
+  const heard = new Set<number>();
+  // The songs of a long list that Apple has not been sent yet, in play order.
+  let rest: Listed[] = [];
   let current: Control = {};
   let wanted = false;
   let rated = { id: "", value: undefined as number | undefined, checked: 0 };
@@ -236,11 +252,19 @@ export async function runHiresHost() {
   // Reads Apple's upcoming queue, and keeps the history before the playing entry.
   async function sync() {
     const queue: { queueId: number; id: string; title: string }[] = (await control.request("queue")).queue ?? [];
-    // An empty queue means Apple has nothing queued any more, so Peel's mirror empties too.
-    if (!queue.length) { order = []; entries.clear(); synced = Date.now(); return; }
-    const playing = queue[0]!.queueId, at = order.indexOf(playing);
-    order = [...(at >= 0 ? order.slice(0, at) : []), ...queue.map(item => item.queueId)];
-    for (const item of queue) if (!entries.has(item.queueId)) entries.set(item.queueId, { queueId: item.queueId, added: false, unknown: true, song: { id: item.id, type: "songs", name: item.title, artist: "", album: "", duration: 0, catalogId: item.id } });
+    // An empty queue means Apple has nothing queued any more, so Peel's mirror empties too. Songs
+    // of a long list not sent yet stay, so the list continues.
+    if (!queue.length) { order = []; entries.clear(); sent.clear(); heard.clear(); synced = Date.now(); return; }
+    // The entries before the playing one are history, also those Apple skipped before listing them.
+    const before = [...order, ...hidden()], playing = queue[0]!.queueId, at = before.indexOf(playing);
+    order = [...(at >= 0 ? before.slice(0, at) : []), ...queue.map(item => item.queueId)];
+    for (const id of order) heard.add(id);
+    for (const item of queue) {
+      if (entries.has(item.queueId)) continue;
+      const queued = sent.get(batchOf(item.queueId))?.[item.queueId % 2 ** 32];
+      entries.set(item.queueId, queued ? { queueId: item.queueId, ...queued }
+        : { queueId: item.queueId, added: false, unknown: true, song: { id: item.id, type: "songs", name: item.title, artist: "", album: "", duration: 0, catalogId: item.id } });
+    }
     // Songs of queues that were replaced are forgotten.
     const kept = new Set(order);
     for (const id of entries.keys()) if (!kept.has(id)) entries.delete(id);
@@ -265,6 +289,11 @@ export async function runHiresHost() {
     // A changed queue Peel did not ask for, such as shuffle, shows within two seconds.
     if (resync && (current.item !== before || Date.now() - synced > 2000)) await sync();
     watchStall();
+    watchSilence();
+    if (rest.length && !extending && Date.now() >= extendAfter && upcoming() < partAt) {
+      extending = true;
+      void call("extend").catch(() => {}).finally(() => { extending = false; });
+    }
     return current;
   }
   let busy = 0;
@@ -284,6 +313,63 @@ export async function runHiresHost() {
     const again = recovered;
     recovered = true;
     void call("recover", [again]).catch(() => {}).finally(() => { recovering = false; });
+  }
+
+  // Apple Music can report playing, with its position advancing, while every sample it sends is
+  // zero (#94). Restarting Apple Music brings the sound back. While a song plays, the host records
+  // half a second of Android's stream from PipeWire every few seconds. When every sample stays zero
+  // for silenceLimit, the host restarts Apple Music and continues, as after a stall. A second
+  // silence within a minute only says so, since a song can also be silent on purpose, and the host
+  // checks that song no more. It never checks at volume 0, or near the start or end of a song.
+  // Android's own mixer underrun count is no sign: it climbs by about 40 a second in normal playback.
+  const silenceLimit = Number(process.env.PEEL_HIRES_SILENCE_MS) || 10000;
+  const checkEvery = Math.min(5000, silenceLimit / 2);
+  let silentSince: number | undefined, listened = 0, listening = false, silenced = 0, quiet: number | undefined;
+  function watchSilence() {
+    const duration = current.duration ?? 0, at = current.position ?? 0;
+    const playing = wanted && !recovering && current.state === PLAYING && volume > 0 && !muted && current.item !== quiet && at >= 3000 && (!duration || at <= duration - 3000);
+    if (!playing) { silentSince = undefined; return; }
+    if (listening || Date.now() - listened < checkEvery) return;
+    listening = true;
+    const item = current.item;
+    void allZero().then(zero => {
+      listened = Date.now();
+      if (zero !== true || current.item !== item || current.state !== PLAYING || !wanted || recovering) { silentSince = undefined; return; }
+      silentSince ??= listened;
+      if (listened - silentSince < silenceLimit) return;
+      silentSince = undefined;
+      if (listened - silenced < 60000) {
+        quiet = item;
+        notice = "Android's audio is silent, also after a restart of Apple Music. Quit Peel and open it again to restart Android.";
+        return;
+      }
+      silenced = listened; recovering = true;
+      void call("recover", [false]).catch(() => {}).finally(() => { recovering = false; });
+    }).catch(() => {}).finally(() => { listening = false; });
+  }
+  // Records half a second of each of Android's playing streams at its own rate, so the recording
+  // doesn't change PipeWire's rate. Answers whether every sample was zero, or undefined when it
+  // can't tell, for example without PulseAudio's tools or with a stream muted on the computer.
+  async function allZero(): Promise<boolean | undefined> {
+    if (!Bun.which("pactl") || !Bun.which("pacat")) return undefined;
+    const list = Bun.spawn(["pactl", "-f", "json", "list", "sink-inputs"], { stdout: "pipe", stderr: "ignore" });
+    let streams: { index: number; corked?: boolean; mute?: boolean; volume?: Record<string, { value?: number }>; sample_specification?: string; properties?: Record<string, string> }[];
+    try { streams = JSON.parse(await new Response(list.stdout).text()); } catch { return undefined; }
+    streams = streams.filter(stream => stream.properties?.["application.name"] === "Waydroid" && !stream.corked);
+    if (!streams.length) return undefined;
+    for (const stream of streams) {
+      const levels = Object.values(stream.volume ?? {}).map(channel => channel.value ?? 1);
+      if (stream.mute || levels.length && levels.every(level => level === 0)) return undefined;
+      const rate = Number(/(\d+)Hz/.exec(stream.sample_specification ?? "")?.[1]) || 48000;
+      // pacat's usual latency holds back the first second or two, so it would record nothing.
+      const record = Bun.spawn(["pacat", "--record", "--raw", `--monitor-stream=${stream.index}`, "--latency-msec=50", "--format=float32le", `--rate=${rate}`, "--channels=2"], { stdout: "pipe", stderr: "ignore" });
+      setTimeout(() => record.kill(), 600).unref();
+      const bytes = await new Response(record.stdout).arrayBuffer();
+      const samples = new Float32Array(bytes, 0, Math.floor(bytes.byteLength / 4));
+      if (samples.length < rate / 10) return undefined;
+      if (samples.some(sample => sample !== 0)) return false;
+    }
+    return true;
   }
 
   // Apple Music applies commands a moment later. Waits until its state shows the change, for up
@@ -353,11 +439,17 @@ export async function runHiresHost() {
   }
 
   // Replaces the queue with songs and plays the one at index. A song Apple's catalog lacks is left
-  // out, and the next one plays instead. Returns the index in listed of the song that plays.
+  // out, and the next one plays instead. Returns the index in listed of the song that plays. Apple
+  // gets at most windowSize songs, and the rest of a longer list waits in rest. Songs before the
+  // window are left out, as if they had played before this queue.
   async function playList(listed: Media[], index: number, marks: Set<number> = new Set()) {
-    const songs = await playableSongs(listed);
-    const playable = songs.map((song, at) => ({ song, at, id: catalogOf(song) })).filter(entry => entry.id);
-    if (!playable.length) throw new Error("Apple's catalog no longer has these songs, so hi-res cannot play them.");
+    const from = Math.max(0, Math.min(index - windowBefore, listed.length - windowSize)), to = from + windowSize;
+    const songs = await playableSongs(listed.slice(from, to));
+    const playable = songs.map((song, at) => ({ song, at: from + at, id: catalogOf(song) })).filter(entry => entry.id);
+    if (!playable.length) {
+      if (to < listed.length) return playList(listed, to, marks);
+      throw new Error("Apple's catalog no longer has these songs, so hi-res cannot play them.");
+    }
     let start = playable.findIndex(entry => entry.at >= index);
     if (start < 0) start = playable.length - 1;
     const previous = current.item;
@@ -369,8 +461,69 @@ export async function runHiresHost() {
     const base = current.item! - start;
     order = playable.map((_, at) => base + at);
     playable.forEach((entry, at) => entries.set(base + at, { queueId: base + at, song: entry.song, added: marks.has(entry.at) }));
+    sent.clear(); heard.clear();
+    sent.set(batchOf(base), playable.map(entry => ({ song: entry.song, added: marks.has(entry.at) })));
+    rest = listed.slice(to).map((song, at) => ({ song, added: marks.has(to + at), at: to + at }));
+    if (shuffle) mix(rest);
+    extendAfter = 0; part = undefined;
     await sync();
     return playable[start]!.at;
+  }
+
+  // The songs Apple has queued after the playing one, also those its answer does not list yet.
+  const upcoming = () => order.length - position() - 1 + hidden().length;
+  // Entries the host sent that Apple has not listed yet, in the order they were sent.
+  function hidden() {
+    const ids: number[] = [];
+    for (const [batch, songs] of sent) songs.forEach((_, index) => { const id = batch * 2 ** 32 + index; if (!heard.has(id)) ids.push(id); });
+    return ids;
+  }
+  const mix = (list: Listed[]) => { for (let i = list.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [list[i], list[j]] = [list[j]!, list[i]!]; } };
+
+  // Sends the next part of rest to the end of Apple's queue. Apple names the part in a new batch,
+  // found in its queue afterwards by its songs. A part Apple ignored is sent again after a while,
+  // unless it shows up then. Apple's queue that ended meanwhile starts again with the rest.
+  let extending = false, extendAfter = 0;
+  let part: { after: number; songs: Listed[] } | undefined;
+  async function extend() {
+    if (!rest.length || upcoming() >= partAt || !order.length && !wanted) return;
+    if (wanted && (!order.length || upcoming() === 0 && stopped(current))) {
+      const list = rest;
+      rest = [];
+      await playList(list.map(entry => entry.song), 0, new Set(list.flatMap((entry, at) => entry.added ? [at] : [])));
+      return;
+    }
+    const adopt = () => {
+      if (!part) return false;
+      const ids = part.songs.map(entry => catalogOf(entry.song));
+      const batch = [...new Set(order.map(batchOf))].find(batch => batch > part!.after && !sent.has(batch) && (() => {
+        const listed = order.filter(id => batchOf(id) === batch);
+        const same = listed.filter(id => entries.get(id)?.song.catalogId === ids[id % 2 ** 32]).length;
+        return same * 2 >= listed.length;
+      })());
+      if (batch === undefined) return false;
+      sent.set(batch, part.songs.map(entry => ({ song: entry.song, added: entry.added })));
+      for (const id of order) if (batchOf(id) === batch) entries.set(id, { queueId: id, ...sent.get(batch)![id % 2 ** 32]! });
+      rest = rest.filter(entry => !part!.songs.includes(entry));
+      part = undefined;
+      return true;
+    };
+    await sync();
+    if (adopt()) return;
+    if (!part) {
+      const next = rest.slice(0, partSize), songs = await playableSongs(next.map(entry => entry.song));
+      const playable = next.map((entry, at) => ({ ...entry, song: songs[at]! })).filter(entry => catalogOf(entry.song));
+      if (!playable.length) { rest = rest.slice(next.length); return; }
+      // Songs left out of a part are gone from rest with it.
+      rest = [...playable, ...rest.slice(next.length)];
+      part = { after: Math.max(...sent.keys(), ...order.map(batchOf)), songs: playable };
+    }
+    await control.request(`add end ${part.songs.map(entry => catalogOf(entry.song)).join(",")}`).catch(unless);
+    for (const end = Date.now() + 5000; Date.now() < end; await sleep(100)) {
+      await sync();
+      if (adopt()) return;
+    }
+    extendAfter = Date.now() + 30000;
   }
 
   // Adds songs after the playing one (next) or after the songs added before. Succeeds only once
@@ -426,9 +579,16 @@ export async function runHiresHost() {
 
   // Every entry in order has a song. One Apple added by itself and the host never saw gets a
   // placeholder until the next read of the queue.
-  const songOf = (id: number): Media => entries.get(id)?.song ?? { id: "", type: "songs", name: "", artist: "", album: "", duration: 0 };
+  const known = (id: number) => entries.get(id) ?? sent.get(batchOf(id))?.[id % 2 ** 32];
+  const songOf = (id: number): Media => known(id)?.song ?? { id: "", type: "songs", name: "", artist: "", album: "", duration: 0 };
   const position = () => Math.max(0, order.indexOf(current.item ?? -1));
-  const songAt = (index: number) => entries.get(order[index]!)?.song;
+  // The whole queue: Apple's entries the host knows, the sent entries Apple does not list yet,
+  // and the songs not sent yet. Queue indexes count in this list.
+  function whole() {
+    const ids = [...order, ...hidden()];
+    return [...ids.map(id => ({ id, song: songOf(id), added: !!known(id)?.added })), ...rest.map(entry => ({ id: undefined, song: entry.song, added: entry.added }))];
+  }
+  const songAt = (index: number) => index < order.length ? entries.get(order[index]!)?.song : whole()[index]?.song;
   const check = (index: number, expected?: string) => {
     if (expected && songAt(index)?.id !== expected) throw new Error("The queue changed in another Peel. Try again.");
   };
@@ -438,6 +598,7 @@ export async function runHiresHost() {
     const add = (text: string) => { for (let i = 0; i < text.length; i++) { hash ^= text.charCodeAt(i); hash = Math.imul(hash, 0x01000193); } };
     add(String(position()));
     for (const id of order) add(`|${id}${entries.get(id)?.added ? "+" : ""}`);
+    add(`|${hidden().length}|${rest.length}`);
     return (hash >>> 0).toString(16).padStart(8, "0");
   }
 
@@ -507,7 +668,9 @@ export async function runHiresHost() {
 
   // Apple mixes the songs after the playing one when shuffle turns on, and restores their order
   // when it turns off. The new order shows in its queue a moment later.
+  // Songs of a long list not sent yet are mixed and put back here, in the same way.
   async function setShuffle(enabled: boolean) {
+    if (enabled !== shuffle) { if (enabled) mix(rest); else rest.sort((a, b) => a.at - b.at); }
     shuffle = enabled;
     const before = order.join();
     await control.request(`shuffle ${enabled ? 1 : 0}`);
@@ -584,6 +747,7 @@ export async function runHiresHost() {
     },
     move: async (from: number, to: number, expected?: string, target?: string) => {
       check(from, expected); check(to, target);
+      if (Math.max(from, to) >= order.length) throw new Error("Only the songs Apple Music lists next can be moved.");
       const at = position();
       if (Math.min(from, to) <= at) return;
       const id = order[from]!, beside = order[to]!, after = to > from;
@@ -593,25 +757,33 @@ export async function runHiresHost() {
     remove: async (index: number, expected?: string) => {
       check(index, expected);
       if (index <= position()) return;
-      const id = order[index]!;
+      const list = whole(), id = list[index]?.id;
+      if (id === undefined) { rest.splice(index - (list.length - rest.length), 1); return; }
       await control.request(`remove ${id}`).catch(unless);
       await syncUntil(() => !order.includes(id), "Apple Music did not remove the song.");
+      heard.add(id);
     },
+    // A song Apple has queued plays from its queue. One not sent yet starts a new window there.
     jump: async (index: number, expected?: string) => {
       check(index, expected);
       wanted = true;
-      const target = order[index];
+      const list = whole(), target = list[index]?.id;
+      if (target === undefined) {
+        const from = position();
+        await playList(list.slice(from).map(entry => entry.song), index - from, new Set(list.slice(from).flatMap((entry, at) => entry.added ? [at] : [])));
+        return;
+      }
       await step(`skip ${target}`, state => state.item === target);
     },
-    queue: () => ({ position: position(), items: order.map((id, index) => ({ ...describe(songOf(id)), added: index > position() && !!entries.get(id)?.added })) }),
+    queue: () => ({ position: position(), items: whole().map((entry, index) => ({ ...describe(entry.song), added: index > position() && entry.added })) }),
     added: (offset = 0, limit = 100) => {
       const at = position(), list = order.map((id, index) => ({ id, index })).filter(({ id, index }) => index > at && entries.get(id)?.added);
       return { more: offset + limit < list.length, items: list.slice(offset, offset + limit).map(({ id, index }) => ({ ...describe(songOf(id)), queueIndex: index })) };
     },
-    position: () => ({ position: position(), total: order.length }),
+    position: () => ({ position: position(), total: order.length + hidden().length + rest.length }),
     exportPlayback: () => ({
-      items: order.map(songOf), position: position(),
-      added: order.map((id, index) => index > position() && entries.get(id)?.added ? index : -1).filter(index => index >= 0),
+      items: whole().map(entry => entry.song), position: position(),
+      added: whole().map((entry, index) => index > position() && entry.added ? index : -1).filter(index => index >= 0),
       time: (current.position ?? 0) / 1000, playing: current.state === PLAYING, repeatMode: repeats[repeat], shuffleMode: shuffle,
     }),
     // Takes over a queue from another device. A paused queue starts silent, seeks, and pauses, and
@@ -637,8 +809,9 @@ export async function runHiresHost() {
         throw error;
       }
     },
-    // Restarts Apple Music and continues the queue where it stalled, or pauses after a second
-    // stall. watchStall runs it. A listener who paused meanwhile keeps the pause.
+    // Restarts Apple Music and continues the queue where it stalled or went silent, or pauses
+    // after a second stall. watchStall and watchSilence run it. A listener who paused meanwhile
+    // keeps the pause.
     recover: async (again: boolean) => {
       if (!wanted) return;
       if (again) {
@@ -649,8 +822,14 @@ export async function runHiresHost() {
       }
       const saved = methods.exportPlayback!() as Parameters<typeof methods.importPlayback>[0];
       await control.request("restart");
+      // Apple Music starts again with the next command, and its session can take a few seconds.
+      // A queue sent before it is there is lost.
+      for (const end = Date.now() + 15000; ; await sleep(500)) {
+        try { await control.request("state"); break; } catch (error) { if (Date.now() > end) throw error; }
+      }
       await methods.importPlayback!({ ...saved, playing: true });
     },
+    extend,
     rating: async () => await readRating(playingSong()) ?? -1,
     rate: async (value: number, expected?: string) => {
       const song = playingSong(), path = ratingPath(song);
