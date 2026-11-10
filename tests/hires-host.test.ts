@@ -26,6 +26,9 @@ const android = {
   // queue answer lists only the playing entry and the next view - 1. The host's window is the
   // same size in these tests.
   limit: 20, view: 8,
+  // Songs Apple Music leaves out of a list or addition without a word, as it does with songs it
+  // cannot play, and songs the catalog no longer has.
+  drops: new Set<string>(), gone: new Set<string>(),
   // A state reply is split at this byte offset into two packets.
   splitAt: undefined as number | undefined,
   commands: [] as string[],
@@ -39,13 +42,13 @@ function reset() {
   // Queue IDs keep counting, as Apple's do: a new queue never reuses an old entry's ID.
   Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [], stall: 0, restarts: 0 });
   silence(0);
-  android.ignore.clear(); android.fail.clear(); android.dropAfter.clear();
+  android.ignore.clear(); android.fail.clear(); android.dropAfter.clear(); android.drops.clear(); android.gone.clear();
 }
 const snapshot = () => {
   const item = android.queue[android.selected];
   return { state: android.state, position: android.position, item: item?.queueId ?? -1, id: item?.id, title: item?.title, duration: 300000 };
 };
-const batchOf = (ids: string[]) => { android.batch++; return ids.map((id, index) => ({ queueId: android.batch * 2 ** 32 + index, id, title: `Song ${id}` })); };
+const batchOf = (ids: string[]) => { android.batch++; return ids.filter(id => !android.drops.has(id)).map((id, index) => ({ queueId: android.batch * 2 ** 32 + index, id, title: `Song ${id}` })); };
 
 function apply(name: string, args: string[]): unknown {
   if (android.ignore.has(name)) return undefined;
@@ -115,8 +118,13 @@ beforeAll(async () => {
   const controlPort = (controller.address() as any).port;
   // The catalog knows song 301, which the cover test plays without Peel queuing it.
   api = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: request => {
-    const path = new URL(request.url).pathname;
+    const url = new URL(request.url), path = url.pathname;
     lookups.push(path);
+    // The catalog has every song asked for by ID, except the ones a test took out of it.
+    if (path.endsWith("/v1/catalog/de/songs") && url.searchParams.has("ids")) {
+      const ids = url.searchParams.get("ids")!.split(",").filter(id => !android.gone.has(id));
+      return Response.json({ data: ids.map(id => ({ id, type: "songs", attributes: { name: `Song ${id}`, playParams: { id, kind: "song" } } })) });
+    }
     if (/\/v1\/catalog\/de\/songs\/30[23]$/.test(path)) return new Response("unavailable", { status: 503 });
     if (path.endsWith("/v1/me/storefront")) return Response.json({ data: [{ id: "de", type: "storefronts" }] });
     if (path.endsWith("/v1/catalog/de/songs/301")) return Response.json({ data: [{ id: "301", type: "songs", attributes: { name: "Song 301", artistName: "Catalog", albumName: "Lookup", artwork: { url: "https://art.example/{w}x{h}.jpg" } } }] });
@@ -248,6 +256,47 @@ test.skipIf(!supported)("a song added to a long list pushes none of its songs ou
   expect(queue).toEqual(["1000", "777", ...longList.slice(1)]);
   expect((await call("position")).body).toEqual({ position: 0, total: 61 });
   expect((await call("exportPlayback")).body.items).toHaveLength(61);
+}, 20000);
+
+const ids = (items: any[]) => items.map(item => item.id);
+
+test.skipIf(!supported)("a song the catalog no longer has stays out of Apple's list, so the chosen song plays", async () => {
+  // Clears songs added in earlier tests, which play would keep.
+  await call("importPlayback", { items: [song("999")], playing: true });
+  android.commands = [];
+  android.gone.add("402"); android.drops.add("402");
+  expect((await call("play", ["401", "402", "403", "404"].map(id => song(id)), 2)).status).toBe(200);
+  expect(android.commands.filter(command => command.startsWith("list "))).toEqual(["list 1 401,403,404"]);
+  expect(android.queue[android.selected]?.id).toBe("403");
+  const queue = (await call("queue")).body;
+  expect(ids(queue.items)).toEqual(["401", "403", "404"]);
+  expect(queue.items[queue.position].id).toBe("403");
+}, 20000);
+
+test.skipIf(!supported)("a song Apple drops before the chosen one, although the catalog has it, still lets the chosen song play", async () => {
+  await call("importPlayback", { items: [song("999")], playing: true });
+  android.commands = [];
+  android.drops.add("412");
+  expect((await call("play", ["411", "412", "413", "414", "415"].map(id => song(id)), 2)).status).toBe(200);
+  // Apple's third entry is 414, so the list starts again at 413.
+  expect(android.commands.filter(command => command.startsWith("list "))).toEqual(["list 2 411,412,413,414,415", "list 0 413,414,415"]);
+  expect(android.queue[android.selected]?.id).toBe("413");
+  const queue = (await call("queue")).body;
+  expect(ids(queue.items)).toEqual(["413", "414", "415"]);
+  expect(queue.items[queue.position].id).toBe("413");
+}, 20000);
+
+test.skipIf(!supported)("a song Apple drops after the chosen one leaves the later songs in their places", async () => {
+  await call("importPlayback", { items: [song("999")], playing: true });
+  android.commands = [];
+  android.drops.add("423");
+  expect((await call("play", ["421", "422", "423", "424", "425"].map(id => song(id)), 0)).status).toBe(200);
+  const queue = (await call("queue")).body;
+  expect(ids(queue.items)).toEqual(["421", "422", "424", "425"]);
+  expect((await call("position")).body).toEqual({ position: 0, total: 4 });
+  expect((await call("jump", 2, "424")).status).toBe(200);
+  expect(android.queue[android.selected]?.id).toBe("424");
+  expect((await send("/state")).body.playback.nowPlaying.name).toBe("Song 424");
 }, 20000);
 
 test.skipIf(!supported)("a dropped connection after an addition or a skip applies it once", async () => {

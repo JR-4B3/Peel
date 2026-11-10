@@ -256,6 +256,7 @@ export async function runHiresHost() {
     // of a long list not sent yet stay, so the list continues.
     if (!queue.length) { order = []; entries.clear(); sent.clear(); removed.clear(); synced = Date.now(); return; }
     // The entries before the playing one are history, also those Apple skipped before listing them.
+    for (const item of queue) align(item);
     const before = [...order, ...hidden()], playing = queue[0]!.queueId, at = before.indexOf(playing);
     order = [...(at >= 0 ? before.slice(0, at) : []), ...queue.map(item => item.queueId)];
     for (const item of queue) {
@@ -270,6 +271,24 @@ export async function runHiresHost() {
     synced = Date.now();
   }
   let synced = 0;
+
+  // Apple's entry holds another song than the host sent at its place when Apple dropped songs it
+  // cannot play, which moves the later ones up. The dropped songs come out of the sent batch up to
+  // the next one with Apple's song, so later places match again. Their entries are made anew.
+  function align(item: { queueId: number; id: string }) {
+    const batch = batchOf(item.queueId), index = item.queueId % 2 ** 32, songs = sent.get(batch);
+    if (!songs || !item.id || index >= songs.length || catalogOf(songs[index]!.song) === item.id) return;
+    const found = songs.findIndex((entry, at) => at > index && catalogOf(entry.song) === item.id);
+    if (found < 0) return;
+    const dropped = found - index;
+    songs.splice(index, dropped);
+    for (const key of [...entries.keys()]) if (batchOf(key) === batch && key % 2 ** 32 >= index) entries.delete(key);
+    for (const key of [...removed]) {
+      if (batchOf(key) !== batch || key % 2 ** 32 < index) continue;
+      removed.delete(key);
+      if (key % 2 ** 32 >= found) removed.add(key - dropped);
+    }
+  }
 
   // Reads Apple's queue until it shows a change, after an edit Apple applies a moment later.
   async function syncUntil(done: () => boolean, failure: string) {
@@ -433,8 +452,30 @@ export async function runHiresHost() {
     } catch { return undefined; }
     finally { searching--; waiting.shift()?.(); }
   }
+  // A library song can keep a catalog ID that Apple's catalog no longer has. Apple Music's Android
+  // app then drops the song from a queue without a word, and every later song moves up one place,
+  // so the host asks the catalog first, 300 IDs at a time, and keeps the answers for its life. A
+  // song the catalog lost is matched like one that never had an ID. A failed request trusts the IDs.
+  const inCatalog = new Map<string, boolean>();
+  async function checkCatalog(ids: string[]) {
+    const unknown = [...new Set(ids.filter(id => !inCatalog.has(id)))];
+    await Promise.all(Array.from({ length: Math.ceil(unknown.length / 300) }, async (_, part) => {
+      const asked = unknown.slice(part * 300, part * 300 + 300);
+      try {
+        const response = await apple.request(`v1/catalog/$STOREFRONT/songs?ids=${asked.join(",")}`);
+        const found = new Set((response.data ?? []).filter((item: any) => item.attributes?.playParams).map((item: any) => String(item.id)));
+        for (const id of asked) inCatalog.set(id, found.has(id));
+      } catch {}
+    }));
+  }
   async function playableSongs(songs: Media[]) {
-    return Promise.all(songs.map(async song => catalogOf(song) ? song : { ...song, catalogId: await match(song) }));
+    await checkCatalog(songs.map(catalogOf).filter((id): id is string => !!id));
+    return Promise.all(songs.map(async song => {
+      const id = catalogOf(song);
+      if (id && inCatalog.get(id) !== false) return song;
+      // An empty catalog ID marks a song with no playable match, so catalogOf leaves it out.
+      return { ...song, catalogId: await match(song) ?? "" };
+    }));
   }
 
   // Replaces the queue with songs and plays the one at index. A song Apple's catalog lacks is left
@@ -444,16 +485,23 @@ export async function runHiresHost() {
   async function playList(listed: Media[], index: number, marks: Set<number> = new Set()) {
     const from = Math.max(0, Math.min(index - windowBefore, listed.length - windowSize)), to = from + windowSize;
     const songs = await playableSongs(listed.slice(from, to));
-    const playable = songs.map((song, at) => ({ song, at: from + at, id: catalogOf(song) })).filter(entry => entry.id);
+    let playable = songs.map((song, at) => ({ song, at: from + at, id: catalogOf(song) })).filter(entry => entry.id);
     if (!playable.length) {
       if (to < listed.length) return playList(listed, to, marks);
       throw new Error("Apple's catalog no longer has these songs, so hi-res cannot play them.");
     }
     let start = playable.findIndex(entry => entry.at >= index);
     if (start < 0) start = playable.length - 1;
-    const previous = current.item;
+    let previous = current.item;
     await control.request(`list ${start} ${playable.map(entry => entry.id).join(",")}`).catch(unless);
     await settle(previous, start, playable[start]!.id!);
+    // Apple dropped a song before the chosen one that the catalog check let through, so its entry
+    // at start is a later song. The list starts again at the chosen song, without the songs before.
+    if (current.id && current.id !== playable[start]!.id) {
+      playable = playable.slice(start); start = 0; previous = current.item;
+      await control.request(`list 0 ${playable.map(entry => entry.id).join(",")}`).catch(unless);
+      await settle(previous, 0, playable[0]!.id!);
+    }
     // A new queue usually starts by itself, but not always after a pause.
     const running = (state: Control) => state.state === PLAYING || state.state === BUFFERING || state.state === CONNECTING;
     if (!running(current)) await step("play", running, "Apple Music did not start the song.");
