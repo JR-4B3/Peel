@@ -43,11 +43,14 @@ adb_target() {
   [ -n "$ip" ] && [ "$ip" != UNKNOWN ] || return 1
   echo "$ip:5555"
 }
-A() { timeout "${ADB_TIMEOUT:-30}" adb -s "$(adb_target)" "$@"; }
+# adb starts its server the first time it runs, and the server keeps the files of the command that
+# started it open. Started under the session lock (7) or the update lock (9), it would hold that
+# lock until it exits, and nothing could start or stop Android meanwhile. So adb runs without them.
+A() { timeout "${ADB_TIMEOUT:-30}" adb -s "$(adb_target)" "$@" 7>&- 9>&-; }
 adb_connect() {
   local t; t=$(adb_target) || return 1
-  timeout 5 adb connect "$t" >/dev/null 2>&1 || true
-  timeout 5 adb -s "$t" wait-for-device 2>/dev/null
+  timeout 5 adb connect "$t" >/dev/null 2>&1 7>&- 9>&- || true
+  timeout 5 adb -s "$t" wait-for-device 2>/dev/null 7>&- 9>&-
 }
 
 # Android only accepts adb from keys listed in its data partition. A new key would wait for a
@@ -56,11 +59,11 @@ authorize_adb() {
   local t; t=$(adb_target) || return 1
   log "authorizing this machine's adb key in Android"
   root adb-auth >&2 || return 1
-  timeout 5 adb disconnect "$t" >/dev/null 2>&1 || true
+  timeout 5 adb disconnect "$t" >/dev/null 2>&1 7>&- 9>&- || true
 }
 adb_unauthorized() {
   local t; t=$(adb_target) || return 1
-  timeout 5 adb devices 2>/dev/null | grep -q "^$t[[:space:]]*unauthorized"
+  timeout 5 adb devices 2>/dev/null 7>&- 9>&- | grep -q "^$t[[:space:]]*unauthorized"
 }
 
 wait_boot() {  # waits up to BOOT_TIMEOUT seconds (default 180) for Android to finish booting

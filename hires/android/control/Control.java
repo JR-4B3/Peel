@@ -97,10 +97,13 @@ public final class Control {
     // rate [hz]: switches the rate Android mixes at, through Peel's rate helper, and answers the
     // rate it mixes at. Without the helper the rate stays as it is.
     if (name.equals("rate")) return "{\"rate\":" + (arg.isEmpty() ? Rates.mixer() : Rates.set(Integer.parseInt(arg))) + "}";
-    // restart: stops Apple Music, for a player that no longer streams. The next command finds no
-    // session, and the host starts Apple Music's playback service again.
+    // restart: stops Apple Music, for a player that no longer streams or went silent. The next
+    // command finds no session, and the host starts Apple Music's playback service again. The
+    // stopped app's session stays listed for a moment, and commands sent to it then are lost, so
+    // the answer comes once it is gone, or after 5 seconds.
     if (name.equals("restart")) {
       Runtime.getRuntime().exec(new String[] { "am", "force-stop", APPLE }).waitFor();
+      for (int i = 0; i < 50 && session(true) != null; i++) Thread.sleep(100);
       controller = null;
       return "{\"ok\":true}";
     }

@@ -14,6 +14,9 @@ export interface Media {
   genre?: string;
   // The catalog song a library song belongs to. Apple keeps favourites on catalog songs.
   catalogId?: string;
+  // Another catalog ID for the same recording, set only when it differs from catalogId. Apple can
+  // drop a library song's catalogId from the catalog and still have the song under this one.
+  reportingId?: string;
   // Rated as a favourite, once known.
   loved?: boolean;
 }
@@ -98,6 +101,7 @@ export function media(item: Record<string, any>, type = "songs"): Media {
     artwork: attrs.artwork?.url, releaseDate: attrs.releaseDate, trackCount: attrs.trackCount,
     prerelease: attrs.isPrerelease, genre: attrs.genreNames?.[0],
     catalogId: attrs.playParams?.catalogId ?? (/^\d+$/.test(String(resource.id)) ? String(resource.id) : undefined),
+    ...attrs.playParams?.reportingId && attrs.playParams.reportingId !== attrs.playParams.catalogId ? { reportingId: String(attrs.playParams.reportingId) } : {},
   };
 }
 
