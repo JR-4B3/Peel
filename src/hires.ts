@@ -486,18 +486,23 @@ export async function runHiresHost() {
       try {
         const response = await apple.request(`v1/catalog/$STOREFRONT/songs?ids=${asked.join(",")}`);
         const found = new Set((response.data ?? []).filter((item: any) => item.attributes?.playParams).map((item: any) => String(item.id)));
+        // The catalog has nearly every library song, so an answer with none of ten or more is a
+        // refusal, which would leave a whole list out. It is trusted like a failed request.
+        if (!found.size && asked.length >= 10) return;
         for (const id of asked) inCatalog.set(id, found.has(id));
       } catch {}
     }));
   }
   // A song that needs a match and that now says nothing waits on is left out this time and matched
-  // later, so a long list starts without a search for each such song.
+  // later, so a long list starts without a search for each such song. A library song whose catalog
+  // ID is gone often still plays under its second ID, which needs no search.
   async function playableSongs(songs: Media[], now: (at: number) => boolean = () => true) {
-    await checkCatalog(songs.map(catalogOf).filter((id): id is string => !!id));
+    await checkCatalog(songs.flatMap(song => [catalogOf(song), song.reportingId]).filter((id): id is string => !!id));
     const later: Media[] = [];
     const playable = await Promise.all(songs.map(async (song, at) => {
       const id = catalogOf(song);
       if (id && inCatalog.get(id) !== false) return song;
+      if (song.reportingId && inCatalog.get(song.reportingId)) return { ...song, catalogId: song.reportingId };
       // An empty catalog ID marks a song with no playable match, so catalogOf leaves it out.
       if (!now(at) && !matches.has(song.id)) { later.push(song); return { ...song, catalogId: "" }; }
       return { ...song, catalogId: await match(song) ?? "" };
@@ -811,7 +816,7 @@ export async function runHiresHost() {
       wanted = true; notice = undefined;
       const at = position(), waiting = order.slice(at + 1).map(id => entries.get(id)).filter(entry => entry?.added).map(entry => entry!.song);
       const playing = await playList(items, index);
-      if (playing !== index && items[index]) notice = `Apple Music no longer has "${items[index]!.name}", so the next song plays.`;
+      if (playing !== index && items[index]) notice = `Hi-res cannot play "${items[index]!.name}", because Apple's catalog no longer has it or did not answer. The next song plays.`;
       // The new songs play either way, so a song that could not be queued again is only reported.
       if (waiting.length) await insert(waiting, true).catch(error => { notice = error instanceof Error ? error.message : String(error); });
     },

@@ -299,7 +299,33 @@ test.skipIf(!supported)("a list starts without a search for each lost song, and 
   // The catalog search finds no match for a chosen song it lost, so the next song plays and Peel says why.
   expect((await call("play", ["431", "432", "433"].map(id => song(id)), 1)).status).toBe(200);
   expect(android.queue[android.selected]?.id).toBe("433");
-  expect((await send("/state")).body.playback.error).toBe('Apple Music no longer has "Song 432", so the next song plays.');
+  expect((await send("/state")).body.playback.error).toBe('Hi-res cannot play "Song 432", because Apple\'s catalog no longer has it or did not answer. The next song plays.');
+}, 20000);
+
+test.skipIf(!supported)("a library song whose catalog ID is gone plays under its second ID", async () => {
+  await call("importPlayback", { items: [song("999")], playing: true });
+  android.commands = [];
+  android.gone.add("452");
+  lookups.length = 0;
+  const items = [song("451"), { ...song("i.452", "Song 452"), catalogId: "452", reportingId: "9452" }, song("453")];
+  expect((await call("play", items, 1)).status).toBe(200);
+  expect(android.commands.filter(command => command.startsWith("list "))).toEqual(["list 1 451,9452,453"]);
+  expect(android.queue[android.selected]?.id).toBe("9452");
+  expect(lookups.some(path => path.endsWith("/search"))).toBe(false);
+  const state = (await send("/state")).body.playback;
+  // Peel knows the playing song as its own library song, so its heart and queue entry are right.
+  expect(state.nowPlaying.playParams.id).toBe("i.452");
+  expect(state.error).toBeUndefined();
+}, 20000);
+
+test.skipIf(!supported)("a catalog answer without any of ten songs counts as no answer, so the list still plays", async () => {
+  await call("importPlayback", { items: [song("999")], playing: true });
+  android.commands = [];
+  const tens = Array.from({ length: 10 }, (_, at) => String(461 + at));
+  for (const id of tens) android.gone.add(id);
+  expect((await call("play", tens.map(id => song(id)), 3)).status).toBe(200);
+  expect(android.commands.filter(command => command.startsWith("list "))).toEqual([`list 3 ${tens.join(",")}`]);
+  expect(android.queue[android.selected]?.id).toBe("464");
 }, 20000);
 
 test.skipIf(!supported)("a song Apple drops after the chosen one leaves the later songs in their places", async () => {
