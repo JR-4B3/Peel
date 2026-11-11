@@ -251,7 +251,7 @@ export async function engineVersion() {
   return hasher.digest("hex");
 }
 
-interface State { ready: boolean; signIn: boolean; playback?: Playback; version?: string }
+interface State { ready: boolean; signIn: boolean; playback?: Playback; version?: string; build?: string }
 interface Queue { position: number; items: { id: string; type: string; added: boolean; attributes: { name?: string; artistName?: string; albumName?: string; durationInMillis?: number } }[] }
 
 // The SSH helper sets PEEL_REMOTE_HOST. Its requests, and an engine it starts, mark it as a remote

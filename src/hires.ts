@@ -10,7 +10,7 @@ import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
 import { mkdir, rename, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
-import { join } from "node:path";
+import { dirname, join, resolve } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { AppleMusic } from "./apple";
@@ -60,6 +60,16 @@ export class Hires extends Engine {
 export async function ensureHires(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal) {
   const state = () => engine.state().catch(() => undefined);
   let current = await state();
+  // A host started before Peel updated itself keeps running the old code, while the interface
+  // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
+  if (current && current.build !== hostBuild()) {
+    signal?.throwIfAborted();
+    status("Restarting hi-res playback to load an update...");
+    await engine.quit().catch(() => {});
+    // The old host pauses and stops Android before it exits, which can take a while.
+    for (const until = Date.now() + 3 * 60 * 1000; current && current.build !== hostBuild() && Date.now() < until; current = await state()) await sleep(250, undefined, { signal });
+    if (current && current.build !== hostBuild()) throw new Error("The hi-res player from before the update did not stop. Run peel-hires status to see why.");
+  }
   if (!current) {
     signal?.throwIfAborted();
     status("Starting hi-res playback...");
@@ -72,6 +82,24 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
     current = await state();
   }
   if (!current?.ready) throw new Error(current?.playback?.error ?? "Hi-res playback did not start. Run peel-hires status to see why.");
+}
+
+// A hash of the host's code: this file, the modules it imports, and the peel-hires script it runs.
+// The host reports the hash of its own files, and Peel compares it with the files it runs from.
+let buildHash: string | undefined;
+export function hostBuild() {
+  if (buildHash) return buildHash;
+  const hasher = new Bun.CryptoHasher("sha256"), files = [fileURLToPath(import.meta.url)];
+  for (let at = 0; at < files.length; at++) {
+    const text = readFileSync(files[at]!, "utf8");
+    hasher.update(text);
+    for (const [, path] of text.matchAll(/^import [^;]*? from "(\.{1,2}\/[^"]+)";/gm)) {
+      const file = resolve(dirname(files[at]!), path!.endsWith(".ts") ? path! : `${path}.ts`);
+      if (!files.includes(file) && existsSync(file)) files.push(file);
+    }
+  }
+  if (existsSync(bundled)) hasher.update(readFileSync(bundled));
+  return buildHash = hasher.digest("hex");
 }
 
 async function launchHost() {
@@ -224,7 +252,7 @@ export async function runHiresHost() {
   // A rejected sign-in is read again from Peel's settings, which the interface renews.
   const apple = new AppleMusic(signIn.userToken, { storefront: signIn.storefront, renewUser: async () => (await readAppleSignIn()).userToken || undefined });
   const instance = crypto.randomUUID();
-  const version = "hires";
+  const version = "hires", build = hostBuild();
   let volume = (() => { try { return JSON.parse(readFileSync(join(hiresHome, "volume.json"), "utf8")).volume ?? 1; } catch { return 1; } })();
   let repeat = 0, shuffle = false;
   // The whole queue in Apple Music's order, history included, and Peel's song for each entry.
@@ -1015,9 +1043,9 @@ export async function runHiresHost() {
       try {
         if (path === "/retain") return reply(200, null);
         if (path === "/state") {
-          if (!ready) return reply(200, { ready: false, signIn: false, playback: control.error ? { error: control.error } : undefined, version, instance });
+          if (!ready) return reply(200, { ready: false, signIn: false, playback: control.error ? { error: control.error } : undefined, version, build, instance });
           await read(!busy).catch(error => { notice = error.message; });
-          return reply(200, { ready: true, signIn: false, playback: playback(), version, instance });
+          return reply(200, { ready: true, signIn: false, playback: playback(), version, build, instance });
         }
         if (path === "/quit" && request.method === "POST") { setTimeout(() => void quit(), 10); return reply(200, null); }
         if (path === "/call" && request.method === "POST") {
