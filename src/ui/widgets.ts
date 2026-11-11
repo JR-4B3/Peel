@@ -120,7 +120,10 @@ export class Panel extends BoxRenderable {
     const note = this.note ? ` ${this.note} ` : "";
     const width = Bun.stringWidth(note), title = Bun.stringWidth(this.title ?? "") + 4;
     if (!note || width + title > this.width - 2) return;
-    buffer.drawText(note, this.x + this.width - 2 - width, this.y, RGBA.fromHex(this.noteColour));
+    // Each cell is set, spaces too, so the border line does not show between the words.
+    const ink = RGBA.fromHex(this.noteColour);
+    let x = this.x + this.width - 2 - width;
+    for (const char of note) { buffer.setCell(x, this.y, char, ink, unpainted); x += Bun.stringWidth(char); }
   }
 }
 

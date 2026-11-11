@@ -24,6 +24,10 @@ export class PlayerPanel {
   private subtitle: TextRenderable;
   private indicator: TextRenderable;
   private quality: TextRenderable;
+  private about: BoxRenderable;
+  private sound: BoxRenderable;
+  private controls: BoxRenderable;
+  private narrow = false;
   private progress: TextRenderable;
   private playButton: Button;
   private favouriteButton: Button;
@@ -61,12 +65,12 @@ export class PlayerPanel {
     this.favouriteButton = control("favourite", icon.heartOutline, () => void model.toggleFavourite(), colour.faint);
     this.indicator = new TextRenderable(ctx, { id: "playback-indicator", fg: colour.faint, height: 1, flexShrink: 0, selectable: false });
     song.add(this.title); song.add(this.favouriteButton); song.add(this.indicator);
-    const controls = new BoxRenderable(ctx, { id: "controls", height: 1, flexDirection: "row", gap: 3, flexShrink: 0 });
+    const controls = this.controls = new BoxRenderable(ctx, { id: "controls", height: 1, flexDirection: "row", gap: 3, flexShrink: 0 });
     this.shuffleButton = control("shuffle", icon.shuffleOff, () => void model.act("/playback/shuffle/toggle"), colour.faint);
     this.playButton = control("play-pause", icon.play, () => void model.act("/playback/toggle"));
     this.repeatButton = control("repeat", icon.repeatOff, () => void model.act("/playback/repeat/toggle"), colour.faint);
     for (const item of [this.shuffleButton, control("previous", icon.previous, () => void model.skip(-1)), this.playButton, control("next", icon.next, () => void model.skip(1)), this.repeatButton]) controls.add(item);
-    const sound = new BoxRenderable(ctx, { ...side, justifyContent: "flex-end", gap: 1 });
+    const sound = this.sound = new BoxRenderable(ctx, { ...side, justifyContent: "flex-end", gap: 1 });
     this.lyricsButton = control("lyrics-toggle", icon.lyrics, () => ui.toggleLyrics(), colour.faint);
     this.lyricsButton.marginRight = 2;
     this.volumeText = new TextRenderable(ctx, { id: "volume", content: "50%", fg: colour.muted, height: 1, flexShrink: 0, selectable: false });
@@ -75,7 +79,7 @@ export class PlayerPanel {
     deck.add(top);
 
     // The second row: artist and album, and the stream's quality at the right.
-    const about = new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2 });
+    const about = this.about = new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2 });
     this.subtitle = new TextRenderable(ctx, { id: "now-playing-artist", fg: colour.muted, height: 1, flexGrow: 1, minWidth: 0, truncate: true, selectable: false,
       onMouseDown: event => { const song = model.playing; if (event.button === 0 && song) { event.stopPropagation(); void model.openArtist(song); ui.focusContent(); } } });
     this.quality = new TextRenderable(ctx, { id: "quality", height: 1, flexShrink: 0, selectable: false });
@@ -84,6 +88,21 @@ export class PlayerPanel {
     this.progress = new TextRenderable(ctx, { id: "seek", content: "", fg: colour.accent, height: 1, width: "100%", selectable: false, onMouseDown: event => this.seekClick(event) });
     deck.add(this.progress);
     this.panel.add(deck);
+  }
+
+  // Narrow windows give the player two rows: the artist joins the title, and the quality the time.
+  layout(width: number) {
+    this.narrow = width < 76;
+    this.about.visible = !this.narrow;
+    this.panel.height = this.narrow ? 3 : 4;
+    this.cover.setSize(this.narrow ? 4 : 6, this.narrow ? 2 : 3);
+    this.cover.visible = width >= 44;
+    // The volume keeps its own width there, and the song takes the rest. The lyrics button
+    // leaves, since y shows them.
+    this.sound.flexGrow = this.narrow ? 0 : 1;
+    this.sound.flexBasis = this.narrow ? "auto" : 0;
+    this.controls.gap = this.narrow ? 2 : 3;
+    this.lyricsButton.visible = !this.narrow;
   }
 
   private progressCells(state = this.model.playback) {
@@ -102,7 +121,8 @@ export class PlayerPanel {
     const state = this.model.playback;
     const connected = this.model.connected;
     const song = state.nowPlaying;
-    this.title.content = song ? song.name ?? "Untitled" : "Nothing playing";
+    const name = song ? song.name ?? "Untitled" : "Nothing playing";
+    this.title.content = this.narrow && song?.artistName ? t`${fg(colour.text)(name)}  ${fg(colour.muted)(song.artistName)}` : name;
     const target = this.model.target ?? this.model.preferences.remote;
     // The device that plays may be out of reach, for example asleep or on another network. Saying so
     // explains why this computer shows nothing.
@@ -124,10 +144,12 @@ export class PlayerPanel {
     this.volumeText.content = `${Math.round(state.volume * 100)}%`;
     this.quality.visible = !!song && connected;
     this.quality.content = tag(this.qualityLabel(), this.model.player.lossless ? colour.accent : colour.muted);
-    const cells = this.progressCells(state);
+    // Narrow windows show the quality at the end of the time line, shortened.
+    const short = this.narrow && !!song && connected ? (this.model.player.lossless ? "ALAC" : "AAC") : "";
+    const cells = this.progressCells(state) - (short ? short.length + 1 : 0);
     const ratio = state.time.duration > 0 ? Math.min(1, Math.max(0, state.time.currentTime / state.time.duration)) : 0;
     const filled = Math.floor(ratio * cells);
-    this.progress.content = t`${fg(colour.muted)(duration(state.time.currentTime))} ${fg(colour.accent)("━".repeat(filled))}${fg(colour.faint)("─".repeat(cells - filled))} ${fg(colour.muted)(duration(state.time.duration))}`;
+    this.progress.content = t`${fg(colour.muted)(duration(state.time.currentTime))} ${fg(colour.accent)("━".repeat(filled))}${fg(colour.faint)("─".repeat(cells - filled))} ${fg(colour.muted)(duration(state.time.duration))}${short ? fg(this.model.player.lossless ? colour.accent : colour.faint)(` ${short}`) : ""}`;
   }
 
   private seekClick(event: MouseEvent) {

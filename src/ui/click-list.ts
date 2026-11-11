@@ -1,4 +1,4 @@
-import { BoxRenderable, TextRenderable, type CliRenderer, type MouseEvent } from "@opentui/core";
+import { BoxRenderable, TextRenderable, TextAttributes, type CliRenderer, type MouseEvent } from "@opentui/core";
 import { colour } from "../theme";
 import { fit, titled, type Column, type Row } from "./widgets";
 
@@ -9,6 +9,8 @@ export class ClickList extends BoxRenderable {
   offset = 0;
   // Wide song lists are tables: one line per song, with these columns between title and time.
   columns?: Column[];
+  // Narrow windows show the sidebar as one row of tabs.
+  horizontal = false;
   onSelection?: (row: Row) => void;
   onNearEnd?: () => void;
 
@@ -42,12 +44,15 @@ export class ClickList extends BoxRenderable {
   selectedId() { return this.rows[this.index]?.id; }
   atEnd() { return this.index >= this.rows.length - 1; }
   protected onResize() { if (this.rows) this.drawRows(); }
+  protected onFocus() { if (this.horizontal) this.drawRows(); }
+  protected onBlur() { if (this.horizontal) this.drawRows(); }
   drawRows() {
     if (!this.rows || !this.rowHeight) return;
     // The next page loads while the last screen of rows is still ahead.
     if (this.rows.length && this.index >= this.rows.length - 1 - this.page) this.onNearEnd?.();
     for (const child of this.getChildren()) { this.remove(child); child.destroyRecursively(); }
     if (this.columns) return this.drawTable(this.columns);
+    if (this.horizontal) return this.drawTabs();
     const visible = Math.max(1, Math.floor(this.height / this.rowHeight));
     if (this.index < this.offset) this.offset = this.index;
     if (this.index >= this.offset + visible) this.offset = this.index - visible + 1;
@@ -74,6 +79,28 @@ export class ClickList extends BoxRenderable {
       if (this.rowHeight > 1) box.add(new TextRenderable(this.ctx, { content: row.description ?? "", fg: colour.muted, width: "100%", height: 1, truncate: true, selectable: false, marginLeft: row.lead === undefined ? 0 : row.lead.length + 1 }));
       this.add(box);
     });
+  }
+
+  // One line of names, scrolled so the chosen one shows. The open view is underlined.
+  private drawTabs() {
+    const tabs = this.rows.map((row, index) => ({ row, index, width: Bun.stringWidth(row.name) + (row.lead ? Bun.stringWidth(row.lead) + 1 : 0) + 2 })).filter(tab => !tab.row.heading);
+    const at = tabs.findIndex(tab => tab.index === this.index);
+    let first = Math.min(this.offset, Math.max(0, at));
+    const fits = (from: number) => tabs.slice(from, at + 1).reduce((sum, tab) => sum + tab.width + 1, 0) <= this.width;
+    while (first < at && !fits(first)) first++;
+    this.offset = first;
+    let left = 0;
+    for (const tab of tabs.slice(first)) {
+      if (left + tab.width > this.width) break;
+      const { row, index } = tab;
+      const box = new BoxRenderable(this.ctx, { id: `${this.id}:row:${row.id}`, position: "absolute", top: 0, left, width: tab.width, height: 1, paddingX: 1, flexDirection: "row", gap: 1,
+        backgroundColor: index === this.index && this.focused ? colour.selected : "transparent",
+        onMouseDown: event => { if (event.button !== 0) return; event.stopPropagation(); this.focus(); this.index = index; this.drawRows(); row.activate(); } });
+      if (row.lead) box.add(new TextRenderable(this.ctx, { content: row.lead, fg: row.leadColour ?? colour.faint, height: 1, flexShrink: 0, selectable: false }));
+      box.add(new TextRenderable(this.ctx, { content: row.name, fg: row.active ? colour.accent : row.faint ? colour.faint : colour.muted, attributes: row.active ? TextAttributes.UNDERLINE : 0, height: 1, flexShrink: 0, selectable: false }));
+      this.add(box);
+      left += tab.width + 1;
+    }
   }
 
   // A header line names the columns. Title, artist, and album share the width 4:3:3. The year

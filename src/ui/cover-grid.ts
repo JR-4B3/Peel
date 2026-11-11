@@ -185,7 +185,8 @@ export class CoverGrid extends BoxRenderable {
       id: `${this.id}:tile:${shelf.id}:${index}`, position: "absolute", left, top, width: this.tileWidth, height: this.tileHeight,
       flexDirection: "column",
       // OpenTUI enables a border whenever a border style is set.
-      ...(selected ? { border: true, borderStyle: "rounded" as const, borderColor: this.focused ? colour.accent : colour.faint } : { padding: 1 }),
+      // The chosen cover has a heavy frame, so it stands out among the others at the same size.
+      ...(selected ? { border: true, borderStyle: "heavy" as const, borderColor: this.focused ? colour.accent : colour.faint } : { padding: 1 }),
       onMouseDown: event => {
         if (event.button !== 0) return;
         event.stopPropagation(); this.focus(); this.shelf = shelfIndex; this.tile = index; this.draw(); this.onActivate?.(tile.media);

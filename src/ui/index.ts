@@ -22,6 +22,7 @@ export class PeelUI {
   readonly grid: CoverGrid;
   private body: BoxRenderable;
   private sidebarPanel: BoxRenderable;
+  private tabs: BoxRenderable;
   private trackPanel: Panel;
   private header: BoxRenderable;
   private top: BoxRenderable;
@@ -57,6 +58,7 @@ export class PeelUI {
   private disposed = false;
   private lyrics: LyricsView;
   private player: PlayerPanel;
+  private homeDevices: TextRenderable;
   private topBar: TopBar;
   // The devices popup above the player, the pairing prompt, and the large cover.
   private devices: DevicesPopup;
@@ -103,6 +105,9 @@ export class PeelUI {
     this.editButton = this.button("sidebar-edit", icon.edit, "Edit  e", () => this.editSidebar(!this.editingSidebar), colour.faint);
     this.sidebarFooter.add(this.sidebarHints); this.sidebarFooter.add(this.editButton);
     this.sidebarPanel.add(this.sidebarFooter); this.body.add(this.sidebarPanel);
+    // Narrow windows move the sidebar's list into one row of tabs above the content, without a box.
+    this.tabs = new BoxRenderable(ctx, { id: "tabs", height: 1, width: "100%", flexShrink: 0, visible: false });
+    this.body.add(this.tabs, 0);
     this.trackPanel = new Panel(ctx, { id: "tracks-panel", ...panel, title: "Home", flexGrow: 1, minWidth: 0, minHeight: 0 });
 
     this.header = new BoxRenderable(ctx, { id: "collection-header", flexDirection: "row", gap: 2, paddingX: 1, paddingY: 1, height: 10, flexShrink: 0 });
@@ -147,6 +152,10 @@ export class PeelUI {
     this.songs.add(this.tracks);
     this.top.add(this.songs);
     this.trackPanel.add(this.top);
+    // Home starts with what the other devices play. A click opens the devices popup to move it here.
+    this.homeDevices = new TextRenderable(ctx, { id: "home-devices", height: 1, flexShrink: 0, paddingX: 2, marginBottom: 1, truncate: true, selectable: false, visible: false,
+      onMouseDown: event => { if (event.button === 0) { event.stopPropagation(); this.devices.toggle(true); } } });
+    this.trackPanel.add(this.homeDevices);
     this.grid = new CoverGrid(renderer, "grid");
     this.grid.onActivate = media => void this.model.activate(media);
     this.grid.onNearEnd = () => { if (this.model.more && !this.model.loading) void this.model.load(true); };
@@ -205,9 +214,16 @@ export class PeelUI {
     const narrow = width < 76;
     this.body.flexDirection = narrow ? "column" : "row";
     this.body.gap = narrow ? 0 : 1;
-    this.sidebarPanel.width = narrow ? "100%" : 24;
-    this.sidebarPanel.height = narrow ? height < 28 ? 3 : 5 : "100%";
-    this.player.cover.visible = width >= 60;
+    // Narrow windows show the sidebar as one row of tabs above the content.
+    if (narrow !== this.sidebar.horizontal) {
+      (narrow ? this.sidebarPanel : this.tabs).remove(this.sidebar);
+      if (narrow) this.tabs.add(this.sidebar); else this.sidebarPanel.add(this.sidebar, 0);
+      this.sidebar.horizontal = narrow;
+      this.sidebar.drawRows();
+    }
+    this.tabs.visible = narrow;
+    this.sidebarPanel.visible = !narrow;
+    this.player.layout(width);
     this.sidebarFooter.visible = !narrow;
     for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "favourite-album", "back", "sidebar-edit"].includes(button.id); button.paint(); }
     for (const button of this.player.buttons) { button.showHint = false; button.paint(); }
@@ -320,6 +336,13 @@ export class PeelUI {
     this.trackPanel.note = display !== "list" || !model.items.length || model.view === "settings" ? ""
       : filtered ? `${model.shown.length.toLocaleString("en")} of ${total.toLocaleString("en")}${model.more ? "+" : ""}` : `${total.toLocaleString("en")}${model.more ? "+" : ""} ${total === 1 ? "song" : "songs"}`;
     this.trackPanel.noteColour = filtered ? colour.accent : colour.muted;
+    const others = model.view === "home" ? model.devices.filter(device => device.paired && !device.self && device.online) : [];
+    this.homeDevices.visible = others.length > 0;
+    if (others.length) this.homeDevices.content = new StyledText([fg(colour.faint)("ON YOUR DEVICES  "), ...others.flatMap((device, index) => {
+      const summary = device.summary, playing = summary?.state === "playing";
+      return [fg(colour.faint)(index ? "   " : ""), fg(playing ? colour.playing : colour.faint)("● "), fg(colour.text)(device.name),
+        fg(colour.muted)(summary?.song ? `  ${[summary.song, summary.artist].filter(Boolean).join(" / ")}` : "  idle")];
+    }), fg(colour.accent)("   d"), fg(colour.faint)(" play here")]);
     this.arrange(display);
     this.empty.visible = display === "list" && !model.items.length && model.view !== "settings";
     this.empty.content = model.loading ? "Loading..." : model.view === "queue" && !model.connected ? "The player is not running yet. The queue starts with your first song."
@@ -445,10 +468,10 @@ export class PeelUI {
       if (model.history.length) pairs.push(["Esc", "back"]);
       pairs.push([this.grid.focused ? "⇧←→" : "←→", "seek"]);
     }
-    // Narrow windows show the player's buttons without their keys.
-    if (this.renderer.terminalWidth < 100) pairs.push(["space", "play"], ["p n", "skip"], ["- +", "volume"], ["f", "favourite"], ["s", "shuffle"], ["r", "repeat"]);
+    // The player's buttons show no keys beside them, so they are listed here.
+    pairs.push(["space", "play"], ["p n", "skip"], ["- +", "volume"], ["f", "favourite"], ["s", "shuffle"], ["r", "repeat"]);
     if (model.detail?.artwork || model.playback.nowPlaying) pairs.push(["c", "cover"]);
-    if (this.renderer.terminalWidth < 100) pairs.push(["y", "lyrics"], ["d", "devices"]);
+    pairs.push(["y", "lyrics"], ["d", "devices"]);
     if (model.view !== "queue") pairs.push(["u", "queue"]);
     pairs.push(["/", "search"], ["Tab", "next panel"]);
     return pairs;
@@ -585,6 +608,7 @@ export class PeelUI {
     else if (model.display === "sections" && grid && ["up", "k"].includes(key.name) && this.grid.atTop() && this.tracks.visible) action = () => this.tracks.focus();
     else if (model.display === "sections" && this.tracks.focused && ["down", "j"].includes(key.name) && this.tracks.atEnd()) action = () => this.grid.focus();
     else if (grid && ["up", "down", "j", "k"].includes(key.name)) action = () => this.grid.move(0, ["up", "k"].includes(key.name) ? -1 : 1);
+    else if (this.sidebar.horizontal && this.sidebar.focused && ["left", "right", "h", "l"].includes(key.name)) action = () => this.sidebar.move(["left", "h"].includes(key.name) ? -1 : 1);
     else if (grid && ["left", "right"].includes(key.name) && !key.shift) action = () => this.grid.move(key.name === "right" ? 1 : -1, 0);
     else if (["up", "down", "j", "k"].includes(key.name)) action = () => (this.sidebar.focused ? this.sidebar : this.tracks).move(["up", "k"].includes(key.name) ? -1 : 1);
     else if (!grid && ["pageup", "pagedown", "home", "end"].includes(key.name)) action = () => {
