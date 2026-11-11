@@ -12,7 +12,7 @@ import { PlayerPanel } from "./player";
 import { TopBar } from "./top-bar";
 import { settingsRows, type SettingsContext } from "./settings";
 import { shelves as shelvesFor, songRows } from "./shelves";
-import { Button, Cover, glyph, plural, type Column } from "./widgets";
+import { Button, Cover, Panel, glyph, plural, type Column } from "./widgets";
 
 export class PeelUI {
   readonly root: BoxRenderable;
@@ -22,7 +22,7 @@ export class PeelUI {
   readonly grid: CoverGrid;
   private body: BoxRenderable;
   private sidebarPanel: BoxRenderable;
-  private trackPanel: BoxRenderable;
+  private trackPanel: Panel;
   private header: BoxRenderable;
   private top: BoxRenderable;
   private songs: BoxRenderable;
@@ -103,7 +103,7 @@ export class PeelUI {
     this.editButton = this.button("sidebar-edit", icon.edit, "Edit  e", () => this.editSidebar(!this.editingSidebar), colour.faint);
     this.sidebarFooter.add(this.sidebarHints); this.sidebarFooter.add(this.editButton);
     this.sidebarPanel.add(this.sidebarFooter); this.body.add(this.sidebarPanel);
-    this.trackPanel = new BoxRenderable(ctx, { id: "tracks-panel", ...panel, title: "Home", flexGrow: 1, minWidth: 0, minHeight: 0 });
+    this.trackPanel = new Panel(ctx, { id: "tracks-panel", ...panel, title: "Home", flexGrow: 1, minWidth: 0, minHeight: 0 });
 
     this.header = new BoxRenderable(ctx, { id: "collection-header", flexDirection: "row", gap: 2, paddingX: 1, paddingY: 1, height: 10, flexShrink: 0 });
     this.headerCover = new Cover(ctx, { id: "collection-cover", width: 16, height: 8 });
@@ -265,11 +265,14 @@ export class PeelUI {
 
     // Song tables need room for their columns. Narrow lists keep two lines per song.
     const detail = model.detail;
+    // Wide lists also show the year. A list beside the lyrics keeps the artist and the year, and
+    // leaves the album out.
+    const room = beside ? inner - headerWidth : inner;
     const columns: Column[] | undefined = !songs ? undefined
-      : model.view.startsWith("artist:") ? ["album"]
+      : model.view.startsWith("artist:") ? (room >= 100 ? ["album", "year"] : ["album"])
       : detail?.type.includes("albums") ? (model.items.some(item => item.artist && item.artist !== detail.artist) ? ["artist"] : [])
-      : ["artist", "album"];
-    const table = !!columns && (beside ? inner - headerWidth : inner) >= 90;
+      : room >= 100 ? ["artist", "album", "year"] : room >= 90 || !this.lyrics.isShown ? ["artist", "album"] : ["artist", "year"];
+    const table = !!columns && room >= (columns.includes("album") ? 90 : 60);
     this.tracks.columns = table ? columns : undefined;
     this.tracks.rowHeight = table || detail ? 1 : 2;
 
@@ -311,6 +314,12 @@ export class PeelUI {
     const artist = display === "sections";
     this.sizeHeader();
     this.trackPanel.title = model.view.startsWith("artist:") ? "Artist" : model.detail ? (model.detail.type.includes("playlist") ? "Playlist" : "Album") : model.title;
+    // A song list says how many songs it has, or how many of them match the filter.
+    const total = model.detail?.trackCount && model.more ? model.detail.trackCount : model.items.length;
+    const filtered = model.shown.length !== model.items.length;
+    this.trackPanel.note = display !== "list" || !model.items.length || model.view === "settings" ? ""
+      : filtered ? `${model.shown.length.toLocaleString("en")} of ${total.toLocaleString("en")}${model.more ? "+" : ""}` : `${total.toLocaleString("en")}${model.more ? "+" : ""} ${total === 1 ? "song" : "songs"}`;
+    this.trackPanel.noteColour = filtered ? colour.accent : colour.muted;
     this.arrange(display);
     this.empty.visible = display === "list" && !model.items.length && model.view !== "settings";
     this.empty.content = model.loading ? "Loading..." : model.view === "queue" && !model.connected ? "The player is not running yet. The queue starts with your first song."

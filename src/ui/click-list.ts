@@ -76,22 +76,25 @@ export class ClickList extends BoxRenderable {
     });
   }
 
-  // A header line names the columns. Title, artist, and album share the width 4:3:3.
+  // A header line names the columns. Title, artist, and album share the width 4:3:3. The year
+  // takes four cells and the time five.
   private drawTable(columns: Column[]) {
-    const lead = Math.max(0, ...this.rows.map(row => Bun.stringWidth(row.lead ?? "")));
-    const gap = 2, free = Math.max(columns.length + 1, this.width - 2 - lead - 5 - gap * (columns.length + 2));
-    const share = Math.floor(free * 3 / (4 + 3 * columns.length));
-    const widths = { name: free - share * columns.length, artist: share, album: share };
-    const line = (top: number, cells: { lead: string; leadColour?: string; name: string; loved?: boolean; nameColour: string; artist?: string; album?: string; right: string; tint: string }, options: Record<string, unknown> = {}) => {
+    const lead = Math.max(1, ...this.rows.map(row => Bun.stringWidth(row.lead ?? "")));
+    const shared = columns.filter(column => column !== "year") as ("artist" | "album")[];
+    const gap = 2, fixed = columns.includes("year") ? 4 : 0;
+    const free = Math.max(shared.length + 1, this.width - 2 - lead - 5 - fixed - gap * (columns.length + 2));
+    const share = Math.floor(free * 3 / (4 + 3 * shared.length));
+    const widths = { name: free - share * shared.length, artist: share, album: share, year: 4 };
+    const line = (top: number, cells: { lead: string; leadColour?: string; name: string; loved?: boolean; nameColour: string; artist?: string; album?: string; year?: string; right: string; tint: string }, options: Record<string, unknown> = {}) => {
       const box = new BoxRenderable(this.ctx, { position: "absolute", top, width: "100%", height: 1, paddingX: 1, flexDirection: "row", gap, ...options });
       box.add(new TextRenderable(this.ctx, { content: cells.lead.padStart(lead), fg: cells.leadColour ?? colour.faint, width: lead, height: 1, flexShrink: 0, selectable: false }));
       box.add(new TextRenderable(this.ctx, { content: titled(fit(cells.name, widths.name - (cells.loved ? 2 : 0)), cells.loved, cells.nameColour), width: widths.name, height: 1, flexShrink: 0, selectable: false }));
-      for (const column of columns) box.add(new TextRenderable(this.ctx, { content: fit(cells[column] ?? "", widths[column]), fg: cells.tint, width: widths[column], height: 1, flexShrink: 0, selectable: false }));
+      for (const column of columns) box.add(new TextRenderable(this.ctx, { content: column === "year" ? (cells.year ?? "").padStart(4) : fit(cells[column] ?? "", widths[column]), fg: cells.tint, width: widths[column], height: 1, flexShrink: 0, selectable: false }));
       box.add(new TextRenderable(this.ctx, { content: cells.right.padStart(5), fg: cells.tint, width: 5, height: 1, flexShrink: 0, selectable: false }));
       this.add(box);
       return box;
     };
-    line(0, { lead: "", name: "Title", nameColour: colour.faint, artist: "Artist", album: "Album", right: "Time", tint: colour.faint });
+    line(0, { lead: "#", name: "Title", nameColour: colour.faint, artist: "Artist", album: "Album", year: "Year", right: "Time", tint: colour.faint });
     const visible = Math.max(1, this.height - 1);
     if (this.index < this.offset) this.offset = this.index;
     if (this.index >= this.offset + visible) this.offset = this.index - visible + 1;
@@ -100,7 +103,7 @@ export class ClickList extends BoxRenderable {
       const index = this.offset + position;
       line(position + 1, {
         lead: row.lead ?? "", leadColour: row.leadColour, name: row.name, loved: row.loved, nameColour: row.active ? colour.accent : colour.text,
-        artist: row.artist, album: row.album, right: row.right ?? "", tint: colour.muted,
+        artist: row.artist, album: row.album, year: row.year, right: row.right ?? "", tint: colour.muted,
       }, {
         id: `${this.id}:row:${row.id}`, backgroundColor: index === this.index ? colour.selected : "transparent",
         onMouseDown: (event: MouseEvent) => {

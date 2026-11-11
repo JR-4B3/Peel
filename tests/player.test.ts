@@ -488,7 +488,7 @@ describe("home, albums, and favourites", () => {
     expect(app.model.home.recent.map(item => item.id)).toEqual(["a.soma", "pl.mix"]);
   });
 
-  test("favourite songs show a heart before their title, and every song in Favourite Songs does", async () => {
+  test("favourite songs show a heart after their title, and every song in Favourite Songs does", async () => {
     const app = await setup(120, 36, "songs");
     await waitFor(() => app.model.items.every(item => item.loved !== undefined)); await app.flush();
     expect(app.model.items.map(item => [item.id, item.loved])).toEqual([["i.soma", false], ["i.selected", true], ["i.last", false]]);
@@ -498,9 +498,9 @@ describe("home, albums, and favourites", () => {
     await app.model.open("favourites"); await app.flush();
     expect(app.model.items.every(item => item.loved)).toBe(true);
     // Every song there is a favourite, so the rows show no heart unless the preference asks for them.
-    expect(app.captureCharFrame()).not.toContain(icon.heart + " Selected song");
+    expect(app.captureCharFrame()).not.toContain("Selected song " + icon.heart);
     app.model.preferences = { ...app.model.preferences, heartsInFavourites: true }; app.model.changed(); await app.flush();
-    expect(app.captureCharFrame()).toContain(icon.heart + " Selected song");
+    expect(app.captureCharFrame()).toContain("Selected song " + icon.heart);
     expect(app.calls.filter(call => call.path.startsWith("/v1/me/ratings/")).length).toBe(1);
   });
 

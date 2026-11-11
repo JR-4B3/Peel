@@ -49,7 +49,7 @@ export function songRows(model: Model): Row[] {
       id: String(index), key: item.id, active,
       lead: active ? icon.play : collection ? glyph(item) : String((shown === model.items ? index : model.position(item)) + 1).padStart(digits, " "),
       leadColour: active ? colour.accent : colour.faint,
-      name: item.name, loved: item.loved && (model.view !== "favourites" || model.preferences.heartsInFavourites), artist: item.artist, album: item.album, right: item.duration ? duration(item.duration) : undefined,
+      name: item.name, loved: item.loved && (model.view !== "favourites" || model.preferences.heartsInFavourites), artist: item.artist, album: item.album, year: item.releaseDate?.slice(0, 4), right: item.duration ? duration(item.duration) : undefined,
       description: item.type.includes("artists") ? ["Artist", item.genre].filter(Boolean).join("  /  ")
         : [item.artist, collection ? (item.type.includes("playlist") ? "Playlist" : "Album") : item.album].filter(Boolean).join("  /  "),
       activate: () => void model.activate(item),
