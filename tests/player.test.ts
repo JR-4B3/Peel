@@ -67,7 +67,8 @@ describe("the rendered player", () => {
   test("mouse and keyboard both change the observed playback state", async () => {
     const app = await setup();
     await click(app, "play-pause"); await waitFor(() => app.model.playback.state === "playing");
-    await app.flush(); expect(app.captureCharFrame()).toContain(`${icon.pause} space`);
+    // The player's buttons show no keys beside them. The ? list names them.
+    await app.flush(); expect((app.renderer.root.findDescendantById("play-pause") as any).content.chunks.map((chunk: any) => chunk.text).join("")).toBe(icon.pause);
     app.mockInput.pressKey(" "); await waitFor(() => app.model.playback.state === "paused");
     await app.flush(); expect(app.captureCharFrame()).toContain("Paused");
     for (const [id, method, key] of [["previous", "previous", "p"], ["next", "next", "n"], ["shuffle", "toggleShuffle", "s"], ["repeat", "toggleRepeat", "r"]]) {

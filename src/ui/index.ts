@@ -1,5 +1,5 @@
 import { BoxRenderable, TextRenderable, InputRenderable, StyledText, t, fg, bold, type CliRenderer, type KeyEvent } from "@opentui/core";
-import { Model, sorts, type Sort } from "../model";
+import { Model, playlistEntry, sorts, type Sort } from "../model";
 import type { Media } from "../types";
 import { colour, icon } from "../theme";
 import { LyricsSource } from "../lyrics";
@@ -9,6 +9,7 @@ import { CoverGrid } from "./cover-grid";
 import { CoverView } from "./cover-view";
 import { DevicesPopup, PairingPrompt } from "./devices";
 import { PlayerPanel } from "./player";
+import { TopBar } from "./top-bar";
 import { settingsRows, type SettingsContext } from "./settings";
 import { shelves as shelvesFor, songRows } from "./shelves";
 import { Button, Cover, glyph, plural, type Column } from "./widgets";
@@ -56,6 +57,7 @@ export class PeelUI {
   private disposed = false;
   private lyrics: LyricsView;
   private player: PlayerPanel;
+  private topBar: TopBar;
   // The devices popup above the player, the pairing prompt, and the large cover.
   private devices: DevicesPopup;
   private pairing: PairingPrompt;
@@ -72,8 +74,7 @@ export class PeelUI {
     this.lyrics.panel.borderColor = this.lyrics.panel.focused ? colour.accent : colour.faint;
     // Leaving the lyrics drops the highlighted line, so they follow the song again.
     if (!this.lyrics.panel.focused) this.lyrics.release();
-    const searchPanel = this.renderer.root.findDescendantById("search-panel") as BoxRenderable;
-    if (searchPanel) searchPanel.borderColor = this.search.focused ? colour.accent : colour.faint;
+    this.topBar.focusChanged();
   };
   private change = () => this.update();
   private resize = () => this.resizeLayout();
@@ -88,16 +89,12 @@ export class PeelUI {
     const panel = { border: true, borderStyle: "rounded" as const, borderColor: colour.faint };
     this.root = new BoxRenderable(ctx, { id: "peel", width: "100%", height: "100%", flexDirection: "column", paddingX: 1 });
     renderer.root.add(this.root);
-    // The search field spans the window, from the sidebar's left edge to the content's right edge.
-    const bar = new BoxRenderable(ctx, { height: 3, flexDirection: "row", flexShrink: 0 });
-    const searchBox = new BoxRenderable(ctx, { id: "search-panel", ...panel, title: `${icon.search} Search Apple Music  / or Ctrl+F`, titleColor: colour.muted, height: 3, paddingX: 1, flexGrow: 1, flexBasis: 0, minWidth: 0 } as any);
-    this.search = new InputRenderable(ctx, { id: "search", width: "100%", placeholder: "Type a song, album, or artist and press Enter", textColor: colour.text, placeholderColor: colour.faint, backgroundColor: "transparent", focusedBackgroundColor: "transparent" } as any);
-    this.search.on("enter", () => { void this.model.search(this.search.value); this.tracks.focus(); });
-    searchBox.add(this.search); bar.add(searchBox);
-    this.root.add(bar);
+    this.topBar = new TopBar(renderer, model, term => { void this.model.search(term); this.tracks.focus(); }, () => this.devices.toggle());
+    this.search = this.topBar.search;
+    this.root.add(this.topBar.bar);
 
     this.body = new BoxRenderable(ctx, { flexDirection: "row", flexGrow: 1, minHeight: 0, gap: 1 });
-    this.sidebarPanel = new BoxRenderable(ctx, { id: "sidebar-panel", ...panel, width: 28, flexShrink: 0, paddingY: 0 });
+    this.sidebarPanel = new BoxRenderable(ctx, { id: "sidebar-panel", ...panel, title: "Library", titleColor: colour.muted, width: 24, flexShrink: 0, paddingY: 0 } as any);
     this.sidebar = new ClickList(renderer, "sidebar", 1);
     this.sidebarPanel.add(this.sidebar);
     // Editing shows the hidden entries, so they can be shown again. Click Edit, or press e with the sidebar focused.
@@ -208,11 +205,12 @@ export class PeelUI {
     const narrow = width < 76;
     this.body.flexDirection = narrow ? "column" : "row";
     this.body.gap = narrow ? 0 : 1;
-    this.sidebarPanel.width = narrow ? "100%" : 28;
+    this.sidebarPanel.width = narrow ? "100%" : 24;
     this.sidebarPanel.height = narrow ? height < 28 ? 3 : 5 : "100%";
     this.player.cover.visible = width >= 60;
     this.sidebarFooter.visible = !narrow;
     for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "favourite-album", "back", "sidebar-edit"].includes(button.id); button.paint(); }
+    for (const button of this.player.buttons) { button.showHint = false; button.paint(); }
     this.sizeHeader();
     this.layoutLyrics();
     this.drawPlayback();
@@ -249,7 +247,7 @@ export class PeelUI {
     // The panel's inner width, beside the sidebar on wide terminals.
     // The side lyrics pane takes its width and one column of gap.
     const lyrics = this.lyrics.isShown && this.trackPanel.visible && typeof this.lyrics.panel.width === "number" ? this.lyrics.panel.width + 1 : 0;
-    const inner = width - (width < 76 ? 4 : 33) - lyrics;
+    const inner = width - (width < 76 ? 4 : 29) - lyrics;
     // Wide artist pages list the top songs beside the artist, which leaves the height to the shelves.
     const beside = sections && header && songs && inner >= 110;
     this.header.visible = header;
@@ -280,7 +278,8 @@ export class PeelUI {
       return;
     }
     // Top songs and search songs take a few rows and scroll. The shelves below take the rest.
-    const panel = this.renderer.terminalHeight - 12;
+    // The window's height less the top row, the player, the key hints and the panel's borders.
+    const panel = this.renderer.terminalHeight - 8;
     const shown = Math.min(model.items.length, beside ? this.headerHeight - 2 - (table ? 1 : 0)
       : model.view === "search" ? Math.max(3, Math.floor(panel * 0.35)) : panel >= 22 ? 5 : panel >= 16 ? 3 : 2);
     const listHeight = songs ? shown * this.tracks.rowHeight + (table ? 1 : 0) : 0;
@@ -348,18 +347,25 @@ export class PeelUI {
     const sidebarKey = JSON.stringify([nav.map(item => [item.id, item.name, item.hidden]), model.view, editing]);
     if (sidebarKey !== this.lastSidebar) {
       this.lastSidebar = sidebarKey;
-      const glyph = (id: string) => id === "home" ? icon.home : id === "favourites" ? icon.heart : id === "songs" ? icon.songs : id === "albums" ? icon.album : id === "artists" ? icon.artist : id === "queue" ? icon.queue : id === "settings" ? icon.settings : icon.playlist;
-      // Home cannot be hidden, so it keeps its own glyph while editing.
+      // Home cannot be hidden, so it shows no eye while editing.
       const editable = (id: string) => editing && id !== "home";
-      this.sidebar.setRows(nav.map(item => ({
+      const row = (item: (typeof nav)[number]) => ({
         id: item.id, key: item.id, name: item.name, faint: item.hidden,
-        lead: editable(item.id) ? item.hidden ? icon.hidden : icon.shown : glyph(item.id), active: !editing && item.id === model.view,
-        leadColour: item.hidden ? colour.faint : editable(item.id) ? colour.muted : item.id === "favourites" ? colour.heart : item.id === model.view ? colour.accent : colour.faint,
+        // Only Favourite Songs has a glyph, its heart. While editing, an eye shows whether an entry is shown.
+        lead: editable(item.id) ? item.hidden ? icon.hidden : icon.shown : item.id === "favourites" ? icon.heart : undefined,
+        active: !editing && item.id === model.view,
+        leadColour: item.hidden ? colour.faint : editable(item.id) ? colour.muted : colour.heart,
         activate: () => {
           if (editable(item.id)) void model.hide(item.id);
           else if (!editing) { void model.open(item.id); this.focusContent(); }
         },
-      })));
+      });
+      // The library first, then Favourite Songs and the playlists under their own heading.
+      const playlists = nav.filter(item => playlistEntry(item.id));
+      this.sidebar.setRows([
+        ...nav.filter(item => !playlistEntry(item.id)).map(row),
+        ...playlists.length ? [{ id: "gap", name: "", heading: true, activate: () => {} }, { id: "playlists", name: "PLAYLISTS", heading: true, activate: () => {} }, ...playlists.map(row)] : [],
+      ]);
       // Moving an entry keeps it selected. Opening a view selects that view.
       if (model.view !== this.lastView) { this.lastView = model.view; this.sidebar.selectKey(model.view); }
     }
@@ -449,7 +455,7 @@ export class PeelUI {
   }
 
 
-  drawPlayback() { this.player.draw(); }
+  drawPlayback() { this.player.draw(); this.topBar.draw(this.renderer.terminalWidth); }
 
 
 

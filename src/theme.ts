@@ -8,7 +8,12 @@ export const colour = {
   accent: "#89b4fa",
   selected: "#243f75",
   surface: "#181825",
+  // Filled fields, such as search and the quality tag, and the line above the player.
+  field: "#313244",
+  line: "#313244",
   heart: "#ff729a",
+  // The dot beside the device that plays.
+  playing: "#a6e3a1",
   soon: "#fffaa5",
 };
 
@@ -54,4 +59,7 @@ export const icon = {
   console: "\u{F018D}",
   memory: "\u{F035B}",
   textSize: "\u{F0254}",
+  // Powerline's half circles. A filled field between them reads as a rounded tag.
+  capLeft: "\u{E0B6}",
+  capRight: "\u{E0B4}",
 };

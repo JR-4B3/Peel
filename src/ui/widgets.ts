@@ -1,10 +1,10 @@
-import { BoxRenderable, TextRenderable, ImageRenderable, RGBA, t, fg, type OptimizedBuffer, type RenderContext } from "@opentui/core";
+import { BoxRenderable, TextRenderable, ImageRenderable, RGBA, StyledText, t, fg, bg, type OptimizedBuffer, type RenderContext } from "@opentui/core";
 import { cover } from "../artwork";
 import { colour, icon } from "../theme";
 import type { Media } from "../types";
 
 // Small parts the screens share: rows, covers, buttons, and text helpers.
-export interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
+export interface Row { id: string; heading?: boolean; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
 export type Column = "artist" | "album";
 export interface Tile { media: Media; caption: string; detail: string; note?: string; noteColour?: string }
 export interface Shelf { id: string; title: string; tiles: Tile[]; empty: string }
@@ -104,3 +104,9 @@ export function fit(text: string, width: number) {
   }
   return result.trimEnd() + "…";
 }
+
+// A short label on a filled field with rounded ends, such as the stream's quality.
+export function tag(text: string, tint: string, fill = colour.field) {
+  return new StyledText([fg(fill)(icon.capLeft), bg(fill)(fg(tint)(text)), fg(fill)(icon.capRight)]);
+}
+

@@ -24,14 +24,20 @@ export class ClickList extends BoxRenderable {
   setRows(rows: Row[]) {
     const id = this.rows[this.index]?.id;
     this.rows = rows;
-    this.index = Math.max(0, id ? rows.findIndex(row => row.id === id) : 0);
+    this.index = this.choosable(Math.max(0, id ? rows.findIndex(row => row.id === id) : 0), 1);
     this.drawRows();
+  }
+  // Headings are not chosen. The nearest row in the direction of travel is, or the one before it.
+  private choosable(index: number, direction: number) {
+    for (let at = index; at >= 0 && at < this.rows.length; at += direction) if (!this.rows[at]!.heading) return at;
+    for (let at = index; at >= 0 && at < this.rows.length; at -= direction) if (!this.rows[at]!.heading) return at;
+    return index;
   }
   selectKey(key: string) {
     const index = this.rows.findIndex(row => row.key === key);
     if (index >= 0) { this.index = index; this.drawRows(); }
   }
-  move(delta: number) { this.index = Math.min(Math.max(0, this.rows.length - 1), Math.max(0, this.index + delta)); this.drawRows(); this.onSelection?.(this.rows[this.index]); }
+  move(delta: number) { this.index = this.choosable(Math.min(Math.max(0, this.rows.length - 1), Math.max(0, this.index + delta)), delta < 0 ? -1 : 1); this.drawRows(); this.onSelection?.(this.rows[this.index]); }
   activate() { this.rows[this.index]?.activate(); }
   selectedId() { return this.rows[this.index]?.id; }
   atEnd() { return this.index >= this.rows.length - 1; }
@@ -48,6 +54,10 @@ export class ClickList extends BoxRenderable {
     this.offset = Math.min(this.offset, Math.max(0, this.rows.length - visible));
     this.rows.slice(this.offset, this.offset + visible).forEach((row, position) => {
       const index = this.offset + position;
+      if (row.heading) {
+        this.add(new TextRenderable(this.ctx, { id: `${this.id}:heading:${row.id}`, content: row.name, fg: colour.faint, position: "absolute", top: position * this.rowHeight, left: 1, width: "100%", height: 1, truncate: true, selectable: false }));
+        return;
+      }
       const box = new BoxRenderable(this.ctx, {
         id: `${this.id}:row:${row.id}`, position: "absolute", top: position * this.rowHeight, width: "100%", height: this.rowHeight,
         paddingX: 1, flexDirection: "column", backgroundColor: index === this.index ? colour.selected : "transparent",

@@ -95,8 +95,8 @@ test("settings switch between SSH hosts, show the SSH host, and keep the previou
   await model.selectOutput("desktop"); await app.flush();
   expect(model.preferences.remote).toBe("desktop");
   expect(app.captureCharFrame()).toContain("Control over SSH");
-  // The controlled computer is named beside the devices button, not before the artist.
-  expect(app.captureCharFrame()).toContain("d  desktop");
+  // The controlled computer is named at the top right, beside the devices key, not before the artist.
+  expect(app.captureCharFrame()).toContain("Playing on desktop  d");
   expect(app.captureCharFrame()).not.toContain("On desktop");
   await model.selectOutput("offline");
   expect(model.preferences.remote).toBe("desktop");
