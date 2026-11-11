@@ -223,7 +223,7 @@ export class PeelUI {
     }
     this.tabs.visible = narrow;
     this.sidebarPanel.visible = !narrow;
-    this.player.layout(width);
+    this.player.layout(width, height);
     this.sidebarFooter.visible = !narrow;
     for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "favourite-album", "back", "sidebar-edit"].includes(button.id); button.paint(); }
     for (const button of this.player.buttons) { button.showHint = false; button.paint(); }
@@ -298,7 +298,7 @@ export class PeelUI {
     }
     // Top songs and search songs take a few rows and scroll. The shelves below take the rest.
     // The window's height less the top row, the player, the key hints and the panel's borders.
-    const panel = this.renderer.terminalHeight - 8;
+    const panel = this.renderer.terminalHeight - 9;
     const shown = Math.min(model.items.length, beside ? this.headerHeight - 2 - (table ? 1 : 0)
       : model.view === "search" ? Math.max(3, Math.floor(panel * 0.35)) : panel >= 22 ? 5 : panel >= 16 ? 3 : 2);
     const listHeight = songs ? shown * this.tracks.rowHeight + (table ? 1 : 0) : 0;

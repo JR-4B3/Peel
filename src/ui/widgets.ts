@@ -18,10 +18,14 @@ export class Cover extends BoxRenderable {
   private image?: ImageRenderable;
   private glyph: TextRenderable;
 
-  constructor(ctx: RenderContext, options: { id?: string; width: number; height: number; art?: string; glyph?: string }) {
+  // fit "cover" fills the box and may crop the edges; "fit" shows the whole image.
+  private fit: "cover" | "fit";
+
+  constructor(ctx: RenderContext, options: { id?: string; width: number; height: number; art?: string; glyph?: string; fit?: "cover" | "fit" }) {
     super(ctx, { id: options.id, width: options.width, height: options.height, flexShrink: 0, backgroundColor: colour.surface, alignItems: "center", justifyContent: "center" });
     this.glyph = new TextRenderable(ctx, { content: options.glyph ?? icon.album, fg: colour.faint, height: 1, width: 2, selectable: false });
     this.add(this.glyph);
+    this.fit = options.fit ?? "cover";
     this.setArt(options.art);
   }
 
@@ -32,7 +36,7 @@ export class Cover extends BoxRenderable {
     this.glyph.visible = true;
     void cover(art)?.then(image => {
       if (!image || this.art !== art || this.isDestroyed) return;
-      this.image = new ImageRenderable(this.ctx, { position: "absolute", left: 0, top: 0, width: this.width, height: this.height, source: image, fit: "cover" });
+      this.image = new ImageRenderable(this.ctx, { position: "absolute", left: 0, top: 0, width: this.width, height: this.height, source: image, fit: this.fit });
       this.add(this.image); this.glyph.visible = false;
     });
   }
@@ -105,9 +109,9 @@ export function fit(text: string, width: number) {
   return result.trimEnd() + "…";
 }
 
-// A short label on a filled field with rounded ends, such as the stream's quality.
+// A short label on a filled field, such as the stream's quality.
 export function tag(text: string, tint: string, fill = colour.field) {
-  return new StyledText([fg(fill)(icon.capLeft), bg(fill)(fg(tint)(text)), fg(fill)(icon.capRight)]);
+  return new StyledText([bg(fill)(fg(tint)(` ${text} `))]);
 }
 
 // A bordered panel that can also show a note at the right of its top border, such as how many

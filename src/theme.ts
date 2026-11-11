@@ -59,7 +59,4 @@ export const icon = {
   console: "\u{F018D}",
   memory: "\u{F035B}",
   textSize: "\u{F0254}",
-  // Powerline's half circles. A filled field between them reads as a rounded tag.
-  capLeft: "\u{E0B6}",
-  capRight: "\u{E0B4}",
 };

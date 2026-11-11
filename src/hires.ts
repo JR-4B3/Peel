@@ -308,6 +308,7 @@ export async function runHiresHost() {
     if (resync && (current.item !== before || Date.now() - synced > 2000)) await sync();
     watchStall();
     watchSilence();
+    watchRate();
     if (rest.length && !extending && Date.now() >= extendAfter && upcoming() < partAt) {
       extending = true;
       void call("extend").catch(() => {}).finally(() => { extending = false; });
@@ -315,6 +316,22 @@ export async function runHiresHost() {
     return current;
   }
   let busy = 0;
+
+  // The rate Android mixes at, which the controller switches to each song's own rate about a
+  // second after the song changes. It is asked 1.5 seconds after a change, and again every five
+  // seconds while the song plays, and reported only for the song it was asked for.
+  let mixer: { item?: number; rate: number; asked: number } | undefined, asking = false;
+  let seen: { item?: number; at: number } = { at: 0 };
+  function watchRate() {
+    if (current.item !== seen.item) seen = { item: current.item, at: Date.now() };
+    if (current.state !== PLAYING || asking || Date.now() - seen.at < 1500) return;
+    if (mixer && mixer.item === current.item && Date.now() - mixer.asked < 5000) return;
+    const item = current.item;
+    asking = true;
+    void control.request("rate").then((answer: { rate?: number }) => {
+      if (answer?.rate && answer.rate > 0 && current.item === item) mixer = { item, rate: answer.rate, asked: Date.now() };
+    }).catch(() => {}).finally(() => { asking = false; });
+  }
 
   // Apple Music sometimes stops renewing its stream lease. The song then stays buffering at one
   // place and never plays (#60). After stallLimit there, the host restarts Apple Music and
@@ -744,6 +761,7 @@ export async function runHiresHost() {
       } : null,
       time: { currentTime: (current.position ?? 0) / 1000, duration: (current.duration ?? 0) / 1000 },
       volume, repeatMode: repeats[repeat] ?? "none", shuffleMode: shuffle, queueRevision: revision(),
+      ...(mixer && mixer.item === current.item && current.title ? { sampleRate: mixer.rate } : {}),
       ...(notice ? { error: notice } : current.error ? { error: current.error } : {}),
     };
   }
