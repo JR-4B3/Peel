@@ -1,4 +1,4 @@
-import { BoxRenderable, TextRenderable, t, fg, type CliRenderer, type MouseEvent } from "@opentui/core";
+import { BoxRenderable, TextRenderable, t, fg, bold, type CliRenderer, type MouseEvent } from "@opentui/core";
 import type { Model } from "../model";
 import { colour, icon } from "../theme";
 import { duration } from "../types";
@@ -61,7 +61,7 @@ export class PlayerPanel {
     const top = new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2 });
     const side = { flexDirection: "row" as const, height: 1, gap: 2, flexGrow: 1, flexBasis: 0, minWidth: 0 };
     const song = new BoxRenderable(ctx, side);
-    this.title = new TextRenderable(ctx, { id: "now-playing", fg: colour.text, attributes: 1, flexShrink: 1, minWidth: 0, height: 1, truncate: true, selectable: false });
+    this.title = new TextRenderable(ctx, { id: "now-playing", fg: colour.text, flexShrink: 1, minWidth: 0, height: 1, truncate: true, selectable: false });
     this.favouriteButton = control("favourite", icon.heartOutline, () => void model.toggleFavourite(), colour.faint);
     this.indicator = new TextRenderable(ctx, { id: "playback-indicator", fg: colour.faint, height: 1, flexShrink: 0, selectable: false });
     song.add(this.title); song.add(this.favouriteButton); song.add(this.indicator);
@@ -122,7 +122,7 @@ export class PlayerPanel {
     const connected = this.model.connected;
     const song = state.nowPlaying;
     const name = song ? song.name ?? "Untitled" : "Nothing playing";
-    this.title.content = this.narrow && song?.artistName ? t`${fg(colour.text)(name)}  ${fg(colour.muted)(song.artistName)}` : name;
+    this.title.content = this.narrow && song?.artistName ? t`${bold(fg(colour.text)(name))}  ${fg(colour.muted)(song.artistName)}` : t`${bold(fg(colour.text)(name))}`;
     const target = this.model.target ?? this.model.preferences.remote;
     // The device that plays may be out of reach, for example asleep or on another network. Saying so
     // explains why this computer shows nothing.
