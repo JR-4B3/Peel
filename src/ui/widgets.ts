@@ -109,9 +109,9 @@ export function fit(text: string, width: number) {
   return result.trimEnd() + "…";
 }
 
-// A short label on a filled field, such as the stream's quality.
+// A short label on a filled field with rounded ends, such as the stream's quality.
 export function tag(text: string, tint: string, fill = colour.field) {
-  return new StyledText([bg(fill)(fg(tint)(` ${text} `))]);
+  return new StyledText([fg(fill)(icon.capLeft), bg(fill)(fg(tint)(text)), fg(fill)(icon.capRight)]);
 }
 
 // A bordered panel that can also show a note at the right of its top border, such as how many
