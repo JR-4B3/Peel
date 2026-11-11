@@ -14,6 +14,9 @@ import { settingsRows, type SettingsContext } from "./settings";
 import { shelves as shelvesFor, songRows } from "./shelves";
 import { Button, Cover, Panel, glyph, plural, type Column } from "./widgets";
 
+// The filter field's hint, longest first. A narrow list shows the longest that fits.
+const filterHints = ["Filter by title, artist, or album, and years: 2015-2020, >2018, 90s   ⇧F", "Filter by title, artist, album, or year   ⇧F", "Filter   ⇧F"];
+
 export class PeelUI {
   readonly root: BoxRenderable;
   readonly search: InputRenderable;
@@ -136,9 +139,9 @@ export class PeelUI {
     this.section = new TextRenderable(ctx, { id: "top-songs", content: "", height: 1, marginLeft: 1, flexShrink: 0, selectable: false });
     this.songs.add(this.section);
     // Song lists can be filtered and sorted. The filter covers the whole list, not only the loaded part.
-    this.filterBar = new BoxRenderable(ctx, { id: "filter-bar", height: 1, flexDirection: "row", gap: 2, paddingX: 1, flexShrink: 0, marginBottom: 1 });
+    this.filterBar = new BoxRenderable(ctx, { id: "filter-bar", height: 1, flexDirection: "row", gap: 2, paddingX: 1, flexShrink: 0, marginBottom: 1, overflow: "hidden", onSizeChange: () => this.fitFilter() });
     this.filterBar.add(new TextRenderable(ctx, { content: icon.filter, fg: colour.muted, width: 1, height: 1, flexShrink: 0, selectable: false }));
-    this.filterInput = new InputRenderable(ctx, { id: "filter", flexGrow: 1, minWidth: 8, placeholder: "Filter by title, artist, or album, and years: 2015-2020, >2018, 90s   ⇧F", textColor: colour.text, placeholderColor: colour.faint, backgroundColor: "transparent", focusedBackgroundColor: "transparent" } as any);
+    this.filterInput = new InputRenderable(ctx, { id: "filter", flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 8, placeholder: filterHints[0], textColor: colour.text, placeholderColor: colour.faint, backgroundColor: "transparent", focusedBackgroundColor: "transparent" } as any);
     this.filterInput.on("input", (value: string) => void model.setFilter({ text: value }));
     this.filterInput.on("enter", () => this.tracks.focus());
     this.filterBar.add(this.filterInput);
@@ -195,6 +198,26 @@ export class PeelUI {
     }
   }
 
+  // The filter bar's buttons drop their keys, then their words, and the field's hint gets shorter,
+  // until the field keeps room for its hint. Nothing reaches past the panel.
+  private fitFilter() {
+    const width = this.filterBar.width;
+    if (!width) return;
+    const buttons = [this.sortButton, this.directionButton, this.lovedButton].filter(button => button.visible);
+    const hint = (button: Button, level: number) => button.hints ? button.hints[Math.min(level, button.hints.length - 1)]! : "";
+    for (let level = 0; level < 3; level++) {
+      // The padding, the filter glyph, and a gap of two after each part.
+      const room = width - 2 - 1 - 2 - buttons.reduce((total, button) => total + button.widthWith(hint(button, level)) + 2, 0);
+      const text = filterHints.find(text => Bun.stringWidth(text) <= room);
+      if (text || level === 2) {
+        for (const button of buttons) button.setHint(hint(button, level));
+        const placeholder = text ?? filterHints.at(-1)!;
+        if (this.filterInput.placeholder !== placeholder) this.filterInput.placeholder = placeholder;
+        return;
+      }
+    }
+  }
+
   private button(id: string, glyph: string, hint: string, action: () => void, tint = colour.accent) {
     const button = new Button(this.renderer, id, glyph, hint, action, tint);
     this.buttons.push(button);
@@ -225,7 +248,7 @@ export class PeelUI {
     this.sidebarPanel.visible = !narrow;
     this.player.layout(width, height);
     this.sidebarFooter.visible = !narrow;
-    for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "favourite-album", "back", "sidebar-edit"].includes(button.id); button.paint(); }
+    for (const button of this.buttons) { button.showHint = width >= 100 || ["play-collection", "favourite-album", "back", "sidebar-edit", "sort", "sort-direction", "loved-only"].includes(button.id); button.paint(); }
     for (const button of this.player.buttons) { button.showHint = false; button.paint(); }
     this.sizeHeader();
     this.layoutLyrics();
@@ -425,12 +448,15 @@ export class PeelUI {
     // Shift+F opens it on short lists too.
     this.filterBar.visible = this.filterable() && (model.items.length > 10 || model.more || filtering || this.filterInput.focused);
     if (this.filterInput.value !== model.filter.text && !this.filterInput.focused) this.filterInput.value = model.filter.text;
-    this.sortButton.set(icon.sort, `${sorts[model.filter.sort]}  o`, model.filter.sort === "playlist" ? colour.faint : colour.accent);
+    const order = sorts[model.filter.sort];
+    this.sortButton.hints = [`${order}  o`, order, ""]; this.directionButton.hints = ["⇧O", "", ""]; this.lovedButton.hints = ["Favourites  *", "Favourites", ""];
+    this.sortButton.set(icon.sort, undefined, model.filter.sort === "playlist" ? colour.faint : colour.accent);
     // A shuffled order has no direction.
     this.directionButton.visible = model.filter.sort !== "shuffled";
-    this.directionButton.set(model.filter.descending ? "↓" : "↑", "⇧O", model.filter.descending ? colour.accent : colour.faint);
+    this.directionButton.set(model.filter.descending ? "↓" : "↑", undefined, model.filter.descending ? colour.accent : colour.faint);
     this.lovedButton.visible = model.view !== "favourites";
-    this.lovedButton.set(model.filter.loved ? icon.heart : icon.heartOutline, "Favourites  *", model.filter.loved ? colour.heart : colour.faint);
+    this.lovedButton.set(model.filter.loved ? icon.heart : icon.heartOutline, undefined, model.filter.loved ? colour.heart : colour.faint);
+    this.fitFilter();
     if (filtering && !shown.length && !model.loading) { this.empty.visible = true; this.empty.content = model.more ? "Loading the rest of the list to filter..." : "No songs match the filter. Escape clears it."; }
     this.lyrics.sync(model.playback);
     this.drawPlayback();

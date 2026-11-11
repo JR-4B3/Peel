@@ -317,9 +317,10 @@ export async function runHiresHost() {
   }
   let busy = 0;
 
-  // The rate Android mixes at, which the controller switches to each song's own rate about a
-  // second after the song changes. It is asked 1.5 seconds after a change, and again every five
-  // seconds while the song plays, and reported only for the song it was asked for.
+  // The rate Android plays at, which the controller switches to each song's own rate about a
+  // second after the song changes. It is read from Android's stream in PipeWire, not from the
+  // controller, whose rate lookups can wait seconds on Android's mixer. It is read 1.5 seconds
+  // after a change and every five seconds while the song plays, and reported only for that song.
   let mixer: { item?: number; rate: number; asked: number } | undefined, asking = false;
   let seen: { item?: number; at: number } = { at: 0 };
   function watchRate() {
@@ -328,8 +329,9 @@ export async function runHiresHost() {
     if (mixer && mixer.item === current.item && Date.now() - mixer.asked < 5000) return;
     const item = current.item;
     asking = true;
-    void control.request("rate").then((answer: { rate?: number }) => {
-      if (answer?.rate && answer.rate > 0 && current.item === item) mixer = { item, rate: answer.rate, asked: Date.now() };
+    void androidStreams().then(streams => {
+      const rate = Number(/(\d+)Hz/.exec(streams?.[0]?.sample_specification ?? "")?.[1]);
+      if (rate > 0 && current.item === item) mixer = { item, rate, asked: Date.now() };
     }).catch(() => {}).finally(() => { asking = false; });
   }
 
@@ -385,13 +387,18 @@ export async function runHiresHost() {
   // Records half a second of each of Android's playing streams at its own rate, so the recording
   // doesn't change PipeWire's rate. Answers whether every sample was zero, or undefined when it
   // can't tell, for example without PulseAudio's tools or with a stream muted on the computer.
-  async function allZero(): Promise<boolean | undefined> {
-    if (!Bun.which("pactl") || !Bun.which("pacat")) return undefined;
+  // Android's playing streams in PipeWire, or undefined without PulseAudio's tools.
+  async function androidStreams() {
+    if (!Bun.which("pactl")) return undefined;
     const list = Bun.spawn(["pactl", "-f", "json", "list", "sink-inputs"], { stdout: "pipe", stderr: "ignore" });
     let streams: { index: number; corked?: boolean; mute?: boolean; volume?: Record<string, { value?: number }>; sample_specification?: string; properties?: Record<string, string> }[];
     try { streams = JSON.parse(await new Response(list.stdout).text()); } catch { return undefined; }
-    streams = streams.filter(stream => stream.properties?.["application.name"] === "Waydroid" && !stream.corked);
-    if (!streams.length) return undefined;
+    return streams.filter(stream => stream.properties?.["application.name"] === "Waydroid" && !stream.corked);
+  }
+  async function allZero(): Promise<boolean | undefined> {
+    if (!Bun.which("pacat")) return undefined;
+    const streams = await androidStreams();
+    if (!streams?.length) return undefined;
     for (const stream of streams) {
       const levels = Object.values(stream.volume ?? {}).map(channel => channel.value ?? 1);
       if (stream.mute || levels.length && levels.every(level => level === 0)) return undefined;

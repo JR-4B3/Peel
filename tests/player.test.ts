@@ -337,6 +337,21 @@ describe("the rendered player", () => {
     await click(app, "play-pause"); await waitFor(() => app.model.playback.state === "playing");
   });
 
+  // The filter bar stays inside its panel, also beside the lyrics, by shortening its hint and labels.
+  test.each([[90, false], [120, true], [160, true], [200, true]] as const)("the filter bar fits its panel at %i columns (lyrics %p)", async (width, lyrics) => {
+    const app = await setup(width, 30, "songs");
+    if (lyrics) { app.mockInput.pressKey("y"); await app.flush(); }
+    app.mockInput.pressKey("F", { shift: true }); await app.flush(); await app.flush();
+    const panel = app.renderer.root.findDescendantById("tracks-panel")!, bar = app.renderer.root.findDescendantById("filter-bar")!;
+    expect(bar.visible).toBe(true);
+    for (const child of bar.getChildren() as any[]) {
+      if (!child.visible || !child.width) continue;
+      expect(child.x + child.width).toBeLessThanOrEqual(panel.x + panel.width - 1);
+    }
+    const line = app.captureCharFrame().split("\n")[bar.y]!;
+    expect(line).toContain("Filter");
+  });
+
   // Issue #79: every button that shows is whole, inside each box around it, and apart from the others.
   test.each([76, 100, 140])("no button is cut off or overlaps another at %i columns", async width => {
     const app = await setup(width, 30, "albums");

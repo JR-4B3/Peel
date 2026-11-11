@@ -55,7 +55,6 @@ function apply(name: string, args: string[]): unknown {
   if (android.fail.has(name)) return { error: `simulated ${name} failure` };
   switch (name) {
     case "ping": return { ok: true };
-    case "rate": return { rate: 96000 };
     case "queue": return { queue: android.queue.slice(android.selected, android.selected + android.view) };
     case "list": if (args[1]!.split(",").length > android.limit) return undefined; android.queue = batchOf(args[1]!.split(",")); android.selected = Number(args[0]); android.position = 0; android.state = android.stall ? 6 : 3; break;
     case "restart": android.restarts++; android.stall = Math.max(0, android.stall - 1); silence(android.silent - 1); android.queue = []; android.selected = 0; android.state = 1; return { ok: true };
@@ -536,9 +535,10 @@ test.skipIf(!supported)("a Peel that attaches while Android stops plays after An
   expect(await Promise.race([host.exited, Bun.sleep(1500).then(() => "running")])).toBe("running");
 }, 20000);
 
-test.skipIf(!supported)("the state reports the rate Android mixes the playing song at", async () => {
+test.skipIf(!supported)("the state reports the rate of Android's stream in PipeWire", async () => {
   expect((await call("play", ["501", "502"].map(id => song(id)), 0)).status).toBe(200);
-  // The controller switches the rate about a second after a song starts, so the host asks later.
+  // The controller switches the rate about a second after a song starts, so the host reads it later.
+  // The simulated pactl reports Android's stream at 96 kHz.
   let state: any;
   for (const end = Date.now() + 8000; Date.now() < end; await Bun.sleep(250)) {
     state = (await send("/state")).body;
