@@ -8,7 +8,7 @@
 // order to tell the songs Peel added from the rest of the collection, as the web engine does.
 import { spawn } from "node:child_process";
 import { existsSync, readFileSync } from "node:fs";
-import { mkdir, rename, writeFile } from "node:fs/promises";
+import { mkdir, readdir, rename, rm, writeFile } from "node:fs/promises";
 import { homedir } from "node:os";
 import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
@@ -33,11 +33,15 @@ export function hiresCommand(): string[] | undefined {
   return existsSync(installed) ? [installed] : undefined;
 }
 
+// peel-hires keeps its state here. The host keeps Android's audio dumps from recoveries here too.
+export function hiresState() {
+  return join(process.env.XDG_STATE_HOME || join(homedir(), ".local/state"), "peel-hires");
+}
+
 // Setup is complete once a release has passed the full tests: `peel-hires update` then records it
 // in its state folder. Until then the pipeline may be installed but cannot play yet.
 export function hiresSetUp() {
-  const state = process.env.XDG_STATE_HOME || join(homedir(), ".local/state");
-  return existsSync(join(state, "peel-hires", "seen"));
+  return existsSync(join(hiresState(), "seen"));
 }
 
 // Hi-res plays wherever the hi-res pipeline is installed and set up, unless PEEL_PLAYER chooses
@@ -313,6 +317,20 @@ class Controller {
     return result;
   }
 
+  // Android's audio dump, read over adb as the no-session case above does. It gives up after
+  // within milliseconds, so a restart that waits for it is not held up.
+  async audioDump(within: number): Promise<string> {
+    if (!this.access) throw new Error("the controller's address is not known yet");
+    const run = Bun.spawn(["adb", "-s", `${this.access.host}:5555`, "shell", "dumpsys", "media.audio_flinger"], { stdout: "pipe", stderr: "pipe" });
+    let timer: ReturnType<typeof setTimeout> | undefined;
+    const late = new Promise<never>((_, reject) => { timer = setTimeout(() => { run.kill(); reject(new Error(`adb did not answer within ${within} ms`)); }, within); });
+    try {
+      const [output, failure, code] = await Promise.race([Promise.all([new Response(run.stdout).text(), new Response(run.stderr).text(), run.exited]), late]);
+      if (code !== 0) throw new Error(failure.trim().split("\n").pop() || `adb exited with code ${code}`);
+      return output;
+    } finally { clearTimeout(timer); }
+  }
+
   // Runs task between requests: after those sent before it, and before any sent while it runs.
   // The task may stop Android, so the connection is dropped after it and the next request starts
   // Android again.
@@ -326,6 +344,16 @@ class Controller {
 function catalogOf(song: Media) {
   return song.catalogId ?? (/^\d+$/.test(song.id) ? song.id : undefined);
 }
+
+// Recoveries from a stall or from silence write one line per event to stderr, which reaches the
+// journal of the host's unit. Normal playback writes nothing.
+const say = (text: string) => { process.stderr.write(`hires-recovery: ${text}\n`); };
+const message = (error: unknown) => error instanceof Error ? error.message : String(error);
+const sentence = (text: string) => /[.!?]$/.test(text) ? text : `${text}.`;
+const clock = (ms: number) => `${Math.floor(ms / 60000)}:${String(Math.floor(ms / 1000) % 60).padStart(2, "0")}`;
+
+// A queue as exportPlayback describes it and importPlayback takes it.
+interface Saved { items?: Media[]; position?: number; added?: number[]; time?: number; playing?: boolean; repeatMode?: (typeof repeats)[number]; shuffleMode?: boolean }
 
 // What the host shows for a queued entry, in the shape the web engine uses.
 const describe = (song: Media) => ({ id: song.id, type: song.type, attributes: { name: song.name, artistName: song.artist, albumName: song.album, durationInMillis: Math.round(song.duration * 1000) } });
@@ -353,6 +381,13 @@ export async function runHiresHost() {
   let wanted = false;
   let rated = { id: "", value: undefined as number | undefined, checked: 0 };
   let notice: string | undefined;
+  // What a recovery that worked has to say, for the entry it recovered. It is no error, so Apple
+  // Music's own error shows ahead of it. It goes away when that entry ends or another one plays,
+  // when a playback command runs, or after noteFor. Each open Peel reads the state every second or
+  // two and keeps the text in its status line, so half a minute reaches every open Peel, and a Peel
+  // opened later does not show an old recovery as new.
+  let note: { text: string; item?: number; position: number; until: number } | undefined;
+  const noteFor = Number(process.env.PEEL_HIRES_NOTE_MS) || 30000;
   let ready = false;
 
   async function writeJson(name: string, value: unknown) {
@@ -420,8 +455,8 @@ export async function runHiresHost() {
     // A changed queue Peel did not ask for, such as shuffle, shows within two seconds.
     if (resync && (current.item !== before || Date.now() - synced > 2000)) await sync();
     watchStall();
-    watchSilence();
-    watchRate();
+    watchStreams();
+    watchNote();
     if (rest.length && !extending && Date.now() >= extendAfter && upcoming() < partAt) {
       extending = true;
       void call("extend").catch(() => {}).finally(() => { extending = false; });
@@ -430,24 +465,17 @@ export async function runHiresHost() {
   }
   let busy = 0;
 
-  // The rate Android plays at, which the controller switches to each song's own rate about a
-  // second after the song changes. It is read from Android's stream in PipeWire, not from the
-  // controller, whose rate lookups can wait seconds on Android's mixer. It is read 1.5 seconds
-  // after a change and every five seconds while the song plays, and reported only for that song.
-  // A read that finds no stream also waits five seconds, so pactl does not run on every poll.
-  let mixer: { item?: number; rate: number } | undefined, asking = false;
-  let seen: { item?: number; at: number } = { at: 0 }, asked: { item?: number; at: number } = { at: 0 };
-  function watchRate() {
-    if (current.item !== seen.item) seen = { item: current.item, at: Date.now() };
-    if (current.state !== PLAYING || asking || Date.now() - seen.at < 1500) return;
-    if (asked.item === current.item && Date.now() - asked.at < 5000) return;
-    const item = current.item;
-    asking = true; asked = { item, at: Date.now() };
-    void androidStreams().then(streams => {
-      const rate = Number(/(\d+)Hz/.exec(streams?.[0]?.sample_specification ?? "")?.[1]);
-      if (rate > 0 && current.item === item) mixer = { item, rate };
-    }).catch(() => {}).finally(() => { asking = false; });
+  // The note of a recovery that worked ends with the entry it recovered: when another entry plays,
+  // when that one stops or pauses, or when it starts over, as with repeat one. It also ends after
+  // noteFor. While Apple Music restarts, the note has no entry yet and stays.
+  function watchNote() {
+    if (!note || note.item === undefined) return;
+    const at = current.position ?? 0;
+    if (Date.now() > note.until || current.item !== note.item || stopped(current) || at < note.position - 3000) note = undefined;
+    else note.position = at;
   }
+  // Keeps a note about the entry that plays now.
+  const keepNote = (text: string) => { note = { text, item: current.item, position: current.position ?? 0, until: Date.now() + noteFor }; };
 
   // Apple Music sometimes stops renewing its stream lease. The song then stays buffering at one
   // place and never plays (#60). After stallLimit there, the host restarts Apple Music and
@@ -463,60 +491,145 @@ export async function runHiresHost() {
     stall = undefined; recovering = true;
     const again = recovered;
     recovered = true;
-    void call("recover", [again]).catch(() => {}).finally(() => { recovering = false; });
+    void call("recover", [again, "stall"]).catch(error => say(`the recovery after a stall failed: ${message(error)}`)).finally(() => { recovering = false; });
   }
 
   // Apple Music can report playing, with its position advancing, while every sample it sends is
   // zero (#94). Restarting Apple Music brings the sound back. While a song plays, the host records
   // half a second of Android's stream from PipeWire every few seconds. When every sample stays zero
-  // for silenceLimit, the host restarts Apple Music and continues, as after a stall. A second
-  // silence within a minute only says so, since a song can also be silent on purpose, and the host
-  // checks that song no more. It never checks at volume 0, or near the start or end of a song.
-  // Android's own mixer underrun count is no sign: it climbs by about 40 a second in normal playback.
+  // for silenceLimit, the host restarts Apple Music and continues, as after a stall, and says so. A
+  // second silence within silenceAgain only says so, since a song can also be silent on purpose,
+  // and the host checks that song no more. It never checks at volume 0, with a muted stream, or in
+  // the last 3 seconds of a song. Android's own mixer underrun count is no sign: it climbs by about
+  // 40 a second in normal playback.
+  //
+  // A silent song once followed a song at another rate: its track opened while the mixer still ran
+  // at the old rate, and the mixer switched in the same moment the song started. So when the
+  // stream's rate differs from the one read before, the song's first check comes at 1.5 seconds,
+  // a check follows every second, and fastLimit of zeros counts. That ends once the song sounds,
+  // or after fastChecks checks that heard no sound, for example with the stream muted on the
+  // computer, so pactl does not run every second for the whole song.
+  // Any other song is first checked at 3 seconds, as before: before that the host only reads the
+  // stream's rate, once, which records nothing. A check finds silence only when every sample is
+  // exactly zero, so a quiet intro or a fade never counts.
   const silenceLimit = Number(process.env.PEEL_HIRES_SILENCE_MS) || 10000;
   const checkEvery = Math.min(5000, silenceLimit / 2);
-  let silentSince: number | undefined, listened = 0, listening = false, silenced = 0, quiet: number | undefined;
-  function watchSilence() {
-    const duration = current.duration ?? 0, at = current.position ?? 0;
-    const playing = wanted && !recovering && current.state === PLAYING && volume > 0 && !muted && current.item !== quiet && at >= 3000 && (!duration || at <= duration - 3000);
-    if (!playing) { silentSince = undefined; return; }
-    if (listening || Date.now() - listened < checkEvery) return;
-    listening = true;
-    const item = current.item;
-    void allZero().then(zero => {
-      listened = Date.now();
-      if (zero !== true || current.item !== item || current.state !== PLAYING || !wanted || recovering) { silentSince = undefined; return; }
-      silentSince ??= listened;
-      if (listened - silentSince < silenceLimit) return;
-      silentSince = undefined;
-      if (listened - silenced < 60000) {
-        quiet = item;
-        notice = "Android's audio is silent, also after a restart of Apple Music. Quit Peel and open it again to restart Android.";
-        return;
-      }
-      silenced = listened; recovering = true;
-      void call("recover", [false]).catch(() => {}).finally(() => { recovering = false; });
-    }).catch(() => {}).finally(() => { listening = false; });
+  const fastLimit = Math.min(3000, silenceLimit), fastEvery = Math.min(1000, fastLimit / 2), fastChecks = 10;
+  const silenceAgain = Number(process.env.PEEL_HIRES_SILENCE_AGAIN_MS) || 60000;
+  let silent: { item?: number; since: number } | undefined, listened = 0, silenced = 0, quiet: number | undefined;
+  // The stream's rate as last read and the entry it was read for, and the entry whose stream
+  // changed rate with the fast checks it has left. The player's quality tag shows the same rate.
+  let heard: { item?: number; rate: number } | undefined, switched: { item?: number; left: number } | undefined;
+  function noteRate(item: number | undefined, rate: number | undefined) {
+    if (!rate) return;
+    if (heard && heard.rate !== rate) switched = { item, left: fastChecks };
+    heard = { item, rate };
   }
+  const fastFor = (item: number | undefined) => !!switched && switched.item === item;
+  const knownRate = () => heard && heard.item === current.item ? heard.rate : undefined;
+  const spot = () => `song ${current.id || "unknown"} at ${((current.position ?? 0) / 1000).toFixed(1)} s`;
+  const where = (rate = knownRate()) => `${spot()}, stream ${rate ? `${rate} Hz` : "rate unknown"}`;
+  // Whether the silence watcher listens to the playing entry now. When it doesn't, a silence that
+  // began is forgotten. Before 3 seconds it listens only to a song whose stream changed rate.
+  function listening() {
+    const duration = current.duration ?? 0, at = current.position ?? 0;
+    const on = wanted && !recovering && current.state === PLAYING && volume > 0 && !muted && current.item !== quiet && at >= 1500 && (!duration || at <= duration - 3000);
+    if (!on) silent = undefined;
+    return on;
+  }
+  const early = (item: number | undefined) => (current.position ?? 0) < 3000 && !fastFor(item);
+
+  // Android's streams are read in this one place, for the rate on the player's quality tag and for
+  // the silence watcher, so the two never disagree and pactl never runs twice for one moment. It
+  // reads from Android's stream in PipeWire, not from the controller, whose rate lookups can wait
+  // seconds on Android's mixer. The controller switches the mixer to each song's own rate about a
+  // second after the song changes, so a song's first reading comes 1.5 seconds after the host saw
+  // it start, or sooner once its position reaches 1.5 seconds while the silence watcher listens.
+  // That reading tells the silence watcher whether the rate changed, and when it did, the watcher
+  // records at once from the same listing. After that a reading comes whenever the silence watcher
+  // is due to check, every checkEvery or every fastEvery after a rate change. While it does not
+  // check, for example at volume 0 or before 3 seconds, a reading comes rateEvery after the last
+  // one. A reading that finds no stream counts too, so pactl does not run on every poll.
+  const rateEvery = 5000;
+  let reading = false, seen: { item?: number; at: number } = { at: 0 }, asked: { item?: number; at: number } = { at: 0 };
+  function watchStreams() {
+    const item = current.item, now = Date.now();
+    if (item !== seen.item) seen = { item, at: now };
+    const checking = listening();
+    if (reading || current.state !== PLAYING) return;
+    const due = asked.item !== item ? checking || now - seen.at >= 1500
+      : checking && !early(item) ? now - listened >= (fastFor(item) ? fastEvery : checkEvery)
+      : now - asked.at >= rateEvery;
+    if (!due) return;
+    reading = true; asked = { item, at: now };
+    void readStreams(item).catch(error => say(`reading Android's streams failed: ${message(error)}`)).finally(() => { reading = false; });
+  }
+  async function readStreams(item: number | undefined) {
+    const list = await streams(), rate = mixerRate(list);
+    if (current.item !== item) return;
+    noteRate(item, rate);
+    if (listening() && !early(item)) await listen(item, list, rate);
+  }
+  // One silence check of the entry item, which records the streams of the listing readStreams made.
+  async function listen(item: number | undefined, list: Stream[] | undefined, rate: number | undefined) {
+    const zero = await allZero(list);
+    listened = Date.now();
+    const fast = fastFor(item);
+    // Sound ends the fast checks, and so does their number running out, whatever they heard.
+    if (fast && (zero === false || --switched!.left <= 0)) switched = undefined;
+    if (zero !== true || current.item !== item || current.state !== PLAYING || !wanted || recovering) {
+      silent = undefined;
+      return;
+    }
+    say(`heard only zeros${fast ? " after the stream changed rate" : ""}: ${where(rate)}`);
+    const since = silent && silent.item === item ? silent.since : listened;
+    silent = { item, since };
+    if (listened - since < (fast ? fastLimit : silenceLimit)) return;
+    silent = undefined;
+    if (listened - silenced < silenceAgain) {
+      quiet = item;
+      say(`silent again within ${Math.round(silenceAgain / 1000)} s of a restart, so Apple Music is not restarted again: ${where(rate)}`);
+      notice = "Android's audio is silent, also after a restart of Apple Music. Quit Peel and open it again to restart Android.";
+      return;
+    }
+    silenced = listened; recovering = true;
+    void call("recover", [false, "silence", rate]).catch(error => say(`the recovery after silence failed: ${message(error)}`)).finally(() => { recovering = false; });
+  }
+
+  type Stream = { index: number; corked?: boolean; mute?: boolean; volume?: Record<string, { value?: number }>; sample_specification?: string; properties?: Record<string, string> };
+  // Android's playing streams in PipeWire, or undefined without PulseAudio's tools. Only
+  // readStreams runs it, so each pactl run serves the quality tag and the silence watcher alike.
+  async function streams(): Promise<Stream[] | undefined> {
+    if (!Bun.which("pactl")) return undefined;
+    const list = Bun.spawn(["pactl", "-f", "json", "list", "sink-inputs"], { stdout: "pipe", stderr: "ignore" });
+    let all: Stream[];
+    try { all = JSON.parse(await new Response(list.stdout).text()); } catch { return undefined; }
+    return all.filter(stream => stream.properties?.["application.name"] === "Waydroid" && !stream.corked);
+  }
+  const rateOf = (stream: Stream) => Number(/(\d+)Hz/.exec(stream.sample_specification ?? "")?.[1]) || undefined;
+  // The rate Android's mixer runs at, from a listing of streams(). This is the one place that
+  // decides which stream plays, for the quality tag and the silence watcher alike. It takes the
+  // newest stream, the one with the highest index, since PipeWire counts its indexes up. Android
+  // has two streams open only for a moment: when the mixer changes rate, as during a song change,
+  // Android's driver opens a new stream at the new rate while the old one is still listed, and
+  // after a restart of Apple Music its new stream can likewise appear before the old one is gone.
+  // The newest stream is the one that plays on. The first listed stream, which the quality tag
+  // once read, is the oldest, so it showed the previous song's rate in that moment. This holds
+  // also on an output that runs only at 48 kHz.
+  function mixerRate(list: Stream[] | undefined): number | undefined {
+    if (!list?.length) return undefined;
+    return rateOf(list.reduce((newest, stream) => stream.index > newest.index ? stream : newest));
+  }
+
   // Records half a second of each of Android's playing streams at its own rate, so the recording
   // doesn't change PipeWire's rate. Answers whether every sample was zero, or undefined when it
   // can't tell, for example without PulseAudio's tools or with a stream muted on the computer.
-  // Android's playing streams in PipeWire, or undefined without PulseAudio's tools.
-  async function androidStreams() {
-    if (!Bun.which("pactl")) return undefined;
-    const list = Bun.spawn(["pactl", "-f", "json", "list", "sink-inputs"], { stdout: "pipe", stderr: "ignore" });
-    let streams: { index: number; corked?: boolean; mute?: boolean; volume?: Record<string, { value?: number }>; sample_specification?: string; properties?: Record<string, string> }[];
-    try { streams = JSON.parse(await new Response(list.stdout).text()); } catch { return undefined; }
-    return streams.filter(stream => stream.properties?.["application.name"] === "Waydroid" && !stream.corked);
-  }
-  async function allZero(): Promise<boolean | undefined> {
-    if (!Bun.which("pacat")) return undefined;
-    const streams = await androidStreams();
-    if (!streams?.length) return undefined;
-    for (const stream of streams) {
+  async function allZero(list: Stream[] | undefined): Promise<boolean | undefined> {
+    if (!list?.length || !Bun.which("pacat")) return undefined;
+    for (const stream of list) {
       const levels = Object.values(stream.volume ?? {}).map(channel => channel.value ?? 1);
       if (stream.mute || levels.length && levels.every(level => level === 0)) return undefined;
-      const rate = Number(/(\d+)Hz/.exec(stream.sample_specification ?? "")?.[1]) || 48000;
+      const rate = rateOf(stream) ?? 48000;
       // pacat's usual latency holds back the first second or two, so it would record nothing.
       const record = Bun.spawn(["pacat", "--record", "--raw", `--monitor-stream=${stream.index}`, "--latency-msec=50", "--format=float32le", `--rate=${rate}`, "--channels=2"], { stdout: "pipe", stderr: "ignore" });
       setTimeout(() => record.kill(), 600).unref();
@@ -526,6 +639,22 @@ export async function runHiresHost() {
       if (samples.some(sample => sample !== 0)) return false;
     }
     return true;
+  }
+
+  // Keeps Android's audio dump from just before a restart of Apple Music, the newest keptDumps of
+  // them. Its signal power history shows whether real samples reached the driver, so whether Apple
+  // Music or the driver lost the sound. It takes at most about a second, and a failure only says so.
+  const keptDumps = 5;
+  async function saveAudioDump() {
+    const folder = join(hiresState(), "audio-dumps"), file = join(folder, `audio_flinger-${new Date().toISOString().replace(/:/g, "-")}.txt`);
+    try {
+      const text = await control.audioDump(1000);
+      await mkdir(folder, { recursive: true, mode: 0o700 });
+      await writeFile(file, text, { mode: 0o600 });
+      const old = (await readdir(folder)).filter(name => name.startsWith("audio_flinger-")).sort().slice(0, -keptDumps);
+      await Promise.all(old.map(name => rm(join(folder, name), { force: true })));
+      say(`saved Android's audio dump to ${file}`);
+    } catch (error) { say(`could not save Android's audio dump: ${message(error)}`); }
   }
 
   // Apple Music applies commands a moment later. Waits until its state shows the change, for up
@@ -547,11 +676,11 @@ export async function runHiresHost() {
 
   // Runs a command that changes the playing entry or position, and waits for it to show. A
   // change Apple never makes is an error, so a device that moves the music away knows.
-  async function step(command: string, done: (state: Control, before: Control) => boolean, failure = "Apple Music did not respond. Try again.") {
+  async function step(command: string, done: (state: Control, before: Control) => boolean, failure = "Apple Music did not respond. Try again.", within = 3000) {
     await read().catch(() => {});
     const before = { ...current };
     await control.request(command).catch(unless);
-    if (!await until(state => done(state, before))) throw new Error(failure);
+    if (!await until(state => done(state, before), within)) throw new Error(failure);
   }
   // A command whose answer was lost may still have worked. The check that follows it decides.
   function unless(error: unknown) { if (!(error instanceof Uncertain)) throw error; }
@@ -882,8 +1011,8 @@ export async function runHiresHost() {
       } : null,
       time: { currentTime: (current.position ?? 0) / 1000, duration: (current.duration ?? 0) / 1000 },
       volume, repeatMode: repeats[repeat] ?? "none", shuffleMode: shuffle, queueRevision: revision(),
-      ...(mixer && mixer.item === current.item && current.title ? { sampleRate: mixer.rate } : {}),
-      ...(notice ? { error: notice } : current.error ? { error: current.error } : {}),
+      ...(knownRate() && current.title ? { sampleRate: knownRate() } : {}),
+      ...(notice ? { error: notice } : current.error ? { error: current.error } : note && Date.now() <= note.until ? { error: note.text } : {}),
     };
   }
 
@@ -915,13 +1044,85 @@ export async function runHiresHost() {
     for (const command of ["pause", "stop"]) {
       try {
         await step(command, stopped);
-        if (muted) await unmute().catch(() => {});
+        if (muted) await unmute().catch(error => say(`could not turn the volume back on after a failed import: ${message(error)}`));
         return;
-      } catch {}
+      } catch (error) { say(`could not ${command} after a failed import: ${message(error)}`); }
     }
     muted = true;
-    await control.request("volume 0").catch(() => {});
+    await control.request("volume 0").catch(error => say(`could not turn the volume off after a failed import: ${message(error)}`));
     notice = "Hi-res playback could not confirm that it stopped, so its volume is off until you play again.";
+  }
+
+  // Moves within the playing song to target milliseconds, and waits until Apple Music shows it.
+  const seekTo = (target: number, within = 3000) => step(`seek ${target}`, state => Math.abs((state.position ?? 0) - target) < 1500, `Apple Music did not move to ${clock(target)}.`, within);
+
+  // Takes over a queue from another device. A paused queue starts silent, seeks, and pauses, and
+  // its volume returns only once Android confirms the pause. A failed import leaves this device
+  // silent: paused, or muted when even the pause can't be confirmed.
+  // A recovery continues the same queue after a restart of Apple Music. Once Apple Music confirmed
+  // the right song plays, a later step that fails does not pause it. Each later step then runs on
+  // its own, so one that fails does not keep the others from running, and the answer names each
+  // step that failed. Apple Music can take longer to seek right after a restart, so the seek gets
+  // more time then.
+  async function restore({ items = [], position: start = 0, added = [], time = 0, playing = false, repeatMode = "none", shuffleMode = false }: Saved = {}, recovery = false): Promise<string[] | undefined> {
+    wanted = false;
+    if (!items.length) { await control.request("stop"); return; }
+    let selected: number;
+    try {
+      if (!playing) { muted = true; await control.request("volume 0"); }
+      // The queue arrives in its played order. Shuffle is applied afterwards, as it was there.
+      if (shuffle) { shuffle = false; await control.request("shuffle 0"); }
+      selected = await playList(items, start, new Set(added));
+    } catch (error) {
+      await silence();
+      throw error;
+    }
+    // The saved time belongs to the song that played there. A song played in its place starts at 0.
+    const target = time > 1 && selected === start ? Math.round(time * 1000) : undefined;
+    if (recovery) return await continueAfterRestart(target, repeatMode, shuffleMode);
+    try {
+      if (target !== undefined) await seekTo(target);
+      repeat = Math.max(0, repeats.indexOf(repeatMode)); await control.request(`repeat ${repeat}`);
+      if (shuffleMode) await setShuffle(true);
+      if (!playing) await step("pause", stopped);
+      if (muted) await unmute();
+      wanted = playing;
+    } catch (error) {
+      await silence();
+      throw error;
+    }
+  }
+
+  // The steps of a recovery after the right song plays again. Each failed step logs why and adds
+  // what the listener needs to know to the answer. Peel then shows repeat and shuffle as Apple
+  // Music has them where the host can know it, and the answer says where it cannot.
+  async function continueAfterRestart(target: number | undefined, repeatMode: (typeof repeats)[number], shuffleMode: boolean) {
+    const problems: string[] = [];
+    const failed = (what: string, error: unknown, problem: string) => { say(`could not ${what} after the restart: ${message(error)}`); problems.push(problem); };
+    if (target !== undefined) await seekTo(target, 8000).catch(error => failed(`move to ${clock(target)}`, error, `Apple Music did not move to ${clock(target)}`));
+    // Apple Music does not tell its repeat mode, so after a failed repeat command the host cannot
+    // know it. Peel keeps showing the listener's mode, and the next change of repeat sets Apple
+    // Music's mode again.
+    repeat = Math.max(0, repeats.indexOf(repeatMode));
+    const labels = { none: "off", one: "one song", all: "all songs" } as const;
+    await control.request(`repeat ${repeat}`).catch(error => failed("set repeat", error,
+      `Apple Music did not set repeat to ${labels[repeats[repeat]!]}, so it may repeat differently from what Peel shows until you change repeat`));
+    if (shuffleMode) {
+      // restore turned shuffle off before the list, so Apple Music plays the queue in the order
+      // it had. Without a confirmed shuffle, the host turns it off once more, so Peel shows it off
+      // as Apple Music has it. The songs then stay in the order they were shuffled into.
+      await setShuffle(true).catch(async error => {
+        shuffle = false; rest.sort((a, b) => a.at - b.at);
+        const off = await control.request("shuffle 0").then(() => true, () => false);
+        failed("turn shuffle on", error, off
+          ? "Apple Music did not turn shuffle on again, so shuffle is off and the songs stay in their shuffled order"
+          : "Apple Music did not turn shuffle on again. Peel shows shuffle off, but cannot tell whether Apple Music shuffles. Turn shuffle on or off to set it");
+        await sync().catch(() => {});
+      });
+    }
+    if (muted) await unmute().catch(error => failed("turn the volume back on", error, "Android's volume stayed off. Change the volume to turn it on"));
+    wanted = true;
+    return problems.length ? problems : undefined;
   }
 
   const methods: Record<string, (...args: any[]) => unknown> = {
@@ -1008,48 +1209,54 @@ export async function runHiresHost() {
       added: whole().map((entry, index) => index > position() && entry.added ? index : -1).filter(index => index >= 0),
       time: (current.position ?? 0) / 1000, playing: current.state === PLAYING, repeatMode: repeats[repeat], shuffleMode: shuffle,
     }),
-    // Takes over a queue from another device. A paused queue starts silent, seeks, and pauses, and
-    // its volume returns only once Android confirms the pause. A failed import leaves this device
-    // silent: paused, or muted when even the pause can't be confirmed.
-    importPlayback: async ({ items = [], position: start = 0, added = [], time = 0, playing = false, repeatMode = "none", shuffleMode = false } = {}) => {
-      wanted = false;
-      if (!items.length) { await control.request("stop"); return; }
-      try {
-        if (!playing) { muted = true; await control.request("volume 0"); }
-        // The queue arrives in its played order. Shuffle is applied afterwards, as it was there.
-        if (shuffle) { shuffle = false; await control.request("shuffle 0"); }
-        const selected = await playList(items, start, new Set(added));
-        // The saved time belongs to the song that played there. A song played in its place starts at 0.
-        if (time > 1 && selected === start) await step(`seek ${Math.round(time * 1000)}`, state => Math.abs((state.position ?? 0) - time * 1000) < 1500);
-        repeat = Math.max(0, repeats.indexOf(repeatMode)); await control.request(`repeat ${repeat}`);
-        if (shuffleMode) await setShuffle(true);
-        if (!playing) await step("pause", stopped);
-        if (muted) await unmute();
-        wanted = playing;
-      } catch (error) {
-        await silence();
-        throw error;
-      }
-    },
+    importPlayback: (saved: Saved = {}) => restore(saved),
     // Restarts Apple Music and continues the queue where it stalled or went silent, or pauses
-    // after a second stall. watchStall and watchSilence run it. A listener who paused meanwhile
-    // keeps the pause.
-    recover: async (again: boolean) => {
-      if (!wanted) return;
+    // after a second stall. watchStall and the silence check in listen run it, and say which with
+    // reason. A listener who paused meanwhile keeps the pause. A restart after silence says so in
+    // a note, and so does a recovery whose song plays again after a step failed. A recovery that
+    // failed says so in a notice.
+    recover: async (again: boolean, reason: "silence" | "stall" = "stall", rate?: number) => {
+      if (!wanted) { say(`no restart after ${reason === "stall" ? "a stall" : reason}, since the music was paused meanwhile: ${where(rate)}`); return; }
       if (again) {
+        say(`stalled again after a restart, so the music pauses: ${where(rate)}`);
         wanted = false;
-        await step("pause", stopped).catch(() => {});
+        await step("pause", stopped).catch(error => say(`could not pause after the second stall: ${message(error)}`));
         notice = "Apple Music stopped streaming, also after a restart. Check the network, or try another song.";
         return;
       }
-      const saved = methods.exportPlayback!() as Parameters<typeof methods.importPlayback>[0];
-      await control.request("restart");
-      // Apple Music starts again with the next command, and its session can take a few seconds.
-      // A queue sent before it is there is lost.
-      for (const end = Date.now() + 15000; ; await sleep(500)) {
-        try { await control.request("state"); break; } catch (error) { if (Date.now() > end) throw error; }
+      const cause = reason === "silence" ? "Android played silence" : "Apple Music stopped streaming";
+      say(`restarting Apple Music after ${reason === "stall" ? "a stall" : reason}: ${where(rate)}`);
+      // The note shows while Apple Music restarts, and stays with the song once it plays again.
+      const silenceNote = "Android played silence, so Peel restarted Apple Music. The song continues where it was.";
+      note = reason === "silence" ? { text: silenceNote, position: 0, until: Infinity } : undefined;
+      const began = Date.now(), saved = methods.exportPlayback!() as Saved;
+      let stage = "restart";
+      try {
+        await saveAudioDump();
+        await control.request("restart");
+        // Apple Music starts again with the next command, and its session can take a few seconds.
+        // A queue sent before it is there is lost.
+        stage = "wait for Apple Music";
+        for (const end = Date.now() + 15000; ; await sleep(500)) {
+          try { await control.request("state"); break; } catch (error) { if (Date.now() > end) throw error; }
+        }
+        stage = "continue the queue";
+        const problems = await restore({ ...saved, playing: true }, true);
+        const took = ((Date.now() - began) / 1000).toFixed(1);
+        if (problems) {
+          say(`the song plays again after ${took} s, but ${problems.length === 1 ? "a step" : `${problems.length} steps`} failed: ${spot()}`);
+          keepNote(`${cause}, so Peel restarted Apple Music. The song plays again, but ${problems.map(sentence).join(" ")}`);
+          return;
+        }
+        say(`recovered after ${took} s: ${spot()}`);
+        if (reason === "silence") keepNote(silenceNote);
+      } catch (error) {
+        note = undefined;
+        notice = stage === "continue the queue"
+          ? `${cause}, so Peel restarted Apple Music, but the song did not start again: ${sentence(message(error))} Play it to try again.`
+          : `${cause}, and Peel could not restart Apple Music: ${sentence(message(error))}`;
+        throw new Error(`${stage}: ${message(error)}`);
       }
-      await methods.importPlayback!({ ...saved, playing: true });
     },
     extend,
     rating: async () => await readRating(playingSong()) ?? -1,
@@ -1124,6 +1331,8 @@ export async function runHiresHost() {
     const result = calling.catch(() => {}).then(async () => {
       busy++;
       try {
+        // A playback command makes the note of the last recovery old news.
+        if (playbackMethods.has(method) && method !== "recover") note = undefined;
         const value = await run(...args);
         if (playbackMethods.has(method)) await read().catch(() => {});
         // A playback command that worked hands control back to the listener, so a volume muted

@@ -2,8 +2,8 @@
 // Android or Apple. The simulated controller applies commands as Apple Music does, and each test
 // can make it fail a command, ignore it, or drop the connection after applying it.
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { rmSync, writeFileSync } from "node:fs";
-import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { closeSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,7 +14,13 @@ const supported = process.platform !== "win32";
 interface Item { queueId: number; id: string; title: string }
 const android = {
   batch: 0, selected: 0, position: 0, state: 2, volume: 1, queue: [] as Item[],
-  // What the next commands do instead of their usual effect.
+  // Repeat and shuffle as Apple Music has them, and the queue's order before shuffle mixed it.
+  // A restart of Apple Music turns both off, so a recovery must set them again.
+  repeat: 0, shuffle: false, unshuffled: undefined as Item[] | undefined,
+  // Apple Music's own error for the playing song, which its state reports.
+  error: undefined as string | undefined,
+  // What the next commands do instead of their usual effect. fail takes a command's name, or the
+  // whole command such as "shuffle 1".
   ignore: new Set<string>(), fail: new Set<string>(), dropAfter: new Set<string>(), partialAdd: false,
   // While above zero, a start stays buffering, as when Apple Music stops renewing its stream
   // lease. Each restart of Apple Music takes one off.
@@ -22,6 +28,8 @@ const android = {
   // While above zero, every sample of Android's stream is zero although Apple Music reports
   // playing. Each restart of Apple Music takes one off.
   silent: 0,
+  // A seek shows only after this many milliseconds, as a slow seek right after a restart.
+  seekDelay: 0,
   // Like Apple Music, the controller ignores a list or addition of more songs than limit, and its
   // queue answer lists only the playing entry and the next view - 1. The host's window is the
   // same size in these tests.
@@ -32,7 +40,34 @@ const android = {
   // A state reply is split at this byte offset into two packets.
   splitAt: undefined as number | undefined,
   commands: [] as string[],
+  // When Apple Music was last restarted.
+  restartedAt: 0,
 };
+// The simulated pactl reports Android's stream at this rate.
+const streamRate = (hz: number) => writeFileSync(join(temporary, "rate"), String(hz));
+// The host's stderr, which the systemd journal records. Its lines from a mark on.
+const hostLog = () => readFileSync(join(temporary, "host.log"), "utf8");
+const logSince = (mark: number) => hostLog().slice(mark).split("\n").filter(line => line.startsWith("hires-recovery: "));
+// The simulated pactl reports Android's stream as muted on the computer while this file exists.
+const muteStream = (muted: boolean) => muted ? writeFileSync(join(temporary, "muted"), "") : rmSync(join(temporary, "muted"), { force: true });
+// How many times the simulated pactl and pacat ran.
+const pactlRuns = () => readFileSync(join(temporary, "pactl-runs"), "utf8").length;
+const pacatRuns = () => readFileSync(join(temporary, "pacat-runs"), "utf8").length;
+// The simulated pactl lists no stream while noStream is on. With oldStream it also lists an older
+// stream at that rate, before the playing one, as Android does for a moment after a rate change.
+const noStream = (on: boolean) => on ? writeFileSync(join(temporary, "no-stream"), "") : rmSync(join(temporary, "no-stream"), { force: true });
+const oldStream = (hz?: number) => hz ? writeFileSync(join(temporary, "old-stream"), String(hz)) : rmSync(join(temporary, "old-stream"), { force: true });
+// The rate the host reports for the quality tag, read while Peel polls, or undefined after a while.
+const reportedRate = async (within = 4000) => {
+  for (const end = Date.now() + within; Date.now() < end; await Bun.sleep(40)) {
+    const rate = (await send("/state")).body.playback?.sampleRate;
+    if (rate) return rate as number;
+  }
+  return undefined;
+};
+// A silence soon after the last restart only says so. Waits until a silence would restart Apple
+// Music again, as PEEL_HIRES_SILENCE_AGAIN_MS sets it below.
+const afterLastRestart = () => Bun.sleep(Math.max(0, android.restartedAt + 4000 - Date.now()));
 // The simulated pacat records zeros while this file exists.
 const silence = (times: number) => {
   android.silent = Math.max(0, times);
@@ -40,24 +75,34 @@ const silence = (times: number) => {
 };
 function reset() {
   // Queue IDs keep counting, as Apple's do: a new queue never reuses an old entry's ID.
-  Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [], stall: 0, restarts: 0 });
-  silence(0);
+  Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [], stall: 0, restarts: 0, seekDelay: 0,
+    repeat: 0, shuffle: false, unshuffled: undefined, error: undefined });
+  silence(0); streamRate(96000); muteStream(false); noStream(false); oldStream();
   android.ignore.clear(); android.fail.clear(); android.dropAfter.clear(); android.drops.clear(); android.gone.clear();
 }
 const snapshot = () => {
   const item = android.queue[android.selected];
-  return { state: android.state, position: android.position, item: item?.queueId ?? -1, id: item?.id, title: item?.title, duration: 300000 };
+  return { state: android.state, position: android.position, item: item?.queueId ?? -1, id: item?.id, title: item?.title, duration: 300000, ...android.error ? { error: android.error } : {} };
 };
 const batchOf = (ids: string[]) => { android.batch++; return ids.filter(id => !android.drops.has(id)).map((id, index) => ({ queueId: android.batch * 2 ** 32 + index, id, title: `Song ${id}` })); };
 
 function apply(name: string, args: string[]): unknown {
   if (android.ignore.has(name)) return undefined;
-  if (android.fail.has(name)) return { error: `simulated ${name} failure` };
+  if (android.fail.has(name) || android.fail.has([name, ...args].join(" "))) return { error: `simulated ${name} failure` };
   switch (name) {
     case "ping": return { ok: true };
     case "queue": return { queue: android.queue.slice(android.selected, android.selected + android.view) };
-    case "list": if (args[1]!.split(",").length > android.limit) return undefined; android.queue = batchOf(args[1]!.split(",")); android.selected = Number(args[0]); android.position = 0; android.state = android.stall ? 6 : 3; break;
-    case "restart": android.restarts++; android.stall = Math.max(0, android.stall - 1); silence(android.silent - 1); android.queue = []; android.selected = 0; android.state = 1; return { ok: true };
+    case "list": if (args[1]!.split(",").length > android.limit) return undefined; android.queue = batchOf(args[1]!.split(",")); android.unshuffled = [...android.queue]; android.selected = Number(args[0]); android.position = 0; android.state = android.stall ? 6 : 3; break;
+    case "restart": android.restarts++; android.restartedAt = Date.now(); android.stall = Math.max(0, android.stall - 1); silence(android.silent - 1); android.queue = []; android.selected = 0; android.state = 1; android.repeat = 0; android.shuffle = false; return { ok: true };
+    case "repeat": android.repeat = Number(args[0]); break;
+    // Shuffle reverses the songs after the playing one, and turning it off puts the order back.
+    case "shuffle": {
+      const on = args[0] === "1", playing = android.queue[android.selected];
+      if (on && !android.shuffle) { android.unshuffled = [...android.queue]; android.queue = [...android.queue.slice(0, android.selected + 1), ...android.queue.slice(android.selected + 1).reverse()]; }
+      if (!on && android.shuffle && android.unshuffled) { android.queue = android.unshuffled; android.selected = Math.max(0, android.queue.indexOf(playing!)); }
+      android.shuffle = on;
+      break;
+    }
     case "add": {
       let ids = args[1]!.split(",");
       if (ids.length > android.limit) return undefined;
@@ -66,17 +111,22 @@ function apply(name: string, args: string[]): unknown {
       break;
     }
     case "skip": { const at = android.queue.findIndex(item => item.queueId === Number(args[0])); if (at >= 0) { android.selected = at; android.position = 0; android.state = 3; } break; }
-    case "seek": android.position = Number(args[0]); break;
+    case "seek": {
+      const target = Number(args[0]);
+      if (android.seekDelay) setTimeout(() => { android.position = target; }, android.seekDelay); else android.position = target;
+      break;
+    }
     case "volume": android.volume = Number(args[0]); break;
     case "pause": android.state = 2; break;
     case "stop": android.state = 1; break;
     case "play": android.state = android.stall ? 6 : 3; break;
     case "next": if (android.selected + 1 < android.queue.length) { android.selected++; android.position = 0; } break;
+    case "previous": android.position = 0; break;
   }
   return undefined;
 }
 
-let controller: Server, api: ReturnType<typeof Bun.serve>, host: ReturnType<typeof Bun.spawn>, temporary: string;
+let controller: Server, api: ReturnType<typeof Bun.serve>, host: ReturnType<typeof Bun.spawn>, temporary: string, hostErrors: number;
 let port = 0, key = "";
 const lookups: string[] = [];
 async function send(path: string, body?: unknown, owner = process.pid, remote = false) {
@@ -143,23 +193,41 @@ beforeAll(async () => {
     `[ "$1 $2" = "session idle" ] && { /bin/sleep 0.5; echo stopped >> '${log}'; }`,
     "exit 0", "",
   ].join("\n"), { mode: 0o700 });
-  // PulseAudio's tools, simulated: one playing Waydroid stream, recorded as zeros while Android is
-  // silent and as music otherwise. pactl notes each run, and lists no stream while a file says so.
+  // PulseAudio's tools, simulated: one playing Waydroid stream at the rate in the rate file,
+  // recorded as zeros while Android is silent and as music otherwise. pactl and pacat note each
+  // run. pactl lists no stream while the no-stream file exists, and while the old-stream file
+  // exists it lists an older stream at the rate in that file before the playing one.
   await mkdir(join(temporary, "bin"));
+  const rate = join(temporary, "rate"), old = join(temporary, "old-stream");
+  const muted = join(temporary, "muted"), runs = join(temporary, "pactl-runs");
+  writeFileSync(runs, ""); writeFileSync(join(temporary, "pacat-runs"), "");
   await writeFile(join(temporary, "bin", "pactl"), [
-    "#!/bin/sh", `echo pactl >> '${join(temporary, "pactl-runs")}'`,
+    "#!/bin/sh",
+    `printf x >> '${runs}'`,
     `if [ -e '${join(temporary, "no-stream")}' ]; then echo '[]'; exit 0; fi`,
-    `echo '[{"index":7,"corked":false,"sample_specification":"float32le 2ch 96000Hz","properties":{"application.name":"Waydroid"}}]'`, "",
+    `rate=96000; [ -e '${rate}' ] && read -r rate < '${rate}'`,
+    `mute=false; [ -e '${muted}' ] && mute=true`,
+    `older=; [ -e '${old}' ] && { read -r was < '${old}'; older='{"index":6,"corked":false,"mute":'$mute',"sample_specification":"float32le 2ch '$was'Hz","properties":{"application.name":"Waydroid"}},'; }`,
+    `echo '['$older'{"index":7,"corked":false,"mute":'$mute',"sample_specification":"float32le 2ch '$rate'Hz","properties":{"application.name":"Waydroid"}}]'`, "",
   ].join("\n"), { mode: 0o700 });
-  await writeFile(join(temporary, "bin", "pacat"), `#!/bin/sh\nif [ -e '${join(temporary, "silent")}' ]; then /usr/bin/head -c 96000 /dev/zero; else /usr/bin/head -c 96000 /dev/urandom; fi\nexec /bin/sleep 5\n`, { mode: 0o700 });
+  // adb, simulated: Android's audio dump, or a failure after 3 seconds while adb-fails exists.
+  await writeFile(join(temporary, "bin", "adb"), [
+    "#!/bin/sh",
+    `if [ -e '${join(temporary, "adb-fails")}' ]; then /bin/sleep 3; echo "error: device offline" >&2; exit 1; fi`,
+    `[ "$*" = "-s 127.0.0.1:5555 shell dumpsys media.audio_flinger" ] || exit 1`,
+    "printf 'Output thread 0x1 type 0 (MIXER):\\n  Signal power history:\\n   00:00:00.000: [ -30.0 ]\\n'", "",
+  ].join("\n"), { mode: 0o700 });
+  await writeFile(join(temporary, "bin", "pacat"), `#!/bin/sh\nprintf x >> '${join(temporary, "pacat-runs")}'\nif [ -e '${join(temporary, "silent")}' ]; then /usr/bin/head -c 96000 /dev/zero; else /usr/bin/head -c 96000 /dev/urandom; fi\nexec /bin/sleep 5\n`, { mode: 0o700 });
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   port = reservation.port!; reservation.stop(true);
   const home = join(temporary, "host");
+  hostErrors = openSync(join(temporary, "host.log"), "a");
   host = Bun.spawn([process.execPath, new URL("../src/hires.ts", import.meta.url).pathname, "--hires-host"], {
     env: { ...process.env, PEEL_HIRES_HOME: home, PEEL_HIRES_PORT: String(port), PEEL_HIRES_COMMAND: command,
       PEEL_CONFIG_DIR: join(temporary, "config"), PEEL_CACHE_DIR: cache, APPLE_MUSIC_USER_TOKEN: "offline", PEEL_HIRES_STALL_MS: "300", PEEL_HIRES_SILENCE_MS: "300", PEEL_HIRES_WINDOW: "20",
+      PEEL_HIRES_SILENCE_AGAIN_MS: "4000", PEEL_HIRES_NOTE_MS: "3000", XDG_STATE_HOME: join(temporary, "state"),
       APPLE_MUSIC_API_BASE: api.url.toString(), PEEL_OWNER: String(process.pid), PATH: join(temporary, "bin") },
-    stdout: "ignore", stderr: "ignore",
+    stdout: "ignore", stderr: hostErrors,
   });
   for (let attempt = 0; attempt < 200 && !key; attempt++) {
     try { key = (await Bun.file(join(home, "key.json")).json()).key; } catch { await Bun.sleep(25); }
@@ -171,7 +239,7 @@ beforeAll(async () => {
 });
 afterAll(async () => {
   if (!supported) return;
-  host.kill(); await host.exited;
+  host.kill(); await host.exited; closeSync(hostErrors);
   controller.close(); api.stop(true);
   await rm(temporary, { recursive: true, force: true });
 });
@@ -443,12 +511,15 @@ test.skipIf(!supported)("characters split between packets arrive whole", async (
   }
 }, 30000);
 
+// Peel reads the state every second, and the host notices a stall or silence from it.
+const poll = async (done: () => boolean, attempts = 150) => {
+  for (let attempt = 0; attempt < attempts && !done(); attempt++) { await send("/state"); await Bun.sleep(20); }
+  expect(done()).toBe(true);
+};
+const listen = async () => { for (let attempt = 0; attempt < 40; attempt++) { await send("/state"); await Bun.sleep(20); } };
+const dumps = () => join(temporary, "state", "peel-hires", "audio-dumps");
+
 test.skipIf(!supported)("a start that stays buffering restarts Apple Music once and continues, and a second stall pauses", async () => {
-  // Peel reads the state every second, and the host notices the stall from it.
-  const poll = async (done: () => boolean) => {
-    for (let attempt = 0; attempt < 150 && !done(); attempt++) { await send("/state"); await Bun.sleep(20); }
-    expect(done()).toBe(true);
-  };
   android.stall = 1;
   await play("101", "102");
   expect(android.state).toBe(6);
@@ -467,35 +538,251 @@ test.skipIf(!supported)("a start that stays buffering restarts Apple Music once 
 }, 20000);
 
 test.skipIf(!supported)("a song that plays silent restarts Apple Music once and continues, and silence again soon after only says so", async () => {
-  const poll = async (done: () => boolean) => {
-    for (let attempt = 0; attempt < 150 && !done(); attempt++) { await send("/state"); await Bun.sleep(20); }
-    expect(done()).toBe(true);
-  };
-  const listen = async () => { for (let attempt = 0; attempt < 40; attempt++) { await send("/state"); await Bun.sleep(20); } };
+  // Older dumps beyond the newest five are deleted. The stall test left dumps of its own.
+  await rm(dumps(), { recursive: true, force: true });
+  await mkdir(dumps(), { recursive: true });
+  for (let at = 0; at < 6; at++) await writeFile(join(dumps(), `audio_flinger-2000-01-01T00-00-0${at}.000Z.txt`), "old");
+  const mark = hostLog().length;
   await play("501", "502");
   // The host does not check the first seconds of a song.
   silence(1); android.position = 1000; await listen();
   expect(android.restarts).toBe(0);
-  // Music that sounds changes nothing.
+  // Music that sounds changes nothing, and normal playback writes nothing to the journal.
   silence(0); android.position = 60000; await listen();
   expect(android.restarts).toBe(0);
+  expect(logSince(mark)).toEqual([]);
 
-  // The host restarts Apple Music, which continues the song where it was.
+  // The host restarts Apple Music, which continues the song where it was, and says so.
   silence(1);
   await poll(() => android.restarts === 1 && android.state === 3 && android.position === 60000);
   expect(android.queue[android.selected]?.id).toBe("501");
   expect(android.queue.map(item => item.id)).toEqual(["501", "502"]);
+  expect((await send("/state")).body.playback.error).toBe("Android played silence, so Peel restarted Apple Music. The song continues where it was.");
+  await poll(() => logSince(mark).some(line => line.includes("recovered after")));
+  const lines = logSince(mark);
+  expect(lines[0]).toBe("hires-recovery: heard only zeros: song 501 at 60.0 s, stream 96000 Hz");
+  expect(lines).toContain("hires-recovery: restarting Apple Music after silence: song 501 at 60.0 s, stream 96000 Hz");
+  expect(lines.find(line => line.includes("saved Android's audio dump"))).toBeDefined();
+  expect(lines.at(-1)).toMatch(/^hires-recovery: recovered after \d+\.\d s: song 501 at 60\.0 s$/);
+  // The dump comes before the restart, and only the newest five are kept.
+  const kept = (await readdir(dumps())).sort();
+  expect(kept).toHaveLength(5);
+  expect(kept.filter(name => name.startsWith("audio_flinger-2000-"))).toHaveLength(4);
+  expect(await readFile(join(dumps(), kept.at(-1)!), "utf8")).toContain("Signal power history");
   await listen();
   expect(android.restarts).toBe(1);
 
-  // Silent again within a minute: the host says so and keeps playing, without another restart.
+  // Silent again soon after: the host says so and keeps playing, without another restart.
   silence(1);
   let error = "";
-  for (let attempt = 0; attempt < 150 && !error.includes("silent"); attempt++) { error = (await send("/state")).body.playback?.error ?? ""; await Bun.sleep(20); }
+  for (let attempt = 0; attempt < 150 && !error.includes("also after"); attempt++) { error = (await send("/state")).body.playback?.error ?? ""; await Bun.sleep(20); }
   expect(error).toContain("silent, also after a restart");
   expect(android.restarts).toBe(1);
   expect(android.state).toBe(3);
+  expect(logSince(mark).at(-1)).toMatch(/^hires-recovery: silent again within 4 s of a restart, so Apple Music is not restarted again: song 501/);
 }, 20000);
+
+test.skipIf(!supported)("a song whose stream changed rate is checked for silence from 1.5 seconds, and one at the same rate from 3 seconds as before", async () => {
+  // Another restart this soon after the last one would only say so.
+  await afterLastRestart();
+  const mark = hostLog().length;
+  await play("601", "602", "603");
+  android.position = 60000; await listen();
+  expect(android.restarts).toBe(0);
+
+  // The next song at the same rate begins with digital silence. It is not checked before 3 seconds.
+  expect((await call("next")).status).toBe(200);
+  android.position = 2000; silence(1); await listen();
+  expect(android.restarts).toBe(0);
+  expect(logSince(mark)).toEqual([]);
+  silence(0);
+
+  // The next song's stream runs at another rate and plays silent: the host restarts Apple Music
+  // after its first checks, before 3 seconds of the song.
+  expect((await call("next")).status).toBe(200);
+  streamRate(44100); android.position = 2000; silence(1);
+  await poll(() => android.restarts === 1 && android.state === 3 && android.position === 2000);
+  expect(android.queue[android.selected]?.id).toBe("603");
+  const lines = logSince(mark);
+  expect(lines[0]).toBe("hires-recovery: heard only zeros after the stream changed rate: song 603 at 2.0 s, stream 44100 Hz");
+  expect(lines).toContain("hires-recovery: restarting Apple Music after silence: song 603 at 2.0 s, stream 44100 Hz");
+  // The note of the recovery goes away with the next playback command.
+  expect((await send("/state")).body.playback.error).toBe("Android played silence, so Peel restarted Apple Music. The song continues where it was.");
+  expect((await call("seek", 10)).status).toBe(200);
+  expect((await send("/state")).body.playback.error).toBeUndefined();
+}, 20000);
+
+test.skipIf(!supported)("the faster checks after a rate change end after ten checks, also when they cannot hear the stream", async () => {
+  await afterLastRestart();
+  const mark = hostLog().length;
+  await play("611", "612");
+  android.position = 60000; await listen();
+  // The next song's stream changed rate, but it is muted on the computer, so no check can tell.
+  expect((await call("next")).status).toBe(200);
+  streamRate(44100); muteStream(true); android.position = 2000;
+  const runs = pactlRuns();
+  await poll(() => pactlRuns() - runs >= 10, 400);
+  // The quality tag shows the rate those checks read, without a pactl run of its own.
+  expect((await send("/state")).body.playback.sampleRate).toBe(44100);
+  // After ten checks the faster checks end. Before 3 seconds the song then gets no more checks.
+  await listen();
+  expect(pactlRuns() - runs).toBe(10);
+  // From 3 seconds on, zeros count as in any other song.
+  muteStream(false); android.position = 5000; silence(1);
+  await poll(() => logSince(mark).length > 0);
+  expect(logSince(mark)[0]).toBe("hires-recovery: heard only zeros: song 612 at 5.0 s, stream 44100 Hz");
+  await poll(() => android.restarts === 1 && android.state === 3);
+}, 20000);
+
+test.skipIf(!supported)("a recovery waits for a slow seek and a slow dump no longer than a second, and a recovery that fails says so", async () => {
+  const mark = hostLog().length;
+  // adb answers only after 3 seconds, with an error, and Apple Music takes 3.5 seconds to seek.
+  writeFileSync(join(temporary, "adb-fails"), "");
+  android.stall = 1;
+  await play("701", "702");
+  android.seekDelay = 3500;
+  const stalled = Date.now();
+  android.position = 30000;
+  await poll(() => android.restarts === 1, 300);
+  // The stall counts after 0.3 seconds, and the dump gives up after 1.
+  expect(android.restartedAt - stalled).toBeLessThan(2500);
+  await poll(() => android.state === 3 && android.position === 30000, 400);
+  await poll(() => logSince(mark).some(line => line.includes("recovered after")), 100);
+  // The song keeps playing.
+  await Bun.sleep(300);
+  expect(android.state).toBe(3);
+  expect((await send("/state")).body.playback.state).toBe("playing");
+  const lines = logSince(mark);
+  expect(lines).toContain("hires-recovery: restarting Apple Music after a stall: song 701 at 30.0 s, stream rate unknown");
+  expect(lines).toContain("hires-recovery: could not save Android's audio dump: adb did not answer within 1000 ms");
+  rmSync(join(temporary, "adb-fails"));
+
+  // Apple Music does not take the queue after a restart: the music pauses, and the notice says so.
+  android.seekDelay = 0;
+  android.stall = 1;
+  await play("703");
+  android.position = 30000;
+  android.fail.add("list");
+  let error = "";
+  for (let attempt = 0; attempt < 300 && !error.includes("did not start again"); attempt++) { error = (await send("/state")).body.playback?.error ?? ""; await Bun.sleep(20); }
+  expect(error).toBe("Apple Music stopped streaming, so Peel restarted Apple Music, but the song did not start again: simulated list failure. Play it to try again.");
+  expect(android.state).toBe(2);
+  expect(logSince(mark).at(-1)).toBe("hires-recovery: the recovery after a stall failed: continue the queue: simulated list failure");
+  android.fail.clear();
+}, 30000);
+
+// Waits until the error in the host's state contains text, and answers it.
+const errorWith = async (text: string, attempts = 300) => {
+  let error = "";
+  for (let attempt = 0; attempt < attempts && !error.includes(text); attempt++) { error = (await send("/state")).body.playback?.error ?? ""; await Bun.sleep(20); }
+  expect(error).toContain(text);
+  return error;
+};
+// The host keeps its repeat mode from earlier tests, and repeat steps through off, one and all.
+async function setRepeat(mode: number) {
+  const set = async () => (await send("/state")).body.playback.repeatMode === ["none", "one", "all"][mode] && android.repeat === mode;
+  for (let press = 0; press < 6 && !await set(); press++) expect((await call("toggleRepeat")).status).toBe(200);
+  expect(android.repeat).toBe(mode);
+}
+// Plays songs, turns shuffle and repeat all on, and lets Apple Music stall at 0:30 of the first.
+async function stallShuffled() {
+  await play("801", "802", "803", "804", "805");
+  expect((await call("shuffle", true)).status).toBe(200);
+  await setRepeat(2);
+  expect([android.shuffle, android.repeat]).toEqual([true, 2]);
+  expect(android.queue.map(item => item.id)).toEqual(["801", "805", "804", "803", "802"]);
+  android.stall = 1; android.position = 30000; android.state = 6;
+}
+// What the host shows for shuffle, repeat and the queue, next to what Apple Music has.
+async function shown() {
+  const playback = (await send("/state")).body.playback, queue = (await call("queue")).body;
+  return {
+    host: { shuffle: playback.shuffleMode, order: queue.items.slice(queue.position).map((item: { id: string }) => item.id) },
+    android: { shuffle: android.shuffle, order: android.queue.slice(android.selected).map(item => item.id) },
+    repeat: { host: playback.repeatMode, android: ["none", "one", "all"][android.repeat] },
+  };
+}
+
+test.skipIf(!supported)("a seek that never lands in a recovery leaves the song playing, still restores repeat and shuffle, and says what failed", async () => {
+  const mark = hostLog().length;
+  await stallShuffled();
+  android.ignore.add("seek");
+  await poll(() => android.restarts === 1, 300);
+  const error = await errorWith("plays again", 800);
+  expect(error).toBe("Apple Music stopped streaming, so Peel restarted Apple Music. The song plays again, but Apple Music did not move to 0:30.");
+  expect(android.state).toBe(3);
+  expect(android.queue[android.selected]?.id).toBe("801");
+  expect((await send("/state")).body.playback.state).toBe("playing");
+  // Repeat and shuffle are back, and the host shows them and the queue as Apple Music has them.
+  expect([android.shuffle, android.repeat]).toEqual([true, 2]);
+  const now = await shown();
+  expect(now.host).toEqual(now.android);
+  expect(now.repeat).toEqual({ host: "all", android: "all" });
+  expect(logSince(mark)).toContain("hires-recovery: could not move to 0:30 after the restart: Apple Music did not move to 0:30.");
+  android.ignore.clear();
+}, 30000);
+
+test.skipIf(!supported)("when seek, repeat and shuffle all fail in a recovery, the song plays, the host shows shuffle and the queue as Apple Music has them, and the note says the rest", async () => {
+  await stallShuffled();
+  for (const command of ["seek", "repeat", "shuffle 1"]) android.fail.add(command);
+  await poll(() => android.restarts === 1, 300);
+  const error = await errorWith("plays again");
+  expect(error).toBe("Apple Music stopped streaming, so Peel restarted Apple Music. The song plays again, but Apple Music did not move to 0:30. "
+    + "Apple Music did not set repeat to all songs, so it may repeat differently from what Peel shows until you change repeat. "
+    + "Apple Music did not turn shuffle on again, so shuffle is off and the songs stay in their shuffled order.");
+  expect(android.state).toBe(3);
+  const now = await shown();
+  expect(now.host).toEqual({ shuffle: false, order: ["801", "805", "804", "803", "802"] });
+  expect(now.host).toEqual(now.android);
+  android.fail.clear();
+}, 30000);
+
+// Plays songs and lets Apple Music stall, so the host restarts it. The restart works, but Apple
+// Music does not take repeat, so the song plays again with a note that says so.
+async function recoverWithNote() {
+  await play("811", "812", "813");
+  expect((await call("shuffle", false)).status).toBe(200);
+  await setRepeat(0);
+  const restarts = android.restarts;
+  android.stall = 1; android.position = 30000; android.state = 6; android.fail.add("repeat");
+  await poll(() => android.restarts > restarts && android.state === 3, 300);
+  const note = await errorWith("plays again");
+  android.fail.clear();
+  return note;
+}
+
+test.skipIf(!supported)("the note of a recovery that worked goes away with any playback command", async () => {
+  const commands: [string, ...unknown[]][] = [["next"], ["previous"], ["seek", 60], ["jump", 2], ["enqueue", [song("899")], false], ["importPlayback", { items: [song("898")], playing: true }]];
+  for (const [method, ...args] of commands) {
+    expect(await recoverWithNote()).toStartWith("Apple Music stopped streaming, so Peel restarted Apple Music. The song plays again, but ");
+    expect((await call(method, ...args)).status).toBe(200);
+    expect([method, (await send("/state")).body.playback.error]).toEqual([method, undefined]);
+  }
+}, 60000);
+
+test.skipIf(!supported)("the note of a recovery that worked goes away when the song changes, ends or starts over, and after a while, and never hides an error of Apple Music", async () => {
+  const changes: [string, () => void][] = [
+    ["the next song starts", () => { android.selected++; android.position = 0; }],
+    ["the song stops", () => { android.state = 1; }],
+    ["the song starts over", () => { android.position = 0; }],
+  ];
+  for (const [change, apply] of changes) {
+    await recoverWithNote();
+    apply();
+    expect([change, (await send("/state")).body.playback.error]).toEqual([change, undefined]);
+  }
+
+  // Apple Music's own error shows ahead of the note.
+  await recoverWithNote();
+  android.error = "Apple Music cannot play this song.";
+  expect((await send("/state")).body.playback.error).toBe("Apple Music cannot play this song.");
+  android.error = undefined;
+
+  // Nothing happens: the note goes away after PEEL_HIRES_NOTE_MS, so a Peel opened later does not show it.
+  await recoverWithNote();
+  await Bun.sleep(3100);
+  expect((await send("/state")).body.playback.error).toBeUndefined();
+}, 60000);
 
 test.skipIf(!supported)("a song Apple Music plays that Peel did not queue gets its cover from the catalog", async () => {
   // As after a restart of the host: Apple Music plays on from a queue this host never saw.
@@ -573,17 +860,17 @@ test.skipIf(!supported)("the state reports the rate of Android's stream in PipeW
 }, 20000);
 
 test.skipIf(!supported)("a rate read that finds no stream waits five seconds, and the next song still gets its rate", async () => {
-  const runs = async () => (await readFile(join(temporary, "pactl-runs"), "utf8").catch(() => "")).split("\n").filter(Boolean).length;
   // At volume 0 the silence check stays off, so only the rate reads run pactl.
   expect((await call("volume", 0)).status).toBe(200);
-  writeFileSync(join(temporary, "no-stream"), "");
+  noStream(true);
   try {
     await play("511", "512");
-    const before = await runs();
-    // Peel polls often, and the host reads the state for each poll.
+    const before = pactlRuns();
+    // Peel polls often, and the host reads the state for each poll. Only the read 1.5 seconds
+    // after the song started runs pactl in these 4 seconds.
     for (const end = Date.now() + 4000; Date.now() < end; await Bun.sleep(40)) await send("/state");
-    expect(await runs() - before).toBeLessThanOrEqual(1);
-    rmSync(join(temporary, "no-stream"));
+    expect(pactlRuns() - before).toBe(1);
+    noStream(false);
     // A new song asks again 1.5 seconds after it starts, without waiting for the five seconds.
     expect((await call("next")).status).toBe(200);
     let state: any;
@@ -593,9 +880,51 @@ test.skipIf(!supported)("a rate read that finds no stream waits five seconds, an
     }
     expect(state.playback.sampleRate).toBe(96000);
   } finally {
-    rmSync(join(temporary, "no-stream"), { force: true });
+    noStream(false);
     await call("volume", 1);
   }
+}, 20000);
+
+test.skipIf(!supported)("in normal playback each pactl run serves the quality tag, and with the silence check on also that check", async () => {
+  // At volume 0 only the rate reads run pactl: one 1.5 seconds after the song starts, then one
+  // every five seconds.
+  expect((await call("volume", 0)).status).toBe(200);
+  try {
+    await play("521", "522");
+    const listed = pactlRuns(), recorded = pacatRuns();
+    expect(await reportedRate()).toBe(96000);
+    for (const end = Date.now() + 3000; Date.now() < end; await Bun.sleep(40)) await send("/state");
+    expect(pactlRuns() - listed).toBe(1);
+    expect(pacatRuns() - recorded).toBe(0);
+  } finally {
+    await call("volume", 1);
+  }
+  // With the silence check on, the check's own reading gives the rate, and the quality tag adds
+  // no pactl run: each one is followed by the check's recording.
+  await play("523", "524");
+  android.position = 60000;
+  const listed = pactlRuns(), recorded = pacatRuns();
+  expect(await reportedRate()).toBe(96000);
+  await listen();
+  // The host reads nothing without a poll, so the last check ends within its 0.6 second recording.
+  await Bun.sleep(800);
+  expect(pactlRuns() - listed).toBeGreaterThan(1);
+  expect(pactlRuns() - listed).toBe(pacatRuns() - recorded);
+}, 20000);
+
+test.skipIf(!supported)("with two of Android's streams listed, the quality tag and the silence watcher both take the newest", async () => {
+  await afterLastRestart();
+  const mark = hostLog().length;
+  await play("531", "532");
+  android.position = 60000;
+  expect(await reportedRate()).toBe(96000);
+  // The next song plays at 44.1 kHz on a new stream, while the stream of the song before, at
+  // 96 kHz, is still listed ahead of it. The new song begins silent.
+  expect((await call("next")).status).toBe(200);
+  oldStream(96000); streamRate(44100); android.position = 2000; silence(1);
+  expect(await reportedRate()).toBe(44100);
+  await poll(() => android.restarts === 1 && android.state === 3);
+  expect(logSince(mark)[0]).toBe("hires-recovery: heard only zeros after the stream changed rate: song 532 at 2.0 s, stream 44100 Hz");
 }, 20000);
 
 // Last: the host exits at the end.
