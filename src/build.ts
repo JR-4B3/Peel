@@ -58,7 +58,9 @@ function sourceTime(dir: string, files: string[]) {
     try {
       // A git hook's settings would point git at another repository.
       const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !["GIT_DIR", "GIT_WORK_TREE", "GIT_INDEX_FILE", "GIT_COMMON_DIR"].includes(name)));
-      const run = Bun.spawnSync(["git", "-C", dir, ...args], { env, stdout: "pipe", stderr: "ignore" });
+      // Without optional locks, git status leaves the index alone, so it cannot make a commit
+      // that runs at the same moment fail. A git that hangs is stopped, and file times decide.
+      const run = Bun.spawnSync(["git", "--no-optional-locks", "-C", dir, ...args], { env, stdout: "pipe", stderr: "ignore", timeout: 5000 });
       return run.exitCode === 0 ? run.stdout.toString() : undefined;
     } catch { return undefined; }
   };

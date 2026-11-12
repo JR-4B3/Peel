@@ -83,7 +83,7 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
     // A host started before Peel updated itself keeps running the old code, while the interface
     // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
     if (current && outdated(current, mine, remote)) {
-      if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} restarts. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
+      if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} tries. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
       signal?.throwIfAborted();
       status("Restarting hi-res playback to load an update...");
       const running = await (start.watch ?? watchHost)();

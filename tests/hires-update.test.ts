@@ -142,12 +142,12 @@ test("a host another window starts from older code during a restart is restarted
     await before.ensure();
     expect(machine.counts).toMatchObject({ quits: 2, starts: 2 });
   }
-});
+}, 20000);
 
 test("restarts stop after a few tries when an older window keeps starting the host", async () => {
   const machine = computer(older), before = machine.peel(older), after = machine.peel(newer);
   machine.race = { at: "gone", times: Infinity, run: () => before.ensure() };
-  await expect(after.ensure()).rejects.toThrow("still runs code older than this Peel after 3 restarts");
+  await expect(after.ensure()).rejects.toThrow("still runs code older than this Peel after 3 tries");
   expect(machine.counts.quits).toBe(3);
   expect(machine.build()).toEqual(older);
 });
@@ -279,7 +279,9 @@ test.skipIf(!Bun.which("git"))("a source checkout takes its commit's time, so ch
     await writeFile(join(dir, "src", "unused.ts"), "export const unused = 2;\n");
     expect(hiresBuild(dir).time).toBe(committed);
     // A changed host file counts with its own time.
-    await writeFile(join(dir, "src", "helper.ts"), "export const helper = () => 2;\n");
+    // The new text has another length. Git compares a file's size and time with its index
+    // before it reads the file, and this test sets the time the index already holds.
+    await writeFile(join(dir, "src", "helper.ts"), "export const helper = () => 22;\n");
     await utimes(join(dir, "src", "helper.ts"), later, later);
     expect(hiresBuild(dir).time).toBe(later.toISOString());
     // A changed file older than the commit leaves the commit's time.

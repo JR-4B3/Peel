@@ -572,4 +572,3 @@ test.skipIf(!supported)("a Peel that attaches while the last one leaves keeps th
     expect(await stops()).toBe(earlier + 1);
   } finally { other.kill(); }
 }, 20000);
-
