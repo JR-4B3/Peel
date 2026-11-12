@@ -22,6 +22,9 @@ function git(...args: string[]) {
 const base = (await Bun.file("package.json").json()).version as string;
 const commit = git("rev-parse", "HEAD").toString().trim();
 const date = new Date().toISOString().slice(0, 10);
+// The commit's time orders two builds from the same day, for example when a Peel decides whether
+// the hi-res host runs older code than itself (src/build.ts).
+const time = new Date(git("show", "-s", "--format=%cI", "HEAD").toString().trim()).toISOString();
 const version = channel === "nightly" ? `${base}-nightly.${date.replaceAll("-", "")}.${commit.slice(0, 7)}` : base;
 const tag = process.env.GITHUB_REF_TYPE === "tag" ? process.env.GITHUB_REF_NAME : undefined;
 if (channel === "stable" && tag && tag !== `v${version}`) throw new Error(`The tag ${tag} does not match package.json's version ${version}. Tag v${version}, or change the version first.`);
@@ -33,7 +36,7 @@ try {
   await writeFile(tar, git("archive", "--format=tar", "HEAD"));
   await mkdir(tree);
   if (Bun.spawnSync(["tar", "-xf", tar, "-C", tree]).exitCode) throw new Error("Could not unpack git's archive.");
-  const build = { version, channel, commit, date };
+  const build = { version, channel, commit, date, time };
   await writeFile(join(tree, "version.json"), JSON.stringify(build, null, 2) + "\n");
   await rm(out, { recursive: true, force: true });
   await mkdir(out, { recursive: true });
