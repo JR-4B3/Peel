@@ -2,8 +2,9 @@ import { EventEmitter } from "node:events";
 import type { Preferences } from "./config";
 // What the settings page says about updates. index.ts fills it from src/update.ts.
 // ready names an installed version that a restart starts, older says it is older, and newEngine
-// says its engine differs, which stops the music if this computer plays it.
-export interface UpdateState { version?: string; channel?: string; installed: boolean; message: string; ready?: string; older?: boolean; newEngine?: boolean; checking?: boolean }
+// says its engine differs, which stops the music if this computer plays it. newHires says the
+// new version restarts the hi-res host, which stops the music the same way.
+export interface UpdateState { version?: string; channel?: string; installed: boolean; message: string; ready?: string; older?: boolean; newEngine?: boolean; newHires?: boolean; checking?: boolean }
 import { defaults } from "./config";
 import type { DeviceView, Pairing } from "./devices";
 import type { MemoryUse } from "./memory";

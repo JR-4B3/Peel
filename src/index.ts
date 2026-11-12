@@ -8,7 +8,7 @@ import { DeviceNetwork } from "./devices";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { memoryUse } from "./memory";
-import { checkForUpdate, currentBuild, installLauncher, readyVersion, restartCommand } from "./update";
+import { checkForUpdate, currentBuild, installLauncher, readyVersion, restartCommand, type Ready } from "./update";
 
 // Peel plays through its own engine. Where the hi-res pipeline (hires/) is installed, Apple
 // Music's Android app plays in hi-res unless PEEL_PLAYER=web.
@@ -106,13 +106,16 @@ try {
     // hi-res. The new Peel never uses the web engine, so the restart counts as a new engine: the
     // row says the music stops, and this Peel releases the web engine instead of keeping it.
     const switchesToHires = () => !useHires && hiresSelected();
+    // Only the player this Peel plays through matters: a Peel that plays in hi-res keeps playing
+    // when only the web engine changed, and stops when the new Peel restarts the hi-res host.
+    const interrupts = (next: Ready) => ({ newEngine: !useHires && (!!next.newEngine || switchesToHires()), newHires: useHires && !!next.newHires });
     const updates = (force: boolean) => {
       const channel = model.preferences.channel;
       model.update = { ...model.update, checking: true }; model.changed();
       void checkForUpdate(channel, force).then(result => {
         if (channel !== model.preferences.channel) return;
         const announce = result.ready && !result.older && result.ready !== model.update.ready;
-        model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message, ready: result.ready, older: result.older, newEngine: result.newEngine || switchesToHires() };
+        model.update = { installed: !!result.build, version: result.build?.version, channel: result.build?.channel, message: result.message, ready: result.ready, older: result.older, ...interrupts(result) };
         if (announce) model.status = `Peel ${result.ready} is ready. Restart Peel from Settings to start it.`;
         model.changed();
       }, error => {
@@ -128,10 +131,9 @@ try {
     model.playsLocally = () => !player.sshHost && !player.peer;
     // The version to start is read again, since another Peel window may have changed it. A change
     // updates the row, so the listener sees what the restart would do before choosing it again.
-    model.onRestart = () => void readyVersion().then(next => {
-      if (next.ready) next.newEngine ||= switchesToHires();
-      const shown = model.update;
-      if (next.ready && next.ready === shown.ready && next.newEngine === shown.newEngine && next.older === shown.older) { restartInto = next.ready; renderer.destroy(); return; }
+    model.onRestart = () => void readyVersion().then(ready => {
+      const next = { ...ready, ...interrupts(ready) }, shown = model.update;
+      if (next.ready && next.ready === shown.ready && next.newEngine === shown.newEngine && next.newHires === shown.newHires && next.older === shown.older) { restartInto = next.ready; renderer.destroy(); return; }
       model.update = { ...shown, ...next, ready: next.ready };
       model.status = next.ready ? `Another Peel window installed ${next.ready}. Check the row and choose it again.` : "The update is no longer installed. Check for updates again.";
       model.changed();

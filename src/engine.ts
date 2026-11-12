@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
+import type { HostBuild } from "./build";
 import { cacheDir, systemDir } from "./config";
 import type { Media, Page, Playback, Player } from "./types";
 
@@ -251,7 +252,9 @@ export async function engineVersion() {
   return hasher.digest("hex");
 }
 
-interface State { ready: boolean; signIn: boolean; playback?: Playback; version?: string; build?: string }
+// The hi-res host also reports its build (src/build.ts), its instance, which is new each time it
+// starts, and how many other Peels use it.
+interface State { ready: boolean; signIn: boolean; playback?: Playback; version?: string; build?: HostBuild; instance?: string; others?: number }
 interface Queue { position: number; items: { id: string; type: string; added: boolean; attributes: { name?: string; artistName?: string; albumName?: string; durationInMillis?: number } }[] }
 
 // The SSH helper sets PEEL_REMOTE_HOST. Its requests, and an engine it starts, mark it as a remote
