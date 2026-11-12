@@ -34,7 +34,8 @@ export function settingsRows(settings: SettingsContext): Row[] {
     },
     update.ready ? {
       id: "update", lead: icon.update, name: update.older ? "Restart to switch" : "Restart to update", right: shortVersion(update.ready),
-      description: update.newEngine && model.playsLocally() ? "The music stops and the queue clears, because the playback engine restarts too."
+      description: update.newHires && model.playsLocally() ? "The music stops and the queue clears, because hi-res playback restarts too."
+        : update.newEngine && model.playsLocally() ? "The music stops and the queue clears, because the playback engine restarts too."
         : "Restarts Peel in this window. The music keeps playing and the queue stays.",
       activate: () => model.onRestart(),
     } : {
