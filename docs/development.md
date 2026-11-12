@@ -4,7 +4,7 @@
 
 | Folder | What is there |
 | --- | --- |
-| `src/` | The terminal app: interface (`ui.ts`), state (`model.ts`), Apple Music API (`apple.ts`), engine client (`engine.ts`), devices (`devices.ts`, `link.ts`, `remote.ts`), SSH helper (`remote-host.ts`), hi-res host (`hires.ts`), updates (`update.ts`) |
+| `src/` | The terminal app: interface (`ui/`, one file per part of the screen: player, cover grid, lists, settings, device popups), state (`model.ts`), Apple Music API (`apple.ts`), engine client (`engine.ts`), devices (`devices.ts`, `link.ts`, `remote.ts`), SSH helper (`remote-host.ts`), hi-res host (`hires.ts`), updates (`update.ts`) |
 | `engine/` | The playback engine: MusicKit JS in castlabs' Electron, controlled over a local HTTP interface with a private key |
 | `hires/` | The Linux hi-res pipeline: Waydroid image builder, audio driver, rate helper, root helper, controller, systemd units and tests |
 | `tests/` | Bun tests. `fixture.ts` is a stand-in for Apple's API and for Peel's engine |
