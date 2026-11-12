@@ -176,7 +176,7 @@ test("the build covers the modules the host imports and changes with them", asyn
     await writeFile(join(dir, "src", "shape.ts"), 'export interface Shape { size: number }\n');
     await writeFile(join(dir, "src", "unused.ts"), 'export const unused = 1;\n');
     const first = hiresBuild(dir);
-    expect(first.files.map(file => file.slice(dir.length))).toEqual(["/src/hires.ts", "/src/helper.ts", "/src/shape.ts"]);
+    expect(first.files.map(file => file.slice(dir.length).replaceAll("\\", "/"))).toEqual(["/src/hires.ts", "/src/helper.ts", "/src/shape.ts"]);
     // A module the host does not import does not count.
     await writeFile(join(dir, "src", "unused.ts"), 'export const unused = 2;\n');
     expect(hiresBuild(dir).hash).toBe(first.hash);
@@ -190,7 +190,7 @@ test("the build covers the modules the host imports and changes with them", asyn
     await mkdir(join(dir, "hires", "android", "control"), { recursive: true });
     await writeFile(join(dir, "hires", "android", "control", "Control.java"), "class Control {}\n");
     const controller = hiresBuild(dir);
-    expect(controller.files.map(file => file.slice(dir.length))).toContain("/hires/android/control/Control.java");
+    expect(controller.files.map(file => file.slice(dir.length).replaceAll("\\", "/"))).toContain("/hires/android/control/Control.java");
     expect(controller.hash).not.toBe(third.hash);
     await writeFile(join(dir, "hires", "android", "control", "Control.java"), "class Control { int version = 2; }\n");
     expect(hiresBuild(dir).hash).not.toBe(controller.hash);

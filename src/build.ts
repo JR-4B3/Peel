@@ -34,7 +34,7 @@ export function hiresBuild(folder: string): HostBuild & { files: string[] } {
   for (const file of [join(dir, "hires", "bin", "peel-hires"), ...java]) {
     if (!existsSync(file)) continue;
     // The name goes in too, so moving code from one file to another changes the hash.
-    hasher.update(relative(dir, file));
+    hasher.update(relative(dir, file).replaceAll("\\", "/"));
     hasher.update(readFileSync(file));
     files.push(file);
   }
@@ -66,7 +66,7 @@ function sourceTime(dir: string, files: string[]) {
   // The prefix is empty at the top of a checkout.
   const top = git("rev-parse", "--show-prefix")?.trim() === "";
   const committed = top ? Date.parse(git("log", "-1", "--format=%cI", "HEAD")?.trim() ?? "") : NaN;
-  const status = Number.isNaN(committed) ? undefined : git("status", "--porcelain", "-z", "--untracked-files=all", "--", ...files.map(file => relative(dir, file)));
+  const status = Number.isNaN(committed) ? undefined : git("status", "--porcelain", "-z", "--untracked-files=all", "--", ...files.map(file => relative(dir, file).replaceAll("\\", "/")));
   if (status !== undefined) {
     // Each entry is two status letters, a space and the path. A renamed file's old path follows
     // as its own entry, which matches no hashed file.
