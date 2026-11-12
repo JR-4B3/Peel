@@ -20,10 +20,11 @@ Peel started on 1 October 2026. Everything below is on `main` and in the nightly
 
 These pull requests are open and not on `main` yet:
 
-- [#101](https://github.com/JR-4B3/Peel/pull/101) restarts a hi-res host that still runs code from before an update. Such a host made Peel play a song a few rows further down than the one chosen.
+- [#101](https://github.com/JR-4B3/Peel/pull/101) restarts a hi-res host that runs older code than the Peel that uses it. A host left over from before an update made Peel play a song a few rows further down than the one chosen. A host of the same or a newer build keeps running, so two windows of different versions cannot restart it back and forth.
 - [#102](https://github.com/JR-4B3/Peel/pull/102) splits `src/ui.ts` (1,387 lines) into `src/ui/`, one file per part of the screen. Nothing changes for the listener.
 - [#103](https://github.com/JR-4B3/Peel/pull/103), stacked on #102, redesigns the interface after the mocks. Search moves into a top row, and the player takes four rows with the controls centred. A quality tag names the sample rate, such as "Hi-Res Lossless · 96 kHz". The sidebar has two groups, Library and Playlists. Song lists get a Year column and show their song count. The filter bar stays inside its panel at every width.
-- [#104](https://github.com/JR-4B3/Peel/pull/104) fixes [#99](https://github.com/JR-4B3/Peel/issues/99). Android's audio driver gets a larger buffer and no longer waits forever on a device that takes nothing. It changes the Android image, so it needs a nightly build and a played song before it merges.
+- [#104](https://github.com/JR-4B3/Peel/pull/104) fixes [#99](https://github.com/JR-4B3/Peel/issues/99). Android's audio driver gets a larger buffer and no longer waits forever on a device that takes nothing. The new driver passed every release test on a real computer with a 48 kHz-only output, and an 88.2 kHz song plays there. Until it is in a nightly, the nightly hi-res update rebuilds the old driver, fails its played test and rolls back.
+- [#106](https://github.com/JR-4B3/Peel/pull/106) makes Peel wait for the save of `devices.json` before it closes its device network. Without it, a test failed now and then on Windows, and a Peel that restarted into an update could start before the old one had saved.
 
 ## Next
 
@@ -40,7 +41,7 @@ Size comes from a code review of each issue. Small means under about 150 changed
 
 | Issue | Size | Importance | Why |
 | --- | --- | --- | --- |
-| [#99](https://github.com/JR-4B3/Peel/issues/99) silence after a switch to 88.2 kHz | Small, fix in #104 | High | On a 48 kHz-only output, the first song above 48 kHz silences hi-res until Android restarts, and Android keeps running after the last Peel closes. #104 fixes the driver and needs a played test on a new Android image. |
+| [#99](https://github.com/JR-4B3/Peel/issues/99) silence after a switch to 88.2 kHz | Small, fix in #104 | High | On a 48 kHz-only output, the first song above 48 kHz silences hi-res until Android restarts, and Android keeps running after the last Peel closes. #104 fixes the driver and closes this issue when it merges. |
 | [#73](https://github.com/JR-4B3/Peel/issues/73) bit-perfect test failed once | Small to medium | High | This test decides whether a nightly hi-res release stays or rolls back. A test that fails without a cause can roll back a good release or hide a bad one. #98 added a check for all-zero samples in Android's PipeWire stream, but `peel-hires test` does not use it. |
 | [#75](https://github.com/JR-4B3/Peel/issues/75) measure click-to-sound | Large | High | A slow first song is the first thing a listener notices. Hi-res reports "playing" while it still buffers, so measuring the real first sound needs a new state, not a timer. The silence check from #98 runs every 5 seconds and skips a song's first 3 seconds, so it cannot time the first sound. One shared probe that tells when sound comes out would serve both this issue and #73. |
 | [#72](https://github.com/JR-4B3/Peel/issues/72) cheaper hi-res | Large | High | 1.6 GB while listening is too much on an ordinary computer. Removing the home screen app (about 80 MB) and merging Peel's two helpers inside Android are the next steps to try. |
@@ -60,7 +61,7 @@ Size comes from a code review of each issue. Small means under about 150 changed
 | [#85](https://github.com/JR-4B3/Peel/issues/85) Discord presence | Large | Low | It shows others what plays, nothing more. It needs Discord's local socket on three systems. |
 | [#78](https://github.com/JR-4B3/Peel/issues/78) text size, larger title | Small (what is left) | Low | The Text size setting shipped. Only the check for a larger now-playing title through kitty's text-sizing protocol in Ghostty is open. |
 
-The order to work in, given size and importance: merge the four pull requests in review first, #102 before #103, and #104 once it has played on a new Android image. Then redesign the filter, and fix #73 with the shared sound probe that #75 needs too. Recently added from #88 follows, then #86 and #92. #80 and #82 come next as one Apple API investigation, since #83 depends on both.
+The order to work in, given size and importance: merge the pull requests in review first, #104 before the next nightly and #102 before #103. Then redesign the filter, and fix #73 with the shared sound probe that #75 needs too. Recently added from #88 follows, then #86 and #92. #80 and #82 come next as one Apple API investigation, since #83 depends on both.
 
 ## Ideas, not scheduled
 
