@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdtemp, rm } from "node:fs/promises";
+import { mkdtemp, readdir, readFile, rm } from "node:fs/promises";
 import { connect } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -656,6 +656,20 @@ test("a second Peel on the same computer leaves the devices to the first, and ta
   await expect(second.forget()).rejects.toThrow("Another Peel window");
   first.close();
   await waitFor(() => second.active, "the second Peel taking over");
+});
+
+test("closing waits for the last save, so devices.json holds the current claim and devices", async () => {
+  const mac = await computer("Mac");
+  // Several changes queue several saves. close() comes right after the last one.
+  for (let count = 0; count < 5; count++) mac.network.claimOutput(count % 2 ? mac.network.id : "fake-device-1");
+  mac.network.merge([], [{ id: "fake-device-2", name: "phone", port: 1, addresses: ["192.168.1.20"] }]);
+  mac.network.claimOutput("fake-device-2");
+  await mac.network.close();
+  const stored = JSON.parse(await readFile(join(mac.dir, "devices.json"), "utf8"));
+  expect(stored.output).toEqual(mac.network.claim);
+  expect(stored.output).toEqual({ device: "fake-device-2", generation: 6 });
+  expect(stored.known.map((device: { id: string }) => device.id)).toContain("fake-device-2");
+  expect((await readdir(mac.dir)).filter(name => name.endsWith(".tmp"))).toEqual([]);
 });
 
 test("a status check answers while the engine is slow", async () => {
