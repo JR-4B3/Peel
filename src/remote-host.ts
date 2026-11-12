@@ -42,6 +42,9 @@ export async function runRemoteHost() {
   // The host's own player: hi-res where its pipeline is installed, otherwise the web engine.
   const hires = hiresSelected();
   const engine = hires ? new Hires() : new Engine();
-  try { await serveRemote(lines, reply, engine, () => (hires ? ensureHires : ensureEngine)(engine, text => reply({ status: text }))); }
+  // The helper runs the newest installed Peel, which a window on this computer may not have
+  // restarted into yet, so it restarts an older hi-res host only when no other Peel uses it.
+  const status = (text: string) => reply({ status: text });
+  try { await serveRemote(lines, reply, engine, () => hires ? ensureHires(engine, status, undefined, { remote: true }) : ensureEngine(engine, status)); }
   finally { lines.close(); }
 }

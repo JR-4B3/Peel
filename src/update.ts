@@ -8,6 +8,7 @@ import { mkdir, readFile, rename, rm, writeFile } from "node:fs/promises";
 import { homedir, tmpdir } from "node:os";
 import { basename, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { compareBuilds, hiresBuild } from "./build";
 import { readPreferences, saveJson, type Channel } from "./config";
 
 export const repository = process.env.PEEL_REPOSITORY ?? "JR-4B3/Peel";
@@ -16,7 +17,8 @@ const appDir = fileURLToPath(new URL("..", import.meta.url));
 // Checked at most this often, unless the channel changes.
 const checkInterval = 6 * 60 * 60 * 1000;
 
-export interface Build { version: string; channel: Channel; commit: string; date: string }
+// time is the commit's time in UTC. Releases from before it was recorded have only the build date.
+export interface Build { version: string; channel: Channel; commit: string; date: string; time?: string }
 export interface Release extends Build { archive: string; sums: string }
 
 // The build this Peel runs from, or undefined for a source checkout.
@@ -104,8 +106,9 @@ export async function installRelease(release: Release, root: string, status: (te
 // Keep installed versions for rollback and for other Peel windows still using them.
 // ready names an installed version other than the running one, which a restart starts. older
 // says it is older, after a switch to the stable channel. newEngine says its playback engine
-// differs, so restarting into it stops this computer's music.
-export interface Ready { ready?: string; older?: boolean; newEngine?: boolean }
+// differs, so restarting into it stops this computer's music. newHires says the same for the
+// hi-res host: the new Peel restarts a host older than itself (src/build.ts).
+export interface Ready { ready?: string; older?: boolean; newEngine?: boolean; newHires?: boolean }
 export interface UpdateResult extends Ready { build?: Build; message: string }
 
 // The version <root>/current names when it is not this one. Another Peel window may have installed it.
@@ -119,13 +122,13 @@ export async function readyVersion(dir = appDir): Promise<Ready> {
     for (const name of ["engine.js", "main.js"]) hasher.update(await readFile(join(folder, "engine", name)).catch(() => new Uint8Array()));
     return hasher.digest("hex");
   };
-  // Nightly versions end in a commit hash, which semver would compare as text. The release
-  // number decides first, then the build date.
-  const next = await currentBuild(join(root, "versions", ready));
-  let release = 0;
-  try { release = Bun.semver.order(ready.split("-")[0]!, build.version.split("-")[0]!); } catch {}
-  const older = release < 0 || release === 0 && !!next?.date && next.date < build.date;
-  return { ready, older, newEngine: await engine(dir) !== await engine(join(root, "versions", ready)) };
+  // The release number decides first, then the commit time or build date.
+  const folder = join(root, "versions", ready), next = await currentBuild(folder);
+  const order = compareBuilds({ version: ready, time: next?.time ?? next?.date }, { version: build.version, time: build.time ?? build.date });
+  // The host this Peel uses runs this Peel's code or a newer one. A newer Peel restarts it when
+  // its code differs. One that is not newer leaves it running.
+  const newHires = order > 0 && hiresBuild(dir).hash !== hiresBuild(folder).hash;
+  return { ready, older: order < 0, newEngine: await engine(dir) !== await engine(folder), newHires };
 }
 
 // The command that starts the ready version in this terminal. --remote and --local are already
