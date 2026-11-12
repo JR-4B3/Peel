@@ -17,6 +17,9 @@ export interface Media {
   // Another catalog ID for the same recording, set only when it differs from catalogId. Apple can
   // drop a library song's catalogId from the catalog and still have the song under this one.
   reportingId?: string;
+  // The recording's ISRC, which Apple gives for catalog songs. Every catalog version of one
+  // recording has the same ISRC.
+  isrc?: string;
   // Rated as a favourite, once known.
   loved?: boolean;
 }
@@ -65,6 +68,11 @@ export interface Library {
   artist(id: string): Promise<ArtistPage>;
   // The ids of the given songs that are rated as favourites.
   ratings(items: Media[]): Promise<Set<string>>;
+  // Removes the favourite mark from every version of song, so it does not stay a favourite
+  // through another ID. Apple serves one recording under several IDs.
+  forgetFavourite?(song: Media): Promise<void>;
+  // Called after a favourite changed, so the next answer reads Favourite Songs again.
+  favouritesChanged?(): void;
   // Whether an album is a favourite, and marking or unmarking it as one.
   albumFavourite(item: Media): Promise<boolean>;
   favouriteAlbum(item: Media, value: boolean): Promise<void>;
@@ -101,6 +109,7 @@ export function media(item: Record<string, any>, type = "songs"): Media {
     artwork: attrs.artwork?.url, releaseDate: attrs.releaseDate, trackCount: attrs.trackCount,
     prerelease: attrs.isPrerelease, genre: attrs.genreNames?.[0],
     catalogId: attrs.playParams?.catalogId ?? (/^\d+$/.test(String(resource.id)) ? String(resource.id) : undefined),
+    ...attrs.isrc ? { isrc: String(attrs.isrc) } : {},
     ...attrs.playParams?.reportingId && attrs.playParams.reportingId !== attrs.playParams.catalogId ? { reportingId: String(attrs.playParams.reportingId) } : {},
   };
 }

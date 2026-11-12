@@ -169,5 +169,5 @@ export function fixture(options: { queueDelay?: number; silentRating?: boolean; 
     return await run(...args) ?? null;
   };
   return { server, playback, calls, commands, audible, lovedAlbums, queue: () => queue, player: new Engine("/nonexistent", transport),
-    library: new AppleMusic("user-token", { base: `http://127.0.0.1:${server.port}`, developerToken: async () => "dev-token" }) };
+    library: new AppleMusic("user-token", { base: `http://127.0.0.1:${server.port}`, developerToken: async () => "dev-token", favouriteVersions: false }) };
 }
