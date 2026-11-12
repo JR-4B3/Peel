@@ -342,7 +342,7 @@ export async function runHiresHost() {
     // A changed queue Peel did not ask for, such as shuffle, shows within two seconds.
     if (resync && (current.item !== before || Date.now() - synced > 2000)) await sync();
     watchStall();
-    watchSilence();
+    watchStreams();
     watchNote();
     if (rest.length && !extending && Date.now() >= extendAfter && upcoming() < partAt) {
       extending = true;
@@ -403,10 +403,10 @@ export async function runHiresHost() {
   const checkEvery = Math.min(5000, silenceLimit / 2);
   const fastLimit = Math.min(3000, silenceLimit), fastEvery = Math.min(1000, fastLimit / 2), fastChecks = 10;
   const silenceAgain = Number(process.env.PEEL_HIRES_SILENCE_AGAIN_MS) || 60000;
-  let silent: { item?: number; since: number } | undefined, listened = 0, listening = false, silenced = 0, quiet: number | undefined;
-  // The stream's rate as last read and the entry it was read for, the entry whose stream changed
-  // rate with the fast checks it has left, and the entry whose rate was read before its first check.
-  let heard: { item?: number; rate: number } | undefined, switched: { item?: number; left: number } | undefined, probed: number | undefined;
+  let silent: { item?: number; since: number } | undefined, listened = 0, silenced = 0, quiet: number | undefined;
+  // The stream's rate as last read and the entry it was read for, and the entry whose stream
+  // changed rate with the fast checks it has left. The player's quality tag shows the same rate.
+  let heard: { item?: number; rate: number } | undefined, switched: { item?: number; left: number } | undefined;
   function noteRate(item: number | undefined, rate: number | undefined) {
     if (!rate) return;
     if (heard && heard.rate !== rate) switched = { item, left: fastChecks };
@@ -416,24 +416,49 @@ export async function runHiresHost() {
   const knownRate = () => heard && heard.item === current.item ? heard.rate : undefined;
   const spot = () => `song ${current.id || "unknown"} at ${((current.position ?? 0) / 1000).toFixed(1)} s`;
   const where = (rate = knownRate()) => `${spot()}, stream ${rate ? `${rate} Hz` : "rate unknown"}`;
-
-  function watchSilence() {
-    const duration = current.duration ?? 0, at = current.position ?? 0, item = current.item;
-    const playing = wanted && !recovering && current.state === PLAYING && volume > 0 && !muted && item !== quiet && at >= 1500 && (!duration || at <= duration - 3000);
-    if (!playing) { silent = undefined; return; }
-    if (listening) return;
-    const fast = fastFor(item), early = at < 3000 && !fast;
-    if (early ? probed === item : Date.now() - listened < (fast ? fastEvery : checkEvery)) return;
-    listening = true;
-    void listen(item, early).catch(error => say(`the silence check failed: ${message(error)}`)).finally(() => { listening = false; });
+  // Whether the silence watcher listens to the playing entry now. When it doesn't, a silence that
+  // began is forgotten. Before 3 seconds it listens only to a song whose stream changed rate.
+  function listening() {
+    const duration = current.duration ?? 0, at = current.position ?? 0;
+    const on = wanted && !recovering && current.state === PLAYING && volume > 0 && !muted && current.item !== quiet && at >= 1500 && (!duration || at <= duration - 3000);
+    if (!on) silent = undefined;
+    return on;
   }
-  async function listen(item: number | undefined, early: boolean) {
+  const early = (item: number | undefined) => (current.position ?? 0) < 3000 && !fastFor(item);
+
+  // Android's streams are read in this one place, for the rate on the player's quality tag and for
+  // the silence watcher, so the two never disagree and pactl never runs twice for one moment. It
+  // reads from Android's stream in PipeWire, not from the controller, whose rate lookups can wait
+  // seconds on Android's mixer. The controller switches the mixer to each song's own rate about a
+  // second after the song changes, so a song's first reading comes 1.5 seconds after the host saw
+  // it start, or sooner once its position reaches 1.5 seconds while the silence watcher listens.
+  // That reading tells the silence watcher whether the rate changed, and when it did, the watcher
+  // records at once from the same listing. After that a reading comes whenever the silence watcher
+  // is due to check, every checkEvery or every fastEvery after a rate change. While it does not
+  // check, for example at volume 0 or before 3 seconds, a reading comes rateEvery after the last
+  // one. A reading that finds no stream counts too, so pactl does not run on every poll.
+  const rateEvery = 5000;
+  let reading = false, seen: { item?: number; at: number } = { at: 0 }, asked: { item?: number; at: number } = { at: 0 };
+  function watchStreams() {
+    const item = current.item, now = Date.now();
+    if (item !== seen.item) seen = { item, at: now };
+    const checking = listening();
+    if (reading || current.state !== PLAYING) return;
+    const due = asked.item !== item ? checking || now - seen.at >= 1500
+      : checking && !early(item) ? now - listened >= (fastFor(item) ? fastEvery : checkEvery)
+      : now - asked.at >= rateEvery;
+    if (!due) return;
+    reading = true; asked = { item, at: now };
+    void readStreams(item).catch(error => say(`reading Android's streams failed: ${message(error)}`)).finally(() => { reading = false; });
+  }
+  async function readStreams(item: number | undefined) {
     const list = await streams(), rate = mixerRate(list);
-    if (current.item === item) noteRate(item, rate);
-    if (early) {
-      probed = item;
-      if (!fastFor(item)) return;
-    }
+    if (current.item !== item) return;
+    noteRate(item, rate);
+    if (listening() && !early(item)) await listen(item, list, rate);
+  }
+  // One silence check of the entry item, which records the streams of the listing readStreams made.
+  async function listen(item: number | undefined, list: Stream[] | undefined, rate: number | undefined) {
     const zero = await allZero(list);
     listened = Date.now();
     const fast = fastFor(item);
@@ -459,7 +484,8 @@ export async function runHiresHost() {
   }
 
   type Stream = { index: number; corked?: boolean; mute?: boolean; volume?: Record<string, { value?: number }>; sample_specification?: string; properties?: Record<string, string> };
-  // Android's playing streams in PipeWire, or undefined without PulseAudio's tools.
+  // Android's playing streams in PipeWire, or undefined without PulseAudio's tools. Only
+  // readStreams runs it, so each pactl run serves the quality tag and the silence watcher alike.
   async function streams(): Promise<Stream[] | undefined> {
     if (!Bun.which("pactl")) return undefined;
     const list = Bun.spawn(["pactl", "-f", "json", "list", "sink-inputs"], { stdout: "pipe", stderr: "ignore" });
@@ -468,11 +494,15 @@ export async function runHiresHost() {
     return all.filter(stream => stream.properties?.["application.name"] === "Waydroid" && !stream.corked);
   }
   const rateOf = (stream: Stream) => Number(/(\d+)Hz/.exec(stream.sample_specification ?? "")?.[1]) || undefined;
-  // The rate Android's mixer runs at, from a listing of streams(): the rate of the newest playing
-  // stream. Android's driver opens a new stream when the mixer changes rate, so an older stream
-  // still listed for a moment has the old rate. This holds also on an output that runs only at
-  // 48 kHz. It is the host's only reading of the rate, so whatever else shows or watches the rate
-  // should use it too.
+  // The rate Android's mixer runs at, from a listing of streams(). This is the one place that
+  // decides which stream plays, for the quality tag and the silence watcher alike. It takes the
+  // newest stream, the one with the highest index, since PipeWire counts its indexes up. Android
+  // has two streams open only for a moment: when the mixer changes rate, as during a song change,
+  // Android's driver opens a new stream at the new rate while the old one is still listed, and
+  // after a restart of Apple Music its new stream can likewise appear before the old one is gone.
+  // The newest stream is the one that plays on. The first listed stream, which the quality tag
+  // once read, is the oldest, so it showed the previous song's rate in that moment. This holds
+  // also on an output that runs only at 48 kHz.
   function mixerRate(list: Stream[] | undefined): number | undefined {
     if (!list?.length) return undefined;
     return rateOf(list.reduce((newest, stream) => stream.index > newest.index ? stream : newest));
@@ -868,6 +898,7 @@ export async function runHiresHost() {
       } : null,
       time: { currentTime: (current.position ?? 0) / 1000, duration: (current.duration ?? 0) / 1000 },
       volume, repeatMode: repeats[repeat] ?? "none", shuffleMode: shuffle, queueRevision: revision(),
+      ...(knownRate() && current.title ? { sampleRate: knownRate() } : {}),
       ...(notice ? { error: notice } : current.error ? { error: current.error } : note && Date.now() <= note.until ? { error: note.text } : {}),
     };
   }
@@ -1067,10 +1098,10 @@ export async function runHiresHost() {
     }),
     importPlayback: (saved: Saved = {}) => restore(saved),
     // Restarts Apple Music and continues the queue where it stalled or went silent, or pauses
-    // after a second stall. watchStall and watchSilence run it, and say which with reason. A
-    // listener who paused meanwhile keeps the pause. A restart after silence says so in a note,
-    // and so does a recovery whose song plays again after a step failed. A recovery that failed
-    // says so in a notice.
+    // after a second stall. watchStall and the silence check in listen run it, and say which with
+    // reason. A listener who paused meanwhile keeps the pause. A restart after silence says so in
+    // a note, and so does a recovery whose song plays again after a step failed. A recovery that
+    // failed says so in a notice.
     recover: async (again: boolean, reason: "silence" | "stall" = "stall", rate?: number) => {
       if (!wanted) { say(`no restart after ${reason === "stall" ? "a stall" : reason}, since the music was paused meanwhile: ${where(rate)}`); return; }
       if (again) {

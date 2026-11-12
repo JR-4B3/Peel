@@ -50,8 +50,21 @@ const hostLog = () => readFileSync(join(temporary, "host.log"), "utf8");
 const logSince = (mark: number) => hostLog().slice(mark).split("\n").filter(line => line.startsWith("hires-recovery: "));
 // The simulated pactl reports Android's stream as muted on the computer while this file exists.
 const muteStream = (muted: boolean) => muted ? writeFileSync(join(temporary, "muted"), "") : rmSync(join(temporary, "muted"), { force: true });
-// How many times the simulated pactl ran.
+// How many times the simulated pactl and pacat ran.
 const pactlRuns = () => readFileSync(join(temporary, "pactl-runs"), "utf8").length;
+const pacatRuns = () => readFileSync(join(temporary, "pacat-runs"), "utf8").length;
+// The simulated pactl lists no stream while noStream is on. With oldStream it also lists an older
+// stream at that rate, before the playing one, as Android does for a moment after a rate change.
+const noStream = (on: boolean) => on ? writeFileSync(join(temporary, "no-stream"), "") : rmSync(join(temporary, "no-stream"), { force: true });
+const oldStream = (hz?: number) => hz ? writeFileSync(join(temporary, "old-stream"), String(hz)) : rmSync(join(temporary, "old-stream"), { force: true });
+// The rate the host reports for the quality tag, read while Peel polls, or undefined after a while.
+const reportedRate = async (within = 4000) => {
+  for (const end = Date.now() + within; Date.now() < end; await Bun.sleep(40)) {
+    const rate = (await send("/state")).body.playback?.sampleRate;
+    if (rate) return rate as number;
+  }
+  return undefined;
+};
 // A silence soon after the last restart only says so. Waits until a silence would restart Apple
 // Music again, as PEEL_HIRES_SILENCE_AGAIN_MS sets it below.
 const afterLastRestart = () => Bun.sleep(Math.max(0, android.restartedAt + 4000 - Date.now()));
@@ -64,7 +77,7 @@ function reset() {
   // Queue IDs keep counting, as Apple's do: a new queue never reuses an old entry's ID.
   Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [], stall: 0, restarts: 0, seekDelay: 0,
     repeat: 0, shuffle: false, unshuffled: undefined, error: undefined });
-  silence(0); streamRate(96000); muteStream(false);
+  silence(0); streamRate(96000); muteStream(false); noStream(false); oldStream();
   android.ignore.clear(); android.fail.clear(); android.dropAfter.clear(); android.drops.clear(); android.gone.clear();
 }
 const snapshot = () => {
@@ -181,17 +194,21 @@ beforeAll(async () => {
     "exit 0", "",
   ].join("\n"), { mode: 0o700 });
   // PulseAudio's tools, simulated: one playing Waydroid stream at the rate in the rate file,
-  // recorded as zeros while Android is silent and as music otherwise.
+  // recorded as zeros while Android is silent and as music otherwise. pactl and pacat note each
+  // run. pactl lists no stream while the no-stream file exists, and while the old-stream file
+  // exists it lists an older stream at the rate in that file before the playing one.
   await mkdir(join(temporary, "bin"));
-  const rate = join(temporary, "rate");
+  const rate = join(temporary, "rate"), old = join(temporary, "old-stream");
   const muted = join(temporary, "muted"), runs = join(temporary, "pactl-runs");
-  writeFileSync(runs, "");
+  writeFileSync(runs, ""); writeFileSync(join(temporary, "pacat-runs"), "");
   await writeFile(join(temporary, "bin", "pactl"), [
     "#!/bin/sh",
     `printf x >> '${runs}'`,
+    `if [ -e '${join(temporary, "no-stream")}' ]; then echo '[]'; exit 0; fi`,
     `rate=96000; [ -e '${rate}' ] && read -r rate < '${rate}'`,
     `mute=false; [ -e '${muted}' ] && mute=true`,
-    `echo '[{"index":7,"corked":false,"mute":'$mute',"sample_specification":"float32le 2ch '$rate'Hz","properties":{"application.name":"Waydroid"}}]'`, "",
+    `older=; [ -e '${old}' ] && { read -r was < '${old}'; older='{"index":6,"corked":false,"mute":'$mute',"sample_specification":"float32le 2ch '$was'Hz","properties":{"application.name":"Waydroid"}},'; }`,
+    `echo '['$older'{"index":7,"corked":false,"mute":'$mute',"sample_specification":"float32le 2ch '$rate'Hz","properties":{"application.name":"Waydroid"}}]'`, "",
   ].join("\n"), { mode: 0o700 });
   // adb, simulated: Android's audio dump, or a failure after 3 seconds while adb-fails exists.
   await writeFile(join(temporary, "bin", "adb"), [
@@ -200,7 +217,7 @@ beforeAll(async () => {
     `[ "$*" = "-s 127.0.0.1:5555 shell dumpsys media.audio_flinger" ] || exit 1`,
     "printf 'Output thread 0x1 type 0 (MIXER):\\n  Signal power history:\\n   00:00:00.000: [ -30.0 ]\\n'", "",
   ].join("\n"), { mode: 0o700 });
-  await writeFile(join(temporary, "bin", "pacat"), `#!/bin/sh\nif [ -e '${join(temporary, "silent")}' ]; then /usr/bin/head -c 96000 /dev/zero; else /usr/bin/head -c 96000 /dev/urandom; fi\nexec /bin/sleep 5\n`, { mode: 0o700 });
+  await writeFile(join(temporary, "bin", "pacat"), `#!/bin/sh\nprintf x >> '${join(temporary, "pacat-runs")}'\nif [ -e '${join(temporary, "silent")}' ]; then /usr/bin/head -c 96000 /dev/zero; else /usr/bin/head -c 96000 /dev/urandom; fi\nexec /bin/sleep 5\n`, { mode: 0o700 });
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   port = reservation.port!; reservation.stop(true);
   const home = join(temporary, "host");
@@ -584,6 +601,8 @@ test.skipIf(!supported)("the faster checks after a rate change end after ten che
   streamRate(44100); muteStream(true); android.position = 2000;
   const runs = pactlRuns();
   await poll(() => pactlRuns() - runs >= 10, 400);
+  // The quality tag shows the rate those checks read, without a pactl run of its own.
+  expect((await send("/state")).body.playback.sampleRate).toBe(44100);
   // After ten checks the faster checks end. Before 3 seconds the song then gets no more checks.
   await listen();
   expect(pactlRuns() - runs).toBe(10);
@@ -805,6 +824,86 @@ test.skipIf(!supported)("a Peel that attaches while Android stops plays after An
   expect(after.indexOf("controller")).toBeGreaterThan(after.indexOf("stopped"));
   expect(android.queue.map(item => item.id)).toEqual(["201"]);
   expect(await Promise.race([host.exited, Bun.sleep(1500).then(() => "running")])).toBe("running");
+}, 20000);
+
+test.skipIf(!supported)("the state reports the rate of Android's stream in PipeWire", async () => {
+  expect((await call("play", ["501", "502"].map(id => song(id)), 0)).status).toBe(200);
+  // The controller switches the rate about a second after a song starts, so the host reads it later.
+  // The simulated pactl reports Android's stream at 96 kHz.
+  let state: any;
+  for (const end = Date.now() + 8000; Date.now() < end; await Bun.sleep(250)) {
+    state = (await send("/state")).body;
+    if (state.playback?.sampleRate) break;
+  }
+  expect(state.playback.sampleRate).toBe(96000);
+}, 20000);
+
+test.skipIf(!supported)("a rate read that finds no stream waits five seconds, and the next song still gets its rate", async () => {
+  // At volume 0 the silence check stays off, so only the rate reads run pactl.
+  expect((await call("volume", 0)).status).toBe(200);
+  noStream(true);
+  try {
+    await play("511", "512");
+    const before = pactlRuns();
+    // Peel polls often, and the host reads the state for each poll. Only the read 1.5 seconds
+    // after the song started runs pactl in these 4 seconds.
+    for (const end = Date.now() + 4000; Date.now() < end; await Bun.sleep(40)) await send("/state");
+    expect(pactlRuns() - before).toBe(1);
+    noStream(false);
+    // A new song asks again 1.5 seconds after it starts, without waiting for the five seconds.
+    expect((await call("next")).status).toBe(200);
+    let state: any;
+    for (const end = Date.now() + 4000; Date.now() < end; await Bun.sleep(100)) {
+      state = (await send("/state")).body;
+      if (state.playback?.sampleRate) break;
+    }
+    expect(state.playback.sampleRate).toBe(96000);
+  } finally {
+    noStream(false);
+    await call("volume", 1);
+  }
+}, 20000);
+
+test.skipIf(!supported)("in normal playback each pactl run serves the quality tag, and with the silence check on also that check", async () => {
+  // At volume 0 only the rate reads run pactl: one 1.5 seconds after the song starts, then one
+  // every five seconds.
+  expect((await call("volume", 0)).status).toBe(200);
+  try {
+    await play("521", "522");
+    const listed = pactlRuns(), recorded = pacatRuns();
+    expect(await reportedRate()).toBe(96000);
+    for (const end = Date.now() + 3000; Date.now() < end; await Bun.sleep(40)) await send("/state");
+    expect(pactlRuns() - listed).toBe(1);
+    expect(pacatRuns() - recorded).toBe(0);
+  } finally {
+    await call("volume", 1);
+  }
+  // With the silence check on, the check's own reading gives the rate, and the quality tag adds
+  // no pactl run: each one is followed by the check's recording.
+  await play("523", "524");
+  android.position = 60000;
+  const listed = pactlRuns(), recorded = pacatRuns();
+  expect(await reportedRate()).toBe(96000);
+  await listen();
+  // The host reads nothing without a poll, so the last check ends within its 0.6 second recording.
+  await Bun.sleep(800);
+  expect(pactlRuns() - listed).toBeGreaterThan(1);
+  expect(pactlRuns() - listed).toBe(pacatRuns() - recorded);
+}, 20000);
+
+test.skipIf(!supported)("with two of Android's streams listed, the quality tag and the silence watcher both take the newest", async () => {
+  await afterLastRestart();
+  const mark = hostLog().length;
+  await play("531", "532");
+  android.position = 60000;
+  expect(await reportedRate()).toBe(96000);
+  // The next song plays at 44.1 kHz on a new stream, while the stream of the song before, at
+  // 96 kHz, is still listed ahead of it. The new song begins silent.
+  expect((await call("next")).status).toBe(200);
+  oldStream(96000); streamRate(44100); android.position = 2000; silence(1);
+  expect(await reportedRate()).toBe(44100);
+  await poll(() => android.restarts === 1 && android.state === 3);
+  expect(logSince(mark)[0]).toBe("hires-recovery: heard only zeros after the stream changed rate: song 532 at 2.0 s, stream 44100 Hz");
 }, 20000);
 
 // Last: the host exits at the end.

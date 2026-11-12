@@ -55,6 +55,9 @@ const memoryStore: HomeStore = { read: async () => undefined, write: async () =>
 // Toggles that repeat after this many presses, so presses still waiting can be counted.
 const cycles: Record<string, number> = { "/playback/toggle": 2, "/playback/shuffle/toggle": 2, "/playback/repeat/toggle": 3 };
 
+// Favourite Songs and the playlists, which the sidebar lists under their own heading.
+export const playlistEntry = (id: string) => id === "favourites" || id.startsWith("playlist:");
+
 export class Model extends EventEmitter {
   playback: Playback = structuredClone(stopped);
   // The player answered with its playback state. Browsing does not need it.
@@ -793,7 +796,10 @@ export class Model extends EventEmitter {
     await this.persist(current => {
       // entries() sorts by this.preferences, which is the saved order this change builds on.
       const entries = this.entries(true).map(item => item.id);
-      const index = entries.indexOf(id), target = index + direction;
+      // The sidebar shows the library and the playlists apart, so an entry moves within its group.
+      const index = entries.indexOf(id);
+      let target = index + direction;
+      while (target >= 0 && target < entries.length && playlistEntry(entries[target]!) !== playlistEntry(id)) target += direction;
       if (index < 0 || target < 0 || target >= entries.length) return current;
       [entries[index], entries[target]] = [entries[target], entries[index]];
       return { ...current, order: entries };
