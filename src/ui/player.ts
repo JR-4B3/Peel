@@ -1,13 +1,12 @@
-import { BoxRenderable, TextRenderable, t, fg, type CliRenderer, type MouseEvent } from "@opentui/core";
+import { BoxRenderable, TextRenderable, t, fg, bold, type CliRenderer, type MouseEvent } from "@opentui/core";
 import type { Model } from "../model";
 import { colour, icon } from "../theme";
 import { duration } from "../types";
-import { Cover, type Button } from "./widgets";
+import { Cover, fit, tag, type Button } from "./widgets";
 
 // What the player's buttons open elsewhere in the interface.
 export interface PlayerActions {
   showCover(art: string | undefined, name: string, detail: string): void;
-  toggleDevices(): void;
   toggleLyrics(): void;
   focusContent(): void;
 }
@@ -18,64 +17,123 @@ export class PlayerPanel {
   readonly panel: BoxRenderable;
   readonly cover: Cover;
   readonly lyricsButton: Button;
+  // The playback buttons show no keys beside them. The ? list names their keys.
+  readonly buttons: Button[] = [];
   private title: TextRenderable;
   private subtitle: TextRenderable;
   private indicator: TextRenderable;
-  private progress: TextRenderable;
+  private quality: TextRenderable;
+  private about: BoxRenderable;
+  private sound: BoxRenderable;
   private controls: BoxRenderable;
+  private left: BoxRenderable;
+  private right: BoxRenderable;
+  private narrow = false;
+  // The cells of the rows beside the cover.
+  private deckWidth = 0;
+  private progress: TextRenderable;
   private playButton: Button;
   private favouriteButton: Button;
-  private devicesButton: Button;
   private shuffleButton: Button;
   private repeatButton: Button;
   private volumeText: TextRenderable;
 
+  // A line above the player sets it apart, without a box around it. Beside the cover: the song and
+  // the stream's quality, the artist and the volume, the playback buttons centred on a row of their
+  // own, and the time.
   constructor(private ctx: CliRenderer, private model: Model, button: MakeButton, ui: PlayerActions) {
+    const control = (id: string, glyph: string, action: () => void, tint?: string) => {
+      const made = button(id, glyph, "", action, tint);
+      made.flexShrink = 0; this.buttons.push(made);
+      return made;
+    };
     // The mouse wheel anywhere over the player changes the volume in 5% steps. Lists scroll as before.
-    this.panel = new BoxRenderable(ctx, { id: "player-panel", border: true, borderStyle: "rounded", borderColor: colour.faint, paddingX: 1, height: 6, flexShrink: 0, flexDirection: "row", gap: 2,
+    this.panel = new BoxRenderable(ctx, { id: "player-panel", border: ["top"], borderStyle: "single", borderColor: colour.line, paddingX: 1, height: 5, flexShrink: 0, flexDirection: "row", gap: 2,
       onMouseScroll: event => {
         const direction = event.scroll?.direction;
         if (direction !== "up" && direction !== "down") return;
         event.stopPropagation();
         void model.volume(direction === "up" ? 0.05 : -0.05);
       } });
-    this.cover = new Cover(ctx, { id: "player-cover", width: 8, height: 4, glyph: "\u{F075A}" });
+    // The whole cover shows. Its width follows the terminal's cell shape, so it is about square.
+    this.cover = new Cover(ctx, { id: "player-cover", width: 8, height: 4, glyph: "\u{F075A}", fit: "fit" });
     this.cover.onMouseDown = event => { const song = model.playback.nowPlaying; if (event.button === 0 && song) { event.stopPropagation(); ui.showCover(song.artwork?.url, song.albumName ?? song.name ?? "", song.artistName ?? ""); } };
     this.panel.add(this.cover);
     const deck = new BoxRenderable(ctx, { flexDirection: "column", flexGrow: 1, minWidth: 0 });
-    const nowPlaying = new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2 });
-    this.title = new TextRenderable(ctx, { id: "now-playing", fg: colour.text, attributes: 1, flexShrink: 1, minWidth: 0, height: 1, truncate: true, selectable: false });
-    this.favouriteButton = button("favourite", icon.heartOutline, "f", () => void model.toggleFavourite(), colour.faint);
-    this.indicator = new TextRenderable(ctx, { id: "playback-indicator", fg: colour.faint, height: 1, flexGrow: 1, minWidth: 0, selectable: false, truncate: true });
-    // The devices button sits at the top right of the player, under the popup it opens.
-    this.devicesButton = button("devices", icon.devices, "d", () => ui.toggleDevices(), colour.faint);
-    this.devicesButton.flexShrink = 0;
-    nowPlaying.add(this.title); nowPlaying.add(this.favouriteButton); nowPlaying.add(this.indicator); nowPlaying.add(this.devicesButton); deck.add(nowPlaying);
-    this.subtitle = new TextRenderable(ctx, { id: "now-playing-artist", fg: colour.muted, height: 1, width: "100%", truncate: true, selectable: false,
+    const row = () => new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2, flexShrink: 0 });
+
+    const top = row();
+    // The song's name gives way first, so the heart and the playback state stay in the window.
+    const song = new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2, flexGrow: 1, flexShrink: 1, minWidth: 0 });
+    this.title = new TextRenderable(ctx, { id: "now-playing", fg: colour.text, flexShrink: 1, minWidth: 0, height: 1, truncate: true, selectable: false });
+    this.favouriteButton = control("favourite", icon.heartOutline, () => void model.toggleFavourite(), colour.faint);
+    this.indicator = new TextRenderable(ctx, { id: "playback-indicator", fg: colour.faint, height: 1, flexShrink: 0, selectable: false });
+    song.add(this.title); song.add(this.favouriteButton); song.add(this.indicator);
+    this.quality = new TextRenderable(ctx, { id: "quality", height: 1, flexShrink: 0, selectable: false });
+    top.add(song); top.add(this.quality);
+    deck.add(top);
+
+    const about = this.about = row();
+    this.subtitle = new TextRenderable(ctx, { id: "now-playing-artist", fg: colour.muted, height: 1, flexGrow: 1, minWidth: 0, truncate: true, selectable: false,
       onMouseDown: event => { const song = model.playing; if (event.button === 0 && song) { event.stopPropagation(); void model.openArtist(song); ui.focusContent(); } } });
-    deck.add(this.subtitle);
+    const sound = this.sound = new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 1, flexShrink: 0 });
+    this.lyricsButton = control("lyrics-toggle", icon.lyrics, () => ui.toggleLyrics(), colour.faint);
+    this.lyricsButton.marginRight = 2;
+    this.volumeText = new TextRenderable(ctx, { id: "volume", content: "50%", fg: colour.muted, height: 1, flexShrink: 0, selectable: false });
+    for (const item of [this.lyricsButton, control("volume-down", icon.volumeDown, () => void model.volume(-0.05), colour.muted), this.volumeText, control("volume-up", icon.volumeUp, () => void model.volume(0.05), colour.muted)]) sound.add(item);
+    about.add(this.subtitle); about.add(sound);
+    deck.add(about);
+
+    // The two sides share what is left equally, so the buttons stay in the middle. Narrow windows
+    // move the volume to the right side here, since they have no artist row.
+    const middle = row();
+    const side = { flexDirection: "row" as const, height: 1, flexGrow: 1, flexBasis: 0, minWidth: 0 };
+    this.right = new BoxRenderable(ctx, { ...side, justifyContent: "flex-end" });
+    const controls = this.controls = new BoxRenderable(ctx, { id: "controls", height: 1, flexDirection: "row", gap: 4, flexShrink: 0 });
+    this.shuffleButton = control("shuffle", icon.shuffleOff, () => void model.act("/playback/shuffle/toggle"), colour.faint);
+    this.playButton = control("play-pause", icon.play, () => void model.act("/playback/toggle"));
+    this.repeatButton = control("repeat", icon.repeatOff, () => void model.act("/playback/repeat/toggle"), colour.faint);
+    for (const item of [this.shuffleButton, control("previous", icon.previous, () => void model.skip(-1)), this.playButton, control("next", icon.next, () => void model.skip(1)), this.repeatButton]) controls.add(item);
+    this.left = new BoxRenderable(ctx, side);
+    middle.add(this.left); middle.add(controls); middle.add(this.right);
+    deck.add(middle);
     this.progress = new TextRenderable(ctx, { id: "seek", content: "", fg: colour.accent, height: 1, width: "100%", selectable: false, onMouseDown: event => this.seekClick(event) });
     deck.add(this.progress);
-    this.controls = new BoxRenderable(ctx, { id: "controls", height: 1, flexDirection: "row", gap: 2 });
-    this.controls.add(button("previous", icon.previous, "p", () => void model.skip(-1)));
-    this.playButton = button("play-pause", icon.play, "space", () => void model.act("/playback/toggle"));
-    this.controls.add(this.playButton);
-    this.controls.add(button("next", icon.next, "n", () => void model.skip(1)));
-    this.controls.add(new TextRenderable(ctx, { content: " ", width: 1, height: 1 }));
-    this.shuffleButton = button("shuffle", icon.shuffleOff, "s", () => void model.act("/playback/shuffle/toggle"), colour.faint);
-    this.repeatButton = button("repeat", icon.repeatOff, "r", () => void model.act("/playback/repeat/toggle"), colour.faint);
-    this.controls.add(this.shuffleButton); this.controls.add(this.repeatButton);
-    this.controls.add(new TextRenderable(ctx, { content: " ", width: 1, height: 1 }));
-    this.controls.add(button("volume-down", icon.volumeDown, "-", () => void model.volume(-0.05)));
-    this.volumeText = new TextRenderable(ctx, { id: "volume", content: "50%", fg: colour.muted, height: 1, selectable: false });
-    this.controls.add(this.volumeText);
-    this.controls.add(button("volume-up", icon.volumeUp, "+", () => void model.volume(0.05)));
-    this.controls.add(new TextRenderable(ctx, { content: " ", width: 1, height: 1 }));
-    this.lyricsButton = button("lyrics-toggle", icon.lyrics, "y", () => ui.toggleLyrics(), colour.faint);
-    this.controls.add(this.lyricsButton);
-
-    deck.add(this.controls);
     this.panel.add(deck);
+  }
+
+  // Narrow windows drop the artist row: the artist joins the title, and the volume moves beside the
+  // buttons.
+  layout(width: number, height: number) {
+    const narrow = width < 76;
+    if (narrow !== this.narrow) {
+      (narrow ? this.about : this.right).remove(this.sound);
+      (narrow ? this.right : this.about).add(this.sound);
+    }
+    this.narrow = narrow;
+    this.about.visible = !narrow;
+    this.lyricsButton.visible = !narrow;
+    const gap = narrow ? 2 : 4;
+    this.controls.gap = gap;
+    const rows = narrow ? 3 : 4;
+    this.panel.height = rows + 1;
+    // A cell is about twice as tall as wide. The terminal's pixel size, when it reports one, says
+    // exactly how much, so the cover box is as close to square as whole cells allow.
+    const resolution = this.ctx.resolution;
+    const shape = resolution && width && height ? (resolution.height / height) / (resolution.width / width) : 2;
+    const cover = Math.max(2, Math.round(rows * shape));
+    this.cover.setSize(cover, rows);
+    this.cover.visible = width >= 44;
+    // The window's padding and the panel's, and the cover with the gap after it.
+    this.deckWidth = width - 4 - (this.cover.visible ? cover + 2 : 0);
+    // With the volume at the right, both sides take whole cells. With half a cell each, the volume
+    // could end one cell past the player. An odd cell goes to the left, so the volume ends where
+    // the quality tag above it does.
+    const buttons = this.controls.getChildren().filter(child => child.visible).length;
+    const free = Math.max(0, this.deckWidth - buttons - gap * (buttons - 1) - 2 * 2), right = Math.floor(free / 2);
+    this.left.flexGrow = this.right.flexGrow = narrow ? 0 : 1;
+    this.left.flexBasis = narrow ? free - right : 0;
+    this.right.flexBasis = narrow ? right : 0;
   }
 
   private progressCells(state = this.model.playback) {
@@ -83,13 +141,26 @@ export class PlayerPanel {
     return Math.max(1, width - duration(state.time.currentTime).length - duration(state.time.duration).length - 2);
   }
 
+  // What the player streams: Apple's lossless ALAC through the hi-res player, at the song's own
+  // rate, or AAC at the quality chosen in Settings. Apple calls rates above 48 kHz Hi-Res Lossless.
+  // The second label is the short one for narrow rows, without the rate.
+  private qualityLabels(): [string, string] {
+    const rate = this.model.playback.sampleRate;
+    if (this.model.player.lossless) {
+      const hires = !!rate && rate > 48000;
+      const name = hires ? "Hi-Res Lossless" : "Lossless";
+      return [rate ? `${name} · ${Number((rate / 1000).toFixed(1))} kHz` : name, hires ? "Hi-Res" : "Lossless"];
+    }
+    return [this.model.preferences.quality === "standard" ? "AAC · 64 kbps" : "AAC · 256 kbps", "AAC"];
+  }
+
   draw() {
     const state = this.model.playback;
     const connected = this.model.connected;
     const song = state.nowPlaying;
-    this.title.content = song ? song.name ?? "Untitled" : "Nothing playing";
+    const name = song ? song.name ?? "Untitled" : "Nothing playing";
+    const artist = this.narrow ? song?.artistName : undefined;
     const target = this.model.target ?? this.model.preferences.remote;
-    this.devicesButton.set(icon.devices, target ? `d  ${target}` : "d", target ? colour.accent : colour.faint);
     // The device that plays may be out of reach, for example asleep or on another network. Saying so
     // explains why this computer shows nothing.
     const away = !song && !target ? this.model.devices.find(device => device.output && !device.self && device.paired && !device.online) : undefined;
@@ -98,14 +169,31 @@ export class PlayerPanel {
     this.cover.setArt(song?.artwork?.url);
     const favourite = this.model.favourite;
     this.favouriteButton.visible = !!song;
-    this.favouriteButton.set(favourite ? icon.heart : icon.heartOutline, "f", favourite ? colour.heart : colour.faint);
+    this.favouriteButton.set(favourite ? icon.heart : icon.heartOutline, "", favourite ? colour.heart : colour.faint);
     const playing = connected && state.state === "playing";
-    const label = !connected ? (this.model.starting ? "Starting" : "Stopped") : playing ? "Playing" : state.state === "paused" ? "Paused" : "Stopped";
+    // The play button already says when it plays, so only the other states are written out.
+    const label = !connected ? (this.model.starting ? "Starting" : "Stopped") : playing ? "" : state.state === "paused" ? "Paused" : "Stopped";
     this.indicator.content = label;
+    this.indicator.visible = !!label;
     this.playButton.set(playing ? icon.pause : icon.play);
-    this.shuffleButton.set(state.shuffleMode ? icon.shuffle : icon.shuffleOff, "s", state.shuffleMode ? colour.accent : colour.faint);
-    this.repeatButton.set(state.repeatMode === "one" ? icon.repeatOne : state.repeatMode === "all" ? icon.repeat : icon.repeatOff, "r", state.repeatMode === "none" ? colour.faint : colour.accent);
+    this.shuffleButton.set(state.shuffleMode ? icon.shuffle : icon.shuffleOff, "", state.shuffleMode ? colour.accent : colour.faint);
+    this.repeatButton.set(state.repeatMode === "one" ? icon.repeatOne : state.repeatMode === "all" ? icon.repeat : icon.repeatOff, "", state.repeatMode === "none" ? colour.faint : colour.accent);
     this.volumeText.content = `${Math.round(state.volume * 100)}%`;
+    // The song's name keeps at least 12 cells, or all of it when shorter. A row too narrow for the
+    // quality with its rate shows the short label, or none. Each part after the name takes its own
+    // cells and a gap of two, and the tag's rounded ends take one cell each.
+    const fixed = (song ? 1 + 2 : 0) + (label ? Bun.stringWidth(label) + 2 : 0);
+    const shown = !!song && connected;
+    const tagWidth = (text: string) => shown ? Bun.stringWidth(text) + 2 + 2 : 0;
+    const wanted = Math.min(12, Bun.stringWidth(artist ? `${name}  ${artist}` : name));
+    const quality = this.qualityLabels().find(text => this.deckWidth - fixed - tagWidth(text) >= wanted);
+    this.quality.visible = shown && !!quality;
+    if (quality) this.quality.content = tag(quality, this.model.player.lossless ? colour.accent : colour.muted);
+    // A name too long for the room left ends in an ellipsis. The artist after it gets what remains.
+    const room = this.deckWidth - fixed - (quality ? tagWidth(quality) : 0);
+    const title = fit(name, Math.max(1, room));
+    const rest = artist && title === name ? room - Bun.stringWidth(name) - 2 : 0;
+    this.title.content = artist && rest >= 4 ? t`${bold(fg(colour.text)(title))}  ${fg(colour.muted)(fit(artist, rest))}` : t`${bold(fg(colour.text)(title))}`;
     const cells = this.progressCells(state);
     const ratio = state.time.duration > 0 ? Math.min(1, Math.max(0, state.time.currentTime / state.time.duration)) : 0;
     const filled = Math.floor(ratio * cells);

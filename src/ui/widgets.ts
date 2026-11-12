@@ -1,11 +1,11 @@
-import { BoxRenderable, TextRenderable, ImageRenderable, RGBA, t, fg, type OptimizedBuffer, type RenderContext } from "@opentui/core";
+import { BoxRenderable, TextRenderable, ImageRenderable, RGBA, StyledText, t, fg, bg, type OptimizedBuffer, type RenderContext } from "@opentui/core";
 import { cover } from "../artwork";
 import { colour, icon } from "../theme";
 import type { Media } from "../types";
 
 // Small parts the screens share: rows, covers, buttons, and text helpers.
-export interface Row { id: string; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; right?: string; active?: boolean; activate: () => void }
-export type Column = "artist" | "album";
+export interface Row { id: string; heading?: boolean; key?: string; lead?: string; leadColour?: string; name: string; loved?: boolean; faint?: boolean; description?: string; artist?: string; album?: string; year?: string; right?: string; active?: boolean; activate: () => void }
+export type Column = "artist" | "album" | "year";
 export interface Tile { media: Media; caption: string; detail: string; note?: string; noteColour?: string }
 export interface Shelf { id: string; title: string; tiles: Tile[]; empty: string }
 
@@ -18,10 +18,14 @@ export class Cover extends BoxRenderable {
   private image?: ImageRenderable;
   private glyph: TextRenderable;
 
-  constructor(ctx: RenderContext, options: { id?: string; width: number; height: number; art?: string; glyph?: string }) {
+  // fit "cover" fills the box and may crop the edges; "fit" shows the whole image.
+  private fit: "cover" | "fit";
+
+  constructor(ctx: RenderContext, options: { id?: string; width: number; height: number; art?: string; glyph?: string; fit?: "cover" | "fit" }) {
     super(ctx, { id: options.id, width: options.width, height: options.height, flexShrink: 0, backgroundColor: colour.surface, alignItems: "center", justifyContent: "center" });
     this.glyph = new TextRenderable(ctx, { content: options.glyph ?? icon.album, fg: colour.faint, height: 1, width: 2, selectable: false });
     this.add(this.glyph);
+    this.fit = options.fit ?? "cover";
     this.setArt(options.art);
   }
 
@@ -32,7 +36,7 @@ export class Cover extends BoxRenderable {
     this.glyph.visible = true;
     void cover(art)?.then(image => {
       if (!image || this.art !== art || this.isDestroyed) return;
-      this.image = new ImageRenderable(this.ctx, { position: "absolute", left: 0, top: 0, width: this.width, height: this.height, source: image, fit: "cover" });
+      this.image = new ImageRenderable(this.ctx, { position: "absolute", left: 0, top: 0, width: this.width, height: this.height, source: image, fit: this.fit });
       this.add(this.image); this.glyph.visible = false;
     });
   }
@@ -89,9 +93,9 @@ export class Button extends TextRenderable {
   }
 }
 
-// A song title, after a heart when the song is a favourite.
+// A song title, with a heart after it when the song is a favourite.
 export function titled(name: string, loved: boolean | undefined, tint: string) {
-  return loved ? t`${fg(colour.heart)(icon.heart)} ${fg(tint)(name)}` : t`${fg(tint)(name)}`;
+  return loved ? t`${fg(tint)(name)} ${fg(colour.heart)(icon.heart)}` : t`${fg(tint)(name)}`;
 }
 
 // Shortened names end in an ellipsis, so a cut-off name does not read as a complete one.
@@ -104,3 +108,26 @@ export function fit(text: string, width: number) {
   }
   return result.trimEnd() + "…";
 }
+
+// A short label on a filled field with rounded ends, such as the stream's quality.
+export function tag(text: string, tint: string, fill = colour.field) {
+  return new StyledText([fg(fill)(icon.capLeft), bg(fill)(fg(tint)(text)), fg(fill)(icon.capRight)]);
+}
+
+// A bordered panel that can also show a note at the right of its top border, such as how many
+// songs a list has, opposite its title.
+export class Panel extends BoxRenderable {
+  note = "";
+  noteColour = colour.muted;
+  protected renderSelf(buffer: OptimizedBuffer) {
+    super.renderSelf(buffer);
+    const note = this.note ? ` ${this.note} ` : "";
+    const width = Bun.stringWidth(note), title = Bun.stringWidth(this.title ?? "") + 4;
+    if (!note || width + title > this.width - 2) return;
+    // Each cell is set, spaces too, so the border line does not show between the words.
+    const ink = RGBA.fromHex(this.noteColour);
+    let x = this.x + this.width - 2 - width;
+    for (const char of note) { buffer.setCell(x, this.y, char, ink, unpainted); x += Bun.stringWidth(char); }
+  }
+}
+

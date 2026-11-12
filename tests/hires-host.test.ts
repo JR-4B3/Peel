@@ -144,9 +144,13 @@ beforeAll(async () => {
     "exit 0", "",
   ].join("\n"), { mode: 0o700 });
   // PulseAudio's tools, simulated: one playing Waydroid stream, recorded as zeros while Android is
-  // silent and as music otherwise.
+  // silent and as music otherwise. pactl notes each run, and lists no stream while a file says so.
   await mkdir(join(temporary, "bin"));
-  await writeFile(join(temporary, "bin", "pactl"), `#!/bin/sh\necho '[{"index":7,"corked":false,"sample_specification":"float32le 2ch 96000Hz","properties":{"application.name":"Waydroid"}}]'\n`, { mode: 0o700 });
+  await writeFile(join(temporary, "bin", "pactl"), [
+    "#!/bin/sh", `echo pactl >> '${join(temporary, "pactl-runs")}'`,
+    `if [ -e '${join(temporary, "no-stream")}' ]; then echo '[]'; exit 0; fi`,
+    `echo '[{"index":7,"corked":false,"sample_specification":"float32le 2ch 96000Hz","properties":{"application.name":"Waydroid"}}]'`, "",
+  ].join("\n"), { mode: 0o700 });
   await writeFile(join(temporary, "bin", "pacat"), `#!/bin/sh\nif [ -e '${join(temporary, "silent")}' ]; then /usr/bin/head -c 96000 /dev/zero; else /usr/bin/head -c 96000 /dev/urandom; fi\nexec /bin/sleep 5\n`, { mode: 0o700 });
   const reservation = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() });
   port = reservation.port!; reservation.stop(true);
@@ -554,6 +558,44 @@ test.skipIf(!supported)("a Peel that attaches while Android stops plays after An
   expect(after.indexOf("controller")).toBeGreaterThan(after.indexOf("stopped"));
   expect(android.queue.map(item => item.id)).toEqual(["201"]);
   expect(await Promise.race([host.exited, Bun.sleep(1500).then(() => "running")])).toBe("running");
+}, 20000);
+
+test.skipIf(!supported)("the state reports the rate of Android's stream in PipeWire", async () => {
+  expect((await call("play", ["501", "502"].map(id => song(id)), 0)).status).toBe(200);
+  // The controller switches the rate about a second after a song starts, so the host reads it later.
+  // The simulated pactl reports Android's stream at 96 kHz.
+  let state: any;
+  for (const end = Date.now() + 8000; Date.now() < end; await Bun.sleep(250)) {
+    state = (await send("/state")).body;
+    if (state.playback?.sampleRate) break;
+  }
+  expect(state.playback.sampleRate).toBe(96000);
+}, 20000);
+
+test.skipIf(!supported)("a rate read that finds no stream waits five seconds, and the next song still gets its rate", async () => {
+  const runs = async () => (await readFile(join(temporary, "pactl-runs"), "utf8").catch(() => "")).split("\n").filter(Boolean).length;
+  // At volume 0 the silence check stays off, so only the rate reads run pactl.
+  expect((await call("volume", 0)).status).toBe(200);
+  writeFileSync(join(temporary, "no-stream"), "");
+  try {
+    await play("511", "512");
+    const before = await runs();
+    // Peel polls often, and the host reads the state for each poll.
+    for (const end = Date.now() + 4000; Date.now() < end; await Bun.sleep(40)) await send("/state");
+    expect(await runs() - before).toBeLessThanOrEqual(1);
+    rmSync(join(temporary, "no-stream"));
+    // A new song asks again 1.5 seconds after it starts, without waiting for the five seconds.
+    expect((await call("next")).status).toBe(200);
+    let state: any;
+    for (const end = Date.now() + 4000; Date.now() < end; await Bun.sleep(100)) {
+      state = (await send("/state")).body;
+      if (state.playback?.sampleRate) break;
+    }
+    expect(state.playback.sampleRate).toBe(96000);
+  } finally {
+    rmSync(join(temporary, "no-stream"), { force: true });
+    await call("volume", 1);
+  }
 }, 20000);
 
 // Last: the host exits at the end.

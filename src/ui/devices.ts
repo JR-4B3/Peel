@@ -6,7 +6,7 @@ import { ClearBox, type Row } from "./widgets";
 
 type Focusable = { focus(): void; isDestroyed?: boolean } | null;
 
-// The devices popup opens above the player's devices button, like a menu. It lists this
+// The devices popup opens below the devices button at the top right, like a menu. It lists this
 // computer, paired devices, and nearby ones to pair, and moves the music to the one chosen.
 export class DevicesPopup {
   view?: BoxRenderable;
@@ -32,7 +32,7 @@ export class DevicesPopup {
     this.focusBefore = ctx.currentFocusedRenderable;
     this.backdrop = new BoxRenderable(ctx, { id: "devices-backdrop", position: "absolute", left: 0, top: 0, width: "100%", height: "100%", zIndex: 90,
       onMouseDown: event => { event.stopPropagation(); this.close(); } });
-    this.view = new ClearBox(ctx, { id: "devices-view", position: "absolute", right: 2, bottom: 7, zIndex: 95, border: true, borderStyle: "rounded", borderColor: colour.accent, title: ` ${icon.devices} Play on `, titleColor: colour.text, bottomTitle: " ↑↓ choose  ⏎ play here  Esc close ", flexDirection: "column",
+    this.view = new ClearBox(ctx, { id: "devices-view", position: "absolute", right: 1, top: 1, zIndex: 95, border: true, borderStyle: "rounded", borderColor: colour.accent, title: ` ${icon.devices} Play on `, titleColor: colour.text, bottomTitle: " ↑↓ choose  ⏎ play here  Esc close ", flexDirection: "column",
       onMouseDown: (event: MouseEvent) => event.stopPropagation() } as any);
     this.list = new ClickList(ctx, "devices-list", 2);
     this.list.onSelection = () => this.changed();

@@ -35,6 +35,9 @@ export interface Playback {
   repeatMode: "none" | "one" | "all";
   shuffleMode: boolean;
   queueRevision?: string;
+  // The rate in Hz the hi-res player plays the song at. Its controller sets Android's mixer to each
+  // song's own rate, so this is the song's rate. The web engine leaves it out.
+  sampleRate?: number;
   // Why playback stopped by itself, when the engine could not continue.
   error?: string;
 }
