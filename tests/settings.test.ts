@@ -121,7 +121,7 @@ test("a started engine gets the saved quality", async () => {
 async function releases() {
   const dir = await mkdtemp(join(tmpdir(), "peel-releases-")); cleanup.push(() => rm(dir, { recursive: true, force: true }));
   const builds: Record<string, { archive: Uint8Array<ArrayBuffer>; version: string; sum?: string }> = {};
-  async function build(channel: string, version: string, engine = "engine") {
+  async function build(channel: string, version: string, engine = "engine", host = "host") {
     const source = join(dir, `src-${version}`);
     await mkdir(join(source, "src"), { recursive: true });
     await mkdir(join(source, "engine"), { recursive: true });
@@ -129,6 +129,9 @@ async function releases() {
     await writeFile(join(source, "package.json"), JSON.stringify({ name: "peel-fixture", version: "0.0.0", private: true }));
     await writeFile(join(source, "version.json"), JSON.stringify({ version, channel, commit: "abcdef1234", date: "2026-11-06" }));
     await writeFile(join(source, "src", "index.ts"), "console.log('peel')\n");
+    // The hi-res host's code, which src/build.ts hashes from src/hires.ts and its imports.
+    await writeFile(join(source, "src", "hires.ts"), 'import { part } from "./host-part";\n');
+    await writeFile(join(source, "src", "host-part.ts"), `export const part = ${JSON.stringify(host)};\n`);
     if (Bun.spawnSync([process.execPath, "install"], { cwd: source }).exitCode) throw new Error("bun install failed");
     const archive = join(dir, `${version}.tar.gz`);
     if (Bun.spawnSync(["tar", "-czf", archive, "-C", source, "."]).exitCode) throw new Error("tar failed");
@@ -255,7 +258,7 @@ test("an installed update is ready for a restart, which says whether the engine 
   await update.installRelease(await update.latestRelease("stable"), root);
   expect(await update.readyVersion(running)).toEqual({});
   const result = await update.checkForUpdate("nightly", true, Date.now(), running);
-  expect({ ready: result.ready, older: result.older, newEngine: result.newEngine }).toEqual({ ready: "0.3.0-nightly.test", older: false, newEngine: false });
+  expect({ ready: result.ready, older: result.older, newEngine: result.newEngine, newHires: result.newHires }).toEqual({ ready: "0.3.0-nightly.test", older: false, newEngine: false, newHires: false });
   expect(update.restartCommand("0.3.0-nightly.test", running).cwd).toBe(join(root, "versions", "0.3.0-nightly.test"));
   // A cached check still reports it.
   expect((await update.checkForUpdate("nightly", false, Date.now(), running)).ready).toBe("0.3.0-nightly.test");
@@ -264,6 +267,29 @@ test("an installed update is ready for a restart, which says whether the engine 
   expect(await update.checkForUpdate("nightly", true, Date.now(), running)).toMatchObject({ ready: "0.4.0-nightly.test", newEngine: true });
   // Switching back to the running release leaves nothing to restart into.
   expect((await update.checkForUpdate("stable", true, Date.now(), running)).ready).toBeUndefined();
+});
+
+test("an update whose hi-res host changed says that the restart interrupts hi-res", async () => {
+  const { dir, build, update } = await releases();
+  await build("stable", "0.2.0"); await build("nightly", "0.3.0-nightly.test", "engine", "changed host");
+  const root = join(dir, "install"), running = join(root, "versions", "0.2.0");
+  await update.installRelease(await update.latestRelease("stable"), root);
+  const result = await update.checkForUpdate("nightly", true, Date.now(), running);
+  expect({ ready: result.ready, newEngine: result.newEngine, newHires: result.newHires }).toEqual({ ready: "0.3.0-nightly.test", newEngine: false, newHires: true });
+  // An older version leaves a newer host running, so switching back does not interrupt it.
+  const newest = join(root, "versions", "0.3.0-nightly.test");
+  expect(await update.checkForUpdate("stable", true, Date.now(), newest)).toMatchObject({ ready: "0.2.0", older: true, newHires: false });
+});
+
+test("the restart row says when hi-res playback restarts", async () => {
+  const app = await settings(true);
+  app.model.update = { installed: true, version: "0.2.0", message: "", ready: "0.3.0", newEngine: false, newHires: true };
+  app.model.playsLocally = () => true;
+  app.model.changed(); await app.flush();
+  expect(app.captureCharFrame()).toContain("because hi-res playback restarts too");
+  app.model.update = { ...app.model.update, newHires: false };
+  app.model.changed(); await app.flush();
+  expect(app.captureCharFrame()).toContain("The music keeps playing");
 });
 
 test("switching to an older release offers a switch, not an update", async () => {

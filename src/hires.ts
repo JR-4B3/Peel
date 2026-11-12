@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { AppleMusic } from "./apple";
+import { compareBuilds, hiresBuild, type HostBuild } from "./build";
 import { cacheDir, configDir, readAppleSignIn, systemDir } from "./config";
 import { Engine, ownerRole, systemdSession } from "./engine";
 import { media, type Media, type Playback } from "./types";
@@ -55,24 +56,123 @@ export class Hires extends Engine {
   async appleTokens(): Promise<{ userToken: string; storefront?: string }> { throw new Error("The hi-res player has no Apple sign-in."); }
 }
 
+// How ensureHires treats a host of another build. The SSH helper passes remote. Tests also pass
+// the caller's build, a stand-in for starting a host, and one for telling whether a host runs.
+export interface HiresStart {
+  remote?: boolean;
+  build?: HostBuild;
+  launch?: () => Promise<void>;
+  watch?: () => Promise<() => Promise<boolean>>;
+}
+
+// How many times one call restarts an older host. A host that another Peel starts meanwhile
+// can run older code again, which is restarted too, up to this many times.
+const maxRestarts = 3;
+
 // Starts the host when it is not running and waits until Android and Apple Music answer. Android
 // runs only while a Peel uses it, so this usually boots it, which takes about 7 seconds.
-export async function ensureHires(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal) {
+export async function ensureHires(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal, start: HiresStart = {}) {
+  const mine = start.build ?? hostBuild(), remote = !!start.remote;
   const state = () => engine.state().catch(() => undefined);
+  // The hosts this call asked to quit. One may still answer once while it exits, and only a host
+  // that runs now counts.
+  const replaced = new Set<string>();
+  const live = (value: Awaited<ReturnType<typeof state>>) => value && !(value.instance && replaced.has(value.instance)) ? value : undefined;
   let current = await state();
-  if (!current) {
-    signal?.throwIfAborted();
-    status("Starting hi-res playback...");
-    await launchHost();
+  for (let restarts = 0; ; restarts++) {
+    // A host started before Peel updated itself keeps running the old code, while the interface
+    // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
+    if (current && outdated(current, mine, remote)) {
+      if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} tries. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
+      signal?.throwIfAborted();
+      status("Restarting hi-res playback to load an update...");
+      const running = await (start.watch ?? watchHost)();
+      if (current.instance) replaced.add(current.instance);
+      await engine.quit().catch(() => {});
+      // The old host pauses and stops Android before it exits, which can take a while. Its /state
+      // waits for Android meanwhile, so its port and key tell whether it still runs.
+      for (const until = Date.now() + 3 * 60 * 1000; await running();) {
+        if (Date.now() >= until) throw new Error("The hi-res player from before the update did not stop. Run peel-hires status to see why.");
+        await sleep(250, undefined, { signal });
+      }
+      // Another Peel may have started a host meanwhile.
+      current = await state();
+    }
+    current = live(current);
+    if (!current) {
+      signal?.throwIfAborted();
+      status("Starting hi-res playback...");
+      // When another Peel started a host meanwhile, this returns once that host answers.
+      await (start.launch ?? launchHost)();
+    }
+    const until = Date.now() + 3 * 60 * 1000;
+    // The host that answers may be one that another Peel started from older code, while this
+    // Peel restarted or started the host. It is restarted as well.
+    const older = () => !!current && outdated(current, mine, remote);
+    while (!current?.ready && !older() && Date.now() < until) {
+      if (current?.playback?.error) status(current.playback.error);
+      await sleep(250, undefined, { signal });
+      current = live(await state());
+    }
+    if (older()) continue;
+    if (!current?.ready) throw new Error(current?.playback?.error ?? "Hi-res playback did not start. Run peel-hires status to see why.");
+    return;
   }
-  const until = Date.now() + 3 * 60 * 1000;
-  while (!current?.ready && Date.now() < until) {
-    if (current?.playback?.error) status(current.playback.error);
-    await sleep(250, undefined, { signal });
-    current = await state();
-  }
-  if (!current?.ready) throw new Error(current?.playback?.error ?? "Hi-res playback did not start. Run peel-hires status to see why.");
 }
+
+// Whether a Peel of build mine restarts the host it found. A host is restarted only when it is
+// older than the Peel, so a window that still runs an older version after an update leaves the
+// newer host alone, and two windows of different versions restart it at most once between them.
+// A host from before hosts reported their build is older than any build that compares.
+// The SSH helper runs the newest installed version, which a window on this computer may not have
+// restarted into yet, so it never restarts a host that another Peel uses or that is playing.
+// A host that does not say how many Peels use it counts as used.
+export function outdated(host: { build?: HostBuild; others?: number; playback?: { state?: string } }, mine: HostBuild, remote = false) {
+  if (host.build?.hash === mine.hash) return false;
+  if (host.build && compareBuilds(host.build, mine) >= 0) return false;
+  if (remote && (host.others !== 0 || host.playback?.state === "playing")) return false;
+  return true;
+}
+
+// The build of the code this Peel would start a host from, read once.
+let ownBuild: HostBuild | undefined;
+export function hostBuild(): HostBuild {
+  if (!ownBuild) {
+    const { hash, version, time } = hiresBuild(fileURLToPath(new URL("..", import.meta.url)));
+    ownBuild = { hash, version, time };
+  }
+  return ownBuild;
+}
+
+// A TCP connection reaches a running host even while its requests wait for Android.
+async function listening(port: number) {
+  try {
+    const socket = await Promise.race([
+      Bun.connect({ hostname: "127.0.0.1", port, socket: { data() {} } }),
+      sleep(2000).then(() => { throw new Error("timeout"); }),
+    ]);
+    socket.end();
+    return true;
+  } catch { return false; }
+}
+
+// Returns a test for whether the host that runs now still runs: its port answers and key.json
+// still holds its key. A host that another Peel starts afterwards writes a new key. The port is
+// the one in key.json, where the host wrote the port it listens on. Without a key file it is the
+// port this Peel uses. Tests pass another folder and port.
+export async function watchHost(home = hiresHome, port = hiresPort) {
+  const hostKey = async () => { try { return JSON.parse(await Bun.file(join(home, "key.json")).text()) as { port?: number; key?: string }; } catch { return undefined; } };
+  const before = await hostKey(), at = Number(before?.port) || port;
+  return async () => (!before || (await hostKey())?.key === before.key) && await listening(at);
+}
+
+// How long Peel waits for systemd to remove the unit of a host that exited.
+const unitWait = Number(process.env.PEEL_HIRES_UNIT_WAIT) || 15000;
+const unitLoaded = async () => {
+  const show = Bun.spawn(["systemctl", "--user", "show", "--property=LoadState", "--value", "peel-hires-host.service"], { stdout: "pipe", stderr: "ignore" });
+  const [output] = await Promise.all([new Response(show.stdout).text(), show.exited]);
+  return output.trim() === "loaded";
+};
 
 async function launchHost() {
   // The host runs this file alone, without the interface's modules, in Bun's low-memory mode.
@@ -84,12 +184,24 @@ async function launchHost() {
     const settings = Object.entries(environment).map(([name, value]) => `--setenv=${name}=${value}`);
     // peel-hires reads the XDG folders for its own cache, state and settings.
     for (const name of ["PATH", "XDG_RUNTIME_DIR", "DBUS_SESSION_BUS_ADDRESS", "XDG_CONFIG_HOME", "XDG_CACHE_HOME", "XDG_STATE_HOME", "PEEL_HIRES_PORT", "PEEL_HIRES_COMMAND", "APPLE_MUSIC_API_BASE"]) if (process.env[name]) settings.push(`--setenv=${name}=${process.env[name]}`);
-    const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-hires-host", "--slice=app-peel.slice", ...settings, "--", ...args], { stdout: "ignore", stderr: "pipe" });
-    if (await child.exited !== 0) {
-      const active = Bun.spawn(["systemctl", "--user", "is-active", "--quiet", "peel-hires-host.service"]);
-      if (await active.exited !== 0) throw new Error(`Could not start hi-res playback: ${(await new Response(child.stderr).text()).trim()}`);
+    // systemd-run fails while a unit of the same name exists. That is a host another Peel just
+    // started, which answers on the port soon, or one that exited and that systemd has not
+    // removed yet, which goes away within moments. A unit that stays without a host answering
+    // is an error, so Peel does not wait minutes for a host that never starts.
+    for (let until = Date.now() + unitWait, retried = false; ;) {
+      const child = Bun.spawn(["systemd-run", "--user", "--collect", "--unit=peel-hires-host", "--slice=app-peel.slice", ...settings, "--", ...args], { stdout: "ignore", stderr: "pipe" });
+      if (await child.exited === 0) return;
+      const failure = (await new Response(child.stderr).text()).trim();
+      if (!await unitLoaded()) {
+        // The unit may have gone between the attempt and the check. Another failure has another cause.
+        if (retried) throw new Error(`Could not start hi-res playback: ${failure}`);
+        retried = true;
+        continue;
+      }
+      if (await listening(hiresPort)) return;
+      if (Date.now() >= until) throw new Error(`Could not start hi-res playback: the service peel-hires-host from an earlier hi-res player is still there and no player answers. Run systemctl --user status peel-hires-host to see why. ${failure}`);
+      await sleep(500);
     }
-    return;
   }
   await mkdir(hiresHome, { recursive: true, mode: 0o700 });
   const child = spawn(args[0]!, args.slice(1), { detached: true, stdio: "ignore", env: { ...process.env, ...environment } });
@@ -224,7 +336,8 @@ export async function runHiresHost() {
   // A rejected sign-in is read again from Peel's settings, which the interface renews.
   const apple = new AppleMusic(signIn.userToken, { storefront: signIn.storefront, renewUser: async () => (await readAppleSignIn()).userToken || undefined });
   const instance = crypto.randomUUID();
-  const version = "hires";
+  // version says this is the hi-res host. build says which code it runs (src/build.ts).
+  const version = "hires", build = hostBuild();
   let volume = (() => { try { return JSON.parse(readFileSync(join(hiresHome, "volume.json"), "utf8")).volume ?? 1; } catch { return 1; } })();
   let repeat = 0, shuffle = false;
   // The whole queue in Apple Music's order, history included, and Peel's song for each entry.
@@ -1041,9 +1154,12 @@ export async function runHiresHost() {
       try {
         if (path === "/retain") return reply(200, null);
         if (path === "/state") {
-          if (!ready) return reply(200, { ready: false, signIn: false, playback: control.error ? { error: control.error } : undefined, version, instance });
+          // others counts the Peels besides the one asking, so the SSH helper can tell whether
+          // restarting this host for an update would interrupt someone.
+          const others = [...owners.keys()].filter(pid => pid !== owner).length;
+          if (!ready) return reply(200, { ready: false, signIn: false, playback: control.error ? { error: control.error } : undefined, version, build, instance, others });
           await read(!busy).catch(error => { notice = error.message; });
-          return reply(200, { ready: true, signIn: false, playback: playback(), version, instance });
+          return reply(200, { ready: true, signIn: false, playback: playback(), version, build, instance, others });
         }
         if (path === "/quit" && request.method === "POST") { setTimeout(() => void quit(), 10); return reply(200, null); }
         if (path === "/call" && request.method === "POST") {
