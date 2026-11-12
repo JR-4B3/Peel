@@ -36,6 +36,10 @@ cp $R/vendor/lib64/libasound.so $R/system/lib64/liblog.so $R/system/lib64/libcut
 
 CC=android-ndk-r27c/toolchains/llvm/prebuilt/linux-x86_64/bin/clang
 INC="-I gen -I alsa-lib/android -I aosp/libhardware -I aosp/audio -I aosp/audio_utils -I aosp/audio_effects -I aosp/cutils -I aosp/libsystem -I aosp/liblog -I aosp/libutils"
-FLAGS="-shared -fPIC -O2 -Wno-unused-parameter -Wl,-soname,audio.primary.waydroid.so"
+# NDEBUG turns liblog's ALOGV into dead code. Left in, the driver writes about 86 verbose lines a
+# second while music plays and fills Android's 256 KiB main log in about 4 minutes, so the log
+# no longer holds what happened before a fault. The driver has no assert, and LOG_ALWAYS_FATAL
+# stays in with NDEBUG.
+FLAGS="-shared -fPIC -O2 -DNDEBUG -Wno-unused-parameter -Wl,-soname,audio.primary.waydroid.so"
 $CC --target=i686-linux-android33 $FLAGS $INC "$SRC/audio_hw.c" -L libs32 -llog -lcutils -lasound -o "$OUT/audio.primary.waydroid.32.so"
 $CC --target=x86_64-linux-android33 $FLAGS $INC "$SRC/audio_hw.c" -L libs64 -llog -lcutils -lasound -o "$OUT/audio.primary.waydroid.64.so"
