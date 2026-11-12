@@ -6,7 +6,7 @@
 // restarting the host back and forth.
 //
 // This file must not import Peel's other modules, since the host runs without them.
-import { existsSync, readdirSync, readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 
 // hash covers the code. version and time order builds. A release's version.json gives its
@@ -63,8 +63,9 @@ function sourceTime(dir: string, files: string[]) {
     } catch { return undefined; }
   };
   let newest = 0;
-  const top = git("rev-parse", "--show-toplevel")?.trim();
-  const committed = top && realpathSync(top) === realpathSync(dir) ? Date.parse(git("log", "-1", "--format=%cI", "HEAD")?.trim() ?? "") : NaN;
+  // The prefix is empty at the top of a checkout.
+  const top = git("rev-parse", "--show-prefix")?.trim() === "";
+  const committed = top ? Date.parse(git("log", "-1", "--format=%cI", "HEAD")?.trim() ?? "") : NaN;
   const status = Number.isNaN(committed) ? undefined : git("status", "--porcelain", "-z", "--untracked-files=all", "--", ...files.map(file => relative(dir, file)));
   if (status !== undefined) {
     // Each entry is two status letters, a space and the path. A renamed file's old path follows

@@ -246,7 +246,7 @@ test.skipIf(process.platform !== "linux" || !existsSync("/run/systemd/system"))(
 // git, kept away from the user's settings, with a fixed committer.
 function git(dir: string, ...args: string[]) {
   const run = Bun.spawnSync(["git", "-C", dir, "-c", "user.name=Peel", "-c", "user.email=peel@example.invalid", "-c", "commit.gpgsign=false", ...args], {
-    env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_COMMITTER_DATE: "2026-11-01T10:00:00+01:00", GIT_AUTHOR_DATE: "2026-11-01T10:00:00+01:00" },
+    env: { ...process.env, GIT_CONFIG_GLOBAL: join(dir, "..", "no-git-config"), GIT_CONFIG_NOSYSTEM: "1", GIT_COMMITTER_DATE: "2026-11-01T10:00:00+01:00", GIT_AUTHOR_DATE: "2026-11-01T10:00:00+01:00" },
     stdout: "pipe", stderr: "pipe",
   });
   if (run.exitCode !== 0) throw new Error(run.stderr.toString());
