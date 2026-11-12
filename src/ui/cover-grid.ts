@@ -18,6 +18,10 @@ export class CoverGrid extends BoxRenderable {
     super(renderer, { id, flexGrow: 1, minHeight: 0, width: "100%", overflow: "hidden", focusable: true,
       onMouseScroll: event => { event.stopPropagation(); this.move(0, event.scroll?.direction === "up" ? -1 : 1); },
     });
+    // The chosen cover's frame takes the accent colour only while the grid has focus.
+    // OpenTUI reports focus changes as events, not through methods on the renderable.
+    this.on("focused", () => this.draw());
+    this.on("blurred", () => this.draw());
   }
 
   private get headings() { return this.shelves.some(shelf => shelf.title) && this.height >= 9; }
@@ -184,21 +188,25 @@ export class CoverGrid extends BoxRenderable {
     const box = new BoxRenderable(this.ctx, {
       id: `${this.id}:tile:${shelf.id}:${index}`, position: "absolute", left, top, width: this.tileWidth, height: this.tileHeight,
       flexDirection: "column",
-      // OpenTUI enables a border whenever a border style is set.
-      // The chosen cover has a heavy frame, so it stands out among the others at the same size.
-      ...(selected ? { border: true, borderStyle: "heavy" as const, borderColor: this.focused ? colour.accent : colour.faint } : { padding: 1 }),
       onMouseDown: event => {
         if (event.button !== 0) return;
         event.stopPropagation(); this.focus(); this.shelf = shelfIndex; this.tile = index; this.draw(); this.onActivate?.(tile.media);
       },
     });
-    box.add(new Cover(this.ctx, { width: this.coverWidth, height: this.coverWidth / 2, art: tile.media.artwork, glyph: glyph(tile.media) }));
-    box.add(new TextRenderable(this.ctx, { content: fit(tile.caption, this.coverWidth), fg: colour.text, attributes: selected ? 1 : 0, height: 1, width: this.coverWidth, truncate: true, selectable: false }));
-    box.add(new TextRenderable(this.ctx, { content: fit(tile.detail, this.coverWidth), fg: colour.muted, height: 1, width: this.coverWidth, truncate: true, selectable: false }));
-    if (tile.note) box.add(new TextRenderable(this.ctx, { content: tile.note, fg: tile.noteColour ?? colour.faint, height: 1, width: this.coverWidth, truncate: true, selectable: false }));
+    // The chosen cover has a rounded frame around the cover alone, and its captions stay below it.
+    // Other covers keep a blank cell on each side in place of the frame, so nothing moves when the
+    // choice changes. OpenTUI enables a border whenever a border style is set.
+    const frame = new BoxRenderable(this.ctx, {
+      id: `${this.id}:frame:${shelf.id}:${index}`, width: this.tileWidth, height: this.coverWidth / 2 + 2, flexShrink: 0,
+      ...(selected ? { border: true, borderStyle: "rounded" as const, borderColor: this.focused ? colour.accent : colour.faint } : { padding: 1 }),
+    });
+    frame.add(new Cover(this.ctx, { width: this.coverWidth, height: this.coverWidth / 2, art: tile.media.artwork, glyph: glyph(tile.media) }));
+    box.add(frame);
+    const line = { height: 1, width: this.coverWidth, marginLeft: 1, truncate: true, selectable: false };
+    box.add(new TextRenderable(this.ctx, { ...line, content: fit(tile.caption, this.coverWidth), fg: selected ? colour.accent : colour.text, attributes: selected ? 1 : 0 }));
+    box.add(new TextRenderable(this.ctx, { ...line, content: fit(tile.detail, this.coverWidth), fg: colour.muted }));
+    if (tile.note) box.add(new TextRenderable(this.ctx, { ...line, content: tile.note, fg: tile.noteColour ?? colour.faint }));
     this.add(box);
   }
 
-  protected onFocus() { this.draw(); }
-  protected onBlur() { this.draw(); }
 }

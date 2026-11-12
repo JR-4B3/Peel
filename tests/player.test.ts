@@ -1,12 +1,12 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ImageRenderable } from "@opentui/core";
+import { ImageRenderable, RGBA } from "@opentui/core";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { AppleMusic } from "../src/apple";
 import { Engine } from "../src/engine";
 import { Model, parseFilter } from "../src/model";
 import { PeelUI } from "../src/ui";
 import { type Home, type Media } from "../src/types";
-import { icon } from "../src/theme";
+import { colour, icon } from "../src/theme";
 import { artworkUrl } from "../src/artwork";
 import { defaults, readPreferences, saveJson } from "../src/config";
 import { mkdtemp, rm, stat } from "node:fs/promises";
@@ -940,4 +940,64 @@ describe("the compact player", () => {
     await app.model.setFilter({ text: "selected" }); await app.flush();
     expect(cells(app)[panel.y]!.join("")).toContain(" 1 of 3 ");
   });
+});
+
+describe("the chosen cover", () => {
+  // A valid 2 by 2 PNG, so every cover in the grid is drawn as an image.
+  const png = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAIAAAACCAIAAAD91JpzAAAAFklEQVR4nGOUi1rAwMDAxMDAwMDAAAAMyAEcmM2rsQAAAABJRU5ErkJggg==", "base64");
+
+  // Albums wraps its covers in rows and Home shows them on shelves. The window sizes give
+  // different cover sizes, from the narrowest the grid picks to the widest.
+  test.each([[60, 36, "albums"], [120, 36, "albums"], [160, 50, "albums"], [120, 36, "home"], [200, 60, "home"]] as const)(
+    "at %ix%i in %s has a rounded frame around the cover alone, and choosing another moves nothing", async (width, height, view) => {
+      const art = Bun.serve({ port: 0, fetch: () => new Response(png) });
+      cleanup.push(() => art.stop(true));
+      const app = await setup(width, height, view === "home" ? undefined : view);
+      const where = `${view} at ${width}x${height}`;
+      const grid = app.ui.grid;
+      grid.shelves.forEach((shelf, index) => shelf.tiles.forEach((tile, column) => { tile.media.artwork = `http://127.0.0.1:${art.port}/${index}-${column}/{w}x{h}bb.{f}`; }));
+      grid.focus(); grid.draw(); await app.flush();
+      const shelf = grid.shelves[grid.shelf]!;
+      expect(shelf.tiles.length, where).toBeGreaterThanOrEqual(2);
+      // Each tile's cover and caption lines, as cells on the screen.
+      const layout = () => shelf.tiles.slice(0, grid.columns).map((_, index) => {
+        const tile = app.renderer.root.findDescendantById(`grid:tile:${shelf.id}:${index}`)!;
+        const frame = app.renderer.root.findDescendantById(`grid:frame:${shelf.id}:${index}`)!;
+        const [cover] = frame.getChildren();
+        const captions = tile.getChildren().slice(1);
+        return { tile, frame, cover: cover!, captions };
+      });
+      const cells = () => layout().map(({ tile, cover, captions }) => [tile, cover, ...captions].map(node => [node.x, node.y, node.width, node.height]));
+      const waitForImages = () => waitFor(() => layout().every(({ cover }) => cover.getChildren().some(child => child instanceof ImageRenderable && !child.loading)));
+
+      const check = async (chosen: number) => {
+        await waitForImages(); await app.flush();
+        const lines = app.captureCharFrame().split("\n");
+        const { frame, cover, captions } = layout()[chosen]!;
+        const right = frame.x + frame.width - 1, bottom = frame.y + frame.height - 1;
+        expect([lines[frame.y]![frame.x], lines[frame.y]![right], lines[bottom]![frame.x], lines[bottom]![right]], where).toEqual(["╭", "╮", "╰", "╯"]);
+        // The frame encloses the cover's cells and nothing else.
+        expect([cover.x, cover.y, cover.width, cover.height], where).toEqual([frame.x + 1, frame.y + 1, frame.width - 2, frame.height - 2]);
+        // The image fills the inside of the frame exactly.
+        const image = cover.getChildren().find(child => child instanceof ImageRenderable)!;
+        expect([image.x, image.y, image.width, image.height], where).toEqual([cover.x, cover.y, cover.width, cover.height]);
+        for (const caption of captions) expect(caption.y, where).toBeGreaterThan(bottom);
+        // The chosen album's name is bold in the accent colour.
+        const name = captions[0] as any;
+        expect(name.fg.equals(RGBA.fromHex(colour.accent)), where).toBe(true);
+        expect(name.attributes & 1, where).toBe(1);
+        // Other tiles have no frame.
+        for (const [index, other] of layout().entries()) if (index !== chosen) expect(lines[other.frame.y]![other.frame.x], where).toBe(" ");
+      };
+
+      grid.select(shelf.tiles[0]!.media.id); await check(0);
+      const before = cells();
+      grid.move(1, 0); expect(grid.tile, where).toBe(1); await check(1);
+      expect(cells(), where).toEqual(before);
+      // Without focus the frame stays, in the faint colour.
+      app.ui.sidebar.focus(); await app.flush(); expect(grid.focused, where).toBe(false);
+      const frame = app.renderer.root.findDescendantById(`grid:frame:${shelf.id}:1`) as any;
+      expect(frame.borderColor.equals(RGBA.fromHex(colour.faint)), where).toBe(true);
+      expect(cells(), where).toEqual(before);
+    });
 });
