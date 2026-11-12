@@ -1,5 +1,6 @@
 /* Checks the driver's ALSA buffer size at every rate it opens (out_alsa_buffer_frames).
- * run.sh copies the function from android/audio_hw.c into buffer_frames.c beside the build.
+ * run.sh copies the function and the constants it reads from android/audio_hw.c into
+ * buffer_frames.c beside the build. The expected sizes below do not use those constants.
  *
  * PipeWire feeds a device that stays at 48 kHz in steps of its quantum, at most 2048 frames by
  * default, scaled to the stream's rate. The buffer must hold two such steps, or the write waits
@@ -8,8 +9,6 @@
 #include <stdio.h>
 
 typedef unsigned long snd_pcm_uframes_t;
-#define PLAYBACK_BUFFER_FRAMES_48K 4096
-#define PLAYBACK_CODEC_SAMPLING_RATE 48000
 #include "buffer_frames.c"
 
 int main(void)
