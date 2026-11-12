@@ -245,6 +245,27 @@ afterAll(async () => {
 });
 beforeEach(() => { if (supported) reset(); });
 
+// The SSH helper restarts an older host only when no other Peel uses it, so others leaves out the
+// Peel that asks. This test runs as the Peel that started the host, and two sleeping processes
+// stand in for other Peels, since the host forgets owners whose process has ended.
+test.skipIf(!supported)("the host counts the other Peels that use it, without the one asking", async () => {
+  const peels = [Bun.spawn(["/bin/sleep", "30"]), Bun.spawn(["/bin/sleep", "30"])];
+  const [second, third] = peels.map(peel => peel.pid);
+  try {
+    expect((await send("/state")).body.others).toBe(0);
+    expect((await send("/retain", undefined, second)).status).toBe(200);
+    expect((await send("/state")).body.others).toBe(1);
+    expect((await send("/state", undefined, second)).body.others).toBe(1);
+    // A Peel's first request adds it, and it does not count itself.
+    expect((await send("/state", undefined, third)).body.others).toBe(2);
+    expect((await send("/state")).body.others).toBe(2);
+    await send("/release", {}, second);
+    await send("/release", {}, third);
+    expect((await send("/state")).body.others).toBe(0);
+    expect((await send("/state")).body.build).toMatchObject({ version: expect.any(String), hash: expect.stringMatching(/^[0-9a-f]{64}$/) });
+  } finally { for (const peel of peels) peel.kill(); }
+});
+
 test.skipIf(!supported)("an addition the controller ignores or applies only in part fails", async () => {
   await play("101", "102");
   android.ignore.add("add");
