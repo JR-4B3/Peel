@@ -138,7 +138,7 @@ try {
     }, error => model.fail(error));
     const restart = async (version: string) => {
       const release = switchesToHires();
-      player.detach();
+      await player.detach();
       if (release) await player.release().catch(() => {});
       // OpenTUI restores the terminal right after its destroy event, so the new Peel starts after that.
       await new Promise(resolve => setTimeout(resolve, 0));

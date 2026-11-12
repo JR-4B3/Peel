@@ -227,10 +227,10 @@ export class DevicePlayer extends Engine {
 
   // Closes the remote connection but keeps this computer's engine, for a Peel restarting into an
   // update. Requests still on their way fail instead of reaching another engine.
-  detach() { this.detached = true; this.remote?.close(); this.network?.close(); }
+  async detach() { this.detached = true; this.remote?.close(); await this.network?.close(); }
   async release() {
     this.remote?.close();
-    this.network?.close();
+    await this.network?.close();
     if (this.localUsed) await this.local.release();
   }
 }

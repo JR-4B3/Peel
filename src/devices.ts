@@ -338,6 +338,9 @@ export class DeviceNetwork extends EventEmitter {
   private timers: ReturnType<typeof setInterval>[] = [];
   private stopped = false;
   private dir: string;
+  // The last save of devices.json. Saves to one file run one after another in the order they
+  // started, so once this one ends every earlier save has ended too.
+  private saved: Promise<void> = Promise.resolve();
 
   constructor(private options: NetworkOptions) {
     super();
@@ -392,13 +395,14 @@ export class DeviceNetwork extends EventEmitter {
     for (const value of Array.isArray(stored?.known) ? stored.known.slice(0, 64) : []) { const device = readKnown(value); if (device && device.id !== this.id) this.known.set(device.id, device); }
     this.claim = validClaim(stored?.output) ? stored.output : { device: this.id, generation: 0 };
     this.claimChanged = Date.now();
-    if (!stored || stored.id !== this.id) await saveJson("devices.json", { id: this.id, keys: this.groupKeys, known: this.knownList(), output: this.claim }, this.dir).catch(() => {});
+    if (!stored || stored.id !== this.id) await (this.saved = saveJson("devices.json", { id: this.id, keys: this.groupKeys, known: this.knownList(), output: this.claim }, this.dir).catch(() => {}));
   }
 
+  // A closed network saves nothing more, so close() can wait for the last save.
   private persist() {
-    if (!this.active) return Promise.resolve();
+    if (!this.active || this.stopped) return Promise.resolve();
     const stored: Stored = { id: this.id, keys: this.groupKeys, known: this.knownList(), output: this.claim };
-    return saveJson("devices.json", stored, this.dir).catch(() => {});
+    return this.saved = saveJson("devices.json", stored, this.dir).catch(() => {});
   }
 
   changed() { if (!this.stopped) this.emit("change"); }
@@ -863,6 +867,8 @@ export class DeviceNetwork extends EventEmitter {
   connectTo(id: string, address: string, port: number) { this.connecting.delete(id); this.connect(id, address, port); }
   pairWith(device: Nearby) { this.nearby.set(device.id, device); return this.pair(device.id); }
 
+  // Resolves once devices.json is saved, so a Peel that quits or restarts leaves the current
+  // claim and keys on disk.
   close() {
     this.stopped = true;
     for (const timer of this.timers) clearInterval(timer);
@@ -875,5 +881,6 @@ export class DeviceNetwork extends EventEmitter {
     try { this.socket?.close(); } catch {}
     this.server?.close();
     this.server = undefined;
+    return this.saved;
   }
 }
