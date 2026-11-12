@@ -65,43 +65,59 @@ export interface HiresStart {
   watch?: () => Promise<() => Promise<boolean>>;
 }
 
+// How many times one call restarts an older host. A host that another Peel starts meanwhile
+// can run older code again, which is restarted too, up to this many times.
+const maxRestarts = 3;
+
 // Starts the host when it is not running and waits until Android and Apple Music answer. Android
 // runs only while a Peel uses it, so this usually boots it, which takes about 7 seconds.
 export async function ensureHires(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal, start: HiresStart = {}) {
+  const mine = start.build ?? hostBuild(), remote = !!start.remote;
   const state = () => engine.state().catch(() => undefined);
-  let current = await state(), replaced: string | undefined;
-  // A host started before Peel updated itself keeps running the old code, while the interface
-  // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
-  if (current && outdated(current, start.build ?? hostBuild(), !!start.remote)) {
-    signal?.throwIfAborted();
-    status("Restarting hi-res playback to load an update...");
-    const running = await (start.watch ?? watchHost)();
-    replaced = current.instance;
-    await engine.quit().catch(() => {});
-    // The old host pauses and stops Android before it exits, which can take a while. Its /state
-    // waits for Android meanwhile, so its port and key tell whether it still runs.
-    for (const until = Date.now() + 3 * 60 * 1000; await running();) {
-      if (Date.now() >= until) throw new Error("The hi-res player from before the update did not stop. Run peel-hires status to see why.");
-      await sleep(250, undefined, { signal });
+  // The hosts this call asked to quit. One may still answer once while it exits, and only a host
+  // that runs now counts.
+  const replaced = new Set<string>();
+  const live = (value: Awaited<ReturnType<typeof state>>) => value && !(value.instance && replaced.has(value.instance)) ? value : undefined;
+  let current = await state();
+  for (let restarts = 0; ; restarts++) {
+    // A host started before Peel updated itself keeps running the old code, while the interface
+    // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
+    if (current && outdated(current, mine, remote)) {
+      if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} restarts. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
+      signal?.throwIfAborted();
+      status("Restarting hi-res playback to load an update...");
+      const running = await (start.watch ?? watchHost)();
+      if (current.instance) replaced.add(current.instance);
+      await engine.quit().catch(() => {});
+      // The old host pauses and stops Android before it exits, which can take a while. Its /state
+      // waits for Android meanwhile, so its port and key tell whether it still runs.
+      for (const until = Date.now() + 3 * 60 * 1000; await running();) {
+        if (Date.now() >= until) throw new Error("The hi-res player from before the update did not stop. Run peel-hires status to see why.");
+        await sleep(250, undefined, { signal });
+      }
+      // Another Peel may have started a host meanwhile.
+      current = await state();
     }
-    // Another Peel may have started a host meanwhile.
-    current = await state();
+    current = live(current);
+    if (!current) {
+      signal?.throwIfAborted();
+      status("Starting hi-res playback...");
+      // When another Peel started a host meanwhile, this returns once that host answers.
+      await (start.launch ?? launchHost)();
+    }
+    const until = Date.now() + 3 * 60 * 1000;
+    // The host that answers may be one that another Peel started from older code, while this
+    // Peel restarted or started the host. It is restarted as well.
+    const older = () => !!current && outdated(current, mine, remote);
+    while (!current?.ready && !older() && Date.now() < until) {
+      if (current?.playback?.error) status(current.playback.error);
+      await sleep(250, undefined, { signal });
+      current = live(await state());
+    }
+    if (older()) continue;
+    if (!current?.ready) throw new Error(current?.playback?.error ?? "Hi-res playback did not start. Run peel-hires status to see why.");
+    return;
   }
-  // The replaced host may still answer once while it exits. Only a host that runs now counts.
-  const live = (value: typeof current) => value && (!replaced || value.instance !== replaced) ? value : undefined;
-  current = live(current);
-  if (!current) {
-    signal?.throwIfAborted();
-    status("Starting hi-res playback...");
-    await (start.launch ?? launchHost)();
-  }
-  const until = Date.now() + 3 * 60 * 1000;
-  while (!current?.ready && Date.now() < until) {
-    if (current?.playback?.error) status(current.playback.error);
-    await sleep(250, undefined, { signal });
-    current = live(await state());
-  }
-  if (!current?.ready) throw new Error(current?.playback?.error ?? "Hi-res playback did not start. Run peel-hires status to see why.");
 }
 
 // Whether a Peel of build mine restarts the host it found. A host is restarted only when it is
@@ -129,7 +145,7 @@ export function hostBuild(): HostBuild {
 }
 
 // A TCP connection reaches a running host even while its requests wait for Android.
-async function listening(port = hiresPort) {
+async function listening(port: number) {
   try {
     const socket = await Promise.race([
       Bun.connect({ hostname: "127.0.0.1", port, socket: { data() {} } }),
@@ -140,13 +156,14 @@ async function listening(port = hiresPort) {
   } catch { return false; }
 }
 
-const hostKey = async () => { try { return JSON.parse(await Bun.file(join(hiresHome, "key.json")).text()) as { port: number; key: string }; } catch { return undefined; } };
-
 // Returns a test for whether the host that runs now still runs: its port answers and key.json
-// still holds its key. A host that another Peel starts afterwards writes a new key.
-async function watchHost() {
-  const before = await hostKey();
-  return async () => (!before || (await hostKey())?.key === before.key) && await listening();
+// still holds its key. A host that another Peel starts afterwards writes a new key. The port is
+// the one in key.json, where the host wrote the port it listens on. Without a key file it is the
+// port this Peel uses. Tests pass another folder and port.
+export async function watchHost(home = hiresHome, port = hiresPort) {
+  const hostKey = async () => { try { return JSON.parse(await Bun.file(join(home, "key.json")).text()) as { port?: number; key?: string }; } catch { return undefined; } };
+  const before = await hostKey(), at = Number(before?.port) || port;
+  return async () => (!before || (await hostKey())?.key === before.key) && await listening(at);
 }
 
 // How long Peel waits for systemd to remove the unit of a host that exited.
@@ -181,7 +198,7 @@ async function launchHost() {
         retried = true;
         continue;
       }
-      if (await listening()) return;
+      if (await listening(hiresPort)) return;
       if (Date.now() >= until) throw new Error(`Could not start hi-res playback: the service peel-hires-host from an earlier hi-res player is still there and no player answers. Run systemctl --user status peel-hires-host to see why. ${failure}`);
       await sleep(500);
     }
