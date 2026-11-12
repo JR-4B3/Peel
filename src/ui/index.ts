@@ -171,7 +171,7 @@ export class PeelUI {
     this.root.add(this.body);
 
     this.player = new PlayerPanel(ctx, model, (...args) => this.button(...args), {
-      showCover: (art, name, detail) => this.coverView.show(art, name, detail), toggleDevices: () => this.devices.toggle(),
+      showCover: (art, name, detail) => this.coverView.show(art, name, detail),
       toggleLyrics: () => this.toggleLyrics(), focusContent: () => this.focusContent(),
     });
     this.root.add(this.player.panel);

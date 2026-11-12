@@ -19,8 +19,8 @@ const cleanup: (() => void | Promise<void>)[] = [];
 afterEach(async () => { for (const fn of cleanup.splice(0).reverse()) await fn(); });
 
 
-async function setup(width = 120, height = 36, view?: string, cached?: Home) {
-  const api = fixture(); cleanup.push(() => api.server.stop(true));
+async function setup(width = 120, height = 36, view?: string, cached?: Home, options: Parameters<typeof fixture>[0] = {}) {
+  const api = fixture(options); cleanup.push(() => api.server.stop(true));
   const setup = await createTestRenderer({ width, height }); cleanup.push(() => setup.renderer.destroy());
   const saved: unknown[] = [];
   const stored: Home[] = [];
@@ -353,12 +353,18 @@ describe("the rendered player", () => {
   });
 
   // Issue #79: every button that shows is whole, inside each box around it, and apart from the others.
-  test.each([76, 100, 140])("no button is cut off or overlaps another at %i columns", async width => {
+  // The top bar's devices button and the player's heart count too, with a long song title and
+  // device name, in narrow windows as well.
+  test.each([40, 48, 60, 76, 100, 140])("no button is cut off or overlaps another at %i columns", async width => {
     const app = await setup(width, 30, "albums");
+    app.playback.nowPlaying = { name: longTitle, artistName: "Skrillex" };
+    app.model.target = longDevice;
+    await app.model.refresh();
     const visible = (node: any) => { for (let n = node; n; n = n.parent) if (n.visible === false) return false; return true; };
     const check = async (page: string) => {
       await app.flush();
-      const buttons = ((app.ui as any).buttons as any[]).filter(button => visible(button) && button.width > 0);
+      const buttons = [...(app.ui as any).buttons, (app.ui as any).topBar.devicesButton].filter(button => visible(button) && button.width > 0);
+      expect(buttons.some(button => button.id === "favourite") && buttons.some(button => button.id === "devices")).toBe(true);
       expect(buttons.length).toBeGreaterThan(5);
       for (const button of buttons) {
         const where = `${button.id} on ${page} at ${width} columns`;
@@ -805,4 +811,133 @@ describe("artists", () => {
 test("artwork templates request a fixed square JPEG", () => {
   expect(artworkUrl("https://example.test/a.jpg/{w}x{h}bb.{f}")).toBe("https://example.test/a.jpg/240x240bb.jpg");
   expect(artworkUrl("https://example.test/a.jpg/600x600bb.png")).toBe("https://example.test/a.jpg/240x240bb.jpg");
+});
+
+// The window's lines, one entry per cell, so a column reads the same on every line.
+const cells = (app: TestRendererSetup) => app.captureCharFrame().split("\n").map(line => Array.from(line));
+const longTitle = "An Extraordinarily Long Song Title That Goes On And On Well Past The Width Of Any Normal Window";
+const longDevice = "Living room speaker system";
+
+describe("the compact player", () => {
+  const widths = [40, 44, 48, 60, 76, 80, 120];
+
+  // Before, the song's box did not shrink: the heart, the state and the quality went past the window.
+  test.each(widths)("a long title ends in an ellipsis and leaves the heart, the state and the quality whole at %i columns", async width => {
+    const app = await setup(width, 24);
+    app.playback.nowPlaying = { name: longTitle, artistName: "Skrillex" };
+    await app.model.refresh(); await app.flush();
+    const title = app.renderer.root.findDescendantById("now-playing")!;
+    const line = cells(app)[title.y]!.join("");
+    expect(line).toContain("…");
+    expect(title.width).toBeGreaterThanOrEqual(12);
+    for (const id of ["favourite", "playback-indicator", "quality"]) {
+      const part = app.renderer.root.findDescendantById(id)!;
+      if (id === "quality" && !part.visible) continue;
+      expect(part.visible, id).toBe(true);
+      expect(part.x + part.width, id).toBeLessThanOrEqual(width - 1);
+      expect(part.x, id).toBeGreaterThanOrEqual(title.x + title.width);
+    }
+    expect(line).toContain("Stopped");
+    // The heart answers a click at every width.
+    await click(app, "favourite");
+    await waitFor(() => app.model.status === "Added to Favourite Songs");
+  });
+
+  // Narrow windows join the artist to the title. The quality tag then drops its rate, with both
+  // rounded ends showing, so the name keeps room.
+  test.each([[40, "AAC"], [48, "AAC"], [60, "AAC · 256 kbps"], [80, "AAC · 256 kbps"]] as const)("the quality tag fits beside the song at %i columns", async (width, label) => {
+    const app = await setup(width, 24);
+    const quality = app.renderer.root.findDescendantById("quality")!;
+    expect(quality.visible).toBe(true);
+    expect(cells(app)[quality.y]!.join("")).toContain(`${icon.capLeft}${label}${icon.capRight}`);
+    expect(quality.x + quality.width).toBeLessThanOrEqual(width - 1);
+  });
+
+  test.each([
+    ["hi-res above 48 kHz", "hires", 96000, "Hi-Res Lossless · 96 kHz"],
+    ["hi-res at 44.1 kHz", "hires", 44100, "Lossless · 44.1 kHz"],
+    ["hi-res before the rate is known", "hires", undefined, "Lossless"],
+    ["the web engine", undefined, undefined, "AAC · 256 kbps"],
+  ] as const)("the quality tag names %s", async (_, version, rate, label) => {
+    const app = await setup(120, 30, undefined, undefined, { version });
+    if (rate) { app.playback.sampleRate = rate; await app.model.refresh(); await app.flush(); }
+    const quality = app.renderer.root.findDescendantById("quality")!;
+    expect(cells(app)[quality.y]!.join("")).toContain(`${icon.capLeft}${label}${icon.capRight}`);
+  });
+
+  // Before, a long device name pushed the devices button past the window below 76 columns.
+  test.each(widths)("a long device name ends in an ellipsis and its button stays in the window at %i columns", async width => {
+    const app = await setup(width, 24);
+    app.model.target = longDevice; app.ui.drawPlayback(); await app.flush();
+    const button = app.renderer.root.findDescendantById("devices")!, field = app.renderer.root.findDescendantById("search-panel")!;
+    expect(button.x + button.width).toBeLessThanOrEqual(width);
+    expect(field.width).toBeGreaterThanOrEqual(12);
+    expect(field.x + field.width).toBeLessThanOrEqual(button.x);
+    const line = cells(app)[button.y]!.join("");
+    expect(line).toContain("Living room");
+    expect(line.includes(longDevice)).toBe(width >= 48);
+    // The button still answers a click. The test model has no devices, so it says they are off.
+    await click(app, "devices");
+    await waitFor(() => app.model.status.startsWith("Devices are off"));
+  });
+
+  test("narrow windows show the sidebar as tabs that open their views", async () => {
+    const app = await setup(60, 24);
+    expect(app.renderer.root.findDescendantById("tabs")!.visible).toBe(true);
+    expect(app.renderer.root.findDescendantById("sidebar-panel")!.visible).toBe(false);
+    for (const view of ["songs", "albums", "home"]) {
+      await click(app, `sidebar:row:${view}`);
+      await waitFor(() => app.model.view === view);
+    }
+    // Left and right move between the tabs while they have focus, and Enter opens one.
+    app.ui.sidebar.focus(); await app.flush();
+    app.mockInput.pressArrow("right"); app.mockInput.pressArrow("right"); app.mockInput.pressArrow("left");
+    expect(app.ui.sidebar.selectedId()).toBe("songs");
+    app.mockInput.pressEnter();
+    await waitFor(() => app.model.view === "songs");
+  });
+
+  test("the sidebar lists the library and the playlists apart, and editing moves an entry only within its group", async () => {
+    const app = await setup(120, 36);
+    const sidebar = app.renderer.root.findDescendantById("sidebar-panel")! as any;
+    expect(sidebar.title).toBe("Library");
+    const column = () => cells(app).map(line => line.slice(sidebar.x, sidebar.x + sidebar.width).join("")).join("\n");
+    expect(column().indexOf("Settings")).toBeLessThan(column().indexOf("PLAYLISTS"));
+    expect(column().indexOf("PLAYLISTS")).toBeLessThan(column().indexOf("Favourite Songs"));
+    const order = () => app.model.entries(true).map(item => item.id);
+    const before = order();
+    app.ui.sidebar.focus(); app.mockInput.pressKey("e"); await app.flush();
+    // All songs is the first library entry: Shift+Up does not move it among the playlists.
+    app.ui.sidebar.selectKey("songs");
+    app.mockInput.pressArrow("up", { shift: true }); await Bun.sleep(50);
+    expect(order()).toEqual(before);
+    // Background Chill is the last playlist: Shift+Down does not move it into the library.
+    app.ui.sidebar.selectKey("playlist:p.chill");
+    app.mockInput.pressArrow("down", { shift: true }); await Bun.sleep(50);
+    expect(order()).toEqual(before);
+    // Within a group, an entry moves.
+    app.mockInput.pressArrow("up", { shift: true });
+    await waitFor(() => order()[0] === "playlist:p.chill");
+    app.ui.sidebar.selectKey("songs");
+    app.mockInput.pressArrow("down", { shift: true });
+    await waitFor(() => order().indexOf("songs") > order().indexOf("albums"));
+  });
+
+  test("wide song lists show the year, blank for a song without one, and the panel counts the songs", async () => {
+    const app = await setup(160, 30, "songs");
+    // Only the first song has a release date.
+    app.model.items = app.model.items.map((item, index) => index ? item : { ...item, releaseDate: "2016-05-01" });
+    await app.model.setFilter({}); await app.flush();
+    const panel = app.renderer.root.findDescendantById("tracks-panel")!;
+    const frame = cells(app);
+    expect(frame[panel.y]!.join("")).toContain(" 3 songs ");
+    const header = frame.findIndex(line => line.join("").includes("Year"));
+    const at = frame[header]!.findIndex((_, x) => frame[header]!.slice(x, x + 4).join("") === "Year");
+    const year = (row: number) => frame[app.renderer.root.findDescendantById(`tracks:row:${row}`)!.y]!.slice(at, at + 4).join("");
+    expect(year(0)).toBe("2016");
+    expect(year(1)).toBe("    ");
+    // A filter shows how many songs match.
+    await app.model.setFilter({ text: "selected" }); await app.flush();
+    expect(cells(app)[panel.y]!.join("")).toContain(" 1 of 3 ");
+  });
 });

@@ -2,12 +2,11 @@ import { BoxRenderable, TextRenderable, t, fg, bold, type CliRenderer, type Mous
 import type { Model } from "../model";
 import { colour, icon } from "../theme";
 import { duration } from "../types";
-import { Cover, tag, type Button } from "./widgets";
+import { Cover, fit, tag, type Button } from "./widgets";
 
 // What the player's buttons open elsewhere in the interface.
 export interface PlayerActions {
   showCover(art: string | undefined, name: string, detail: string): void;
-  toggleDevices(): void;
   toggleLyrics(): void;
   focusContent(): void;
 }
@@ -27,8 +26,11 @@ export class PlayerPanel {
   private about: BoxRenderable;
   private sound: BoxRenderable;
   private controls: BoxRenderable;
+  private left: BoxRenderable;
   private right: BoxRenderable;
   private narrow = false;
+  // The cells of the rows beside the cover.
+  private deckWidth = 0;
   private progress: TextRenderable;
   private playButton: Button;
   private favouriteButton: Button;
@@ -61,7 +63,8 @@ export class PlayerPanel {
     const row = () => new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2, flexShrink: 0 });
 
     const top = row();
-    const song = new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2, flexGrow: 1, minWidth: 0 });
+    // The song's name gives way first, so the heart and the playback state stay in the window.
+    const song = new BoxRenderable(ctx, { flexDirection: "row", height: 1, gap: 2, flexGrow: 1, flexShrink: 1, minWidth: 0 });
     this.title = new TextRenderable(ctx, { id: "now-playing", fg: colour.text, flexShrink: 1, minWidth: 0, height: 1, truncate: true, selectable: false });
     this.favouriteButton = control("favourite", icon.heartOutline, () => void model.toggleFavourite(), colour.faint);
     this.indicator = new TextRenderable(ctx, { id: "playback-indicator", fg: colour.faint, height: 1, flexShrink: 0, selectable: false });
@@ -91,7 +94,8 @@ export class PlayerPanel {
     this.playButton = control("play-pause", icon.play, () => void model.act("/playback/toggle"));
     this.repeatButton = control("repeat", icon.repeatOff, () => void model.act("/playback/repeat/toggle"), colour.faint);
     for (const item of [this.shuffleButton, control("previous", icon.previous, () => void model.skip(-1)), this.playButton, control("next", icon.next, () => void model.skip(1)), this.repeatButton]) controls.add(item);
-    middle.add(new BoxRenderable(ctx, side)); middle.add(controls); middle.add(this.right);
+    this.left = new BoxRenderable(ctx, side);
+    middle.add(this.left); middle.add(controls); middle.add(this.right);
     deck.add(middle);
     this.progress = new TextRenderable(ctx, { id: "seek", content: "", fg: colour.accent, height: 1, width: "100%", selectable: false, onMouseDown: event => this.seekClick(event) });
     deck.add(this.progress);
@@ -109,15 +113,27 @@ export class PlayerPanel {
     this.narrow = narrow;
     this.about.visible = !narrow;
     this.lyricsButton.visible = !narrow;
-    this.controls.gap = narrow ? 2 : 4;
+    const gap = narrow ? 2 : 4;
+    this.controls.gap = gap;
     const rows = narrow ? 3 : 4;
     this.panel.height = rows + 1;
     // A cell is about twice as tall as wide. The terminal's pixel size, when it reports one, says
     // exactly how much, so the cover box is as close to square as whole cells allow.
     const resolution = this.ctx.resolution;
     const shape = resolution && width && height ? (resolution.height / height) / (resolution.width / width) : 2;
-    this.cover.setSize(Math.max(2, Math.round(rows * shape)), rows);
+    const cover = Math.max(2, Math.round(rows * shape));
+    this.cover.setSize(cover, rows);
     this.cover.visible = width >= 44;
+    // The window's padding and the panel's, and the cover with the gap after it.
+    this.deckWidth = width - 4 - (this.cover.visible ? cover + 2 : 0);
+    // With the volume at the right, both sides take whole cells. With half a cell each, the volume
+    // could end one cell past the player. An odd cell goes to the left, so the volume ends where
+    // the quality tag above it does.
+    const buttons = this.controls.getChildren().filter(child => child.visible).length;
+    const free = Math.max(0, this.deckWidth - buttons - gap * (buttons - 1) - 2 * 2), right = Math.floor(free / 2);
+    this.left.flexGrow = this.right.flexGrow = narrow ? 0 : 1;
+    this.left.flexBasis = narrow ? free - right : 0;
+    this.right.flexBasis = narrow ? right : 0;
   }
 
   private progressCells(state = this.model.playback) {
@@ -127,13 +143,15 @@ export class PlayerPanel {
 
   // What the player streams: Apple's lossless ALAC through the hi-res player, at the song's own
   // rate, or AAC at the quality chosen in Settings. Apple calls rates above 48 kHz Hi-Res Lossless.
-  private qualityLabel() {
+  // The second label is the short one for narrow rows, without the rate.
+  private qualityLabels(): [string, string] {
     const rate = this.model.playback.sampleRate;
     if (this.model.player.lossless) {
-      const khz = rate ? `${Number((rate / 1000).toFixed(1))} kHz` : "";
-      return [rate && rate > 48000 ? "Hi-Res Lossless" : "Lossless", khz].filter(Boolean).join(" · ");
+      const hires = !!rate && rate > 48000;
+      const name = hires ? "Hi-Res Lossless" : "Lossless";
+      return [rate ? `${name} · ${Number((rate / 1000).toFixed(1))} kHz` : name, hires ? "Hi-Res" : "Lossless"];
     }
-    return this.model.preferences.quality === "standard" ? "AAC · 64 kbps" : "AAC · 256 kbps";
+    return [this.model.preferences.quality === "standard" ? "AAC · 64 kbps" : "AAC · 256 kbps", "AAC"];
   }
 
   draw() {
@@ -141,7 +159,7 @@ export class PlayerPanel {
     const connected = this.model.connected;
     const song = state.nowPlaying;
     const name = song ? song.name ?? "Untitled" : "Nothing playing";
-    this.title.content = this.narrow && song?.artistName ? t`${bold(fg(colour.text)(name))}  ${fg(colour.muted)(song.artistName)}` : t`${bold(fg(colour.text)(name))}`;
+    const artist = this.narrow ? song?.artistName : undefined;
     const target = this.model.target ?? this.model.preferences.remote;
     // The device that plays may be out of reach, for example asleep or on another network. Saying so
     // explains why this computer shows nothing.
@@ -161,8 +179,21 @@ export class PlayerPanel {
     this.shuffleButton.set(state.shuffleMode ? icon.shuffle : icon.shuffleOff, "", state.shuffleMode ? colour.accent : colour.faint);
     this.repeatButton.set(state.repeatMode === "one" ? icon.repeatOne : state.repeatMode === "all" ? icon.repeat : icon.repeatOff, "", state.repeatMode === "none" ? colour.faint : colour.accent);
     this.volumeText.content = `${Math.round(state.volume * 100)}%`;
-    this.quality.visible = !!song && connected;
-    this.quality.content = tag(this.qualityLabel(), this.model.player.lossless ? colour.accent : colour.muted);
+    // The song's name keeps at least 12 cells, or all of it when shorter. A row too narrow for the
+    // quality with its rate shows the short label, or none. Each part after the name takes its own
+    // cells and a gap of two, and the tag's rounded ends take one cell each.
+    const fixed = (song ? 1 + 2 : 0) + (label ? Bun.stringWidth(label) + 2 : 0);
+    const shown = !!song && connected;
+    const tagWidth = (text: string) => shown ? Bun.stringWidth(text) + 2 + 2 : 0;
+    const wanted = Math.min(12, Bun.stringWidth(artist ? `${name}  ${artist}` : name));
+    const quality = this.qualityLabels().find(text => this.deckWidth - fixed - tagWidth(text) >= wanted);
+    this.quality.visible = shown && !!quality;
+    if (quality) this.quality.content = tag(quality, this.model.player.lossless ? colour.accent : colour.muted);
+    // A name too long for the room left ends in an ellipsis. The artist after it gets what remains.
+    const room = this.deckWidth - fixed - (quality ? tagWidth(quality) : 0);
+    const title = fit(name, Math.max(1, room));
+    const rest = artist && title === name ? room - Bun.stringWidth(name) - 2 : 0;
+    this.title.content = artist && rest >= 4 ? t`${bold(fg(colour.text)(title))}  ${fg(colour.muted)(fit(artist, rest))}` : t`${bold(fg(colour.text)(title))}`;
     const cells = this.progressCells(state);
     const ratio = state.time.duration > 0 ? Math.min(1, Math.max(0, state.time.currentTime / state.time.duration)) : 0;
     const filled = Math.floor(ratio * cells);
