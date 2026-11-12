@@ -321,17 +321,18 @@ export async function runHiresHost() {
   // second after the song changes. It is read from Android's stream in PipeWire, not from the
   // controller, whose rate lookups can wait seconds on Android's mixer. It is read 1.5 seconds
   // after a change and every five seconds while the song plays, and reported only for that song.
-  let mixer: { item?: number; rate: number; asked: number } | undefined, asking = false;
-  let seen: { item?: number; at: number } = { at: 0 };
+  // A read that finds no stream also waits five seconds, so pactl does not run on every poll.
+  let mixer: { item?: number; rate: number } | undefined, asking = false;
+  let seen: { item?: number; at: number } = { at: 0 }, asked: { item?: number; at: number } = { at: 0 };
   function watchRate() {
     if (current.item !== seen.item) seen = { item: current.item, at: Date.now() };
     if (current.state !== PLAYING || asking || Date.now() - seen.at < 1500) return;
-    if (mixer && mixer.item === current.item && Date.now() - mixer.asked < 5000) return;
+    if (asked.item === current.item && Date.now() - asked.at < 5000) return;
     const item = current.item;
-    asking = true;
+    asking = true; asked = { item, at: Date.now() };
     void androidStreams().then(streams => {
       const rate = Number(/(\d+)Hz/.exec(streams?.[0]?.sample_specification ?? "")?.[1]);
-      if (rate > 0 && current.item === item) mixer = { item, rate, asked: Date.now() };
+      if (rate > 0 && current.item === item) mixer = { item, rate };
     }).catch(() => {}).finally(() => { asking = false; });
   }
 
