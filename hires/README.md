@@ -98,6 +98,8 @@ The controller talks to Apple Music's media session through Android's hidden `IS
 
 The controller uses about 42 MB (PSS). Apple Music without its screen uses about 165 MB, against 350 MB once its screen has opened.
 
+Peel's hi-res host restarts Apple Music when a song stays buffering at one place or plays only zero samples, and continues the song where it was. Each recovery writes lines that start with `hires-recovery:` to the host's stderr, which is the journal of the `peel-hires-host` unit where systemd runs it: which watcher asked for it, the song's catalog ID, the position, the stream's rate, and how the recovery ended. Normal playback writes none. Before each restart the host saves `dumpsys media.audio_flinger` from Android to `~/.local/state/peel-hires/audio-dumps` and keeps the last five. Its signal power history shows whether real samples reached the audio driver.
+
 ## Memory and disk
 
 Turning off Android apps that playback doesn't use saved about 60 MB, but Android then booted 2 seconds slower without a home screen app, and stalled when the persistent Phone app was off. `peel-hires` therefore keeps all apps on, and the nightly trim stops the ones that linger.
