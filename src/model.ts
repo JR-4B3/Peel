@@ -684,11 +684,15 @@ export class Model extends EventEmitter {
     });
   }
 
-  // Undefined until Apple has said whether the playing song is a favourite. The player's answer
-  // wins, so a favourite set on another device or in another app shows here too.
+  // Undefined until Apple has said whether the playing song is a favourite. The player knows only
+  // the mark on the ID it plays, and Peel's own lookup also counts the song's other versions, so
+  // either answer makes it a favourite. A favourite set on another device or in another app shows
+  // here too. A change made in this Peel wins until the player agrees with it.
   get favourite(): boolean | undefined {
     const key = this.songKey(), reported = this.playback.nowPlaying?.inFavorites;
-    return this.loved?.key === key && (this.loved.local || reported === undefined) ? this.loved.value : reported;
+    if (this.loved?.key === key && this.loved.local) return this.loved.value;
+    const looked = this.loved?.key === key ? this.loved.value : undefined;
+    return reported || looked ? true : reported ?? looked;
   }
 
   // The rows of the playing song show the player's answer too.
@@ -699,6 +703,10 @@ export class Model extends EventEmitter {
       if (this.loved.value !== reported) return;
       this.loved = { key, value: reported };
     }
+    // The player's "no" covers only the ID it plays. Rows wait for Peel's own lookup, which also
+    // counts the song's other versions.
+    if (!reported && this.loved?.key !== key) return;
+    const value = this.favourite ?? reported;
     const id = song.playParams?.id, catalog = song.playParams?.catalogId;
     // Library songs and catalog songs have separate ratings, so a row follows only its own song: the
     // same ID, or the catalog song itself when a catalog song plays.
@@ -706,7 +714,7 @@ export class Model extends EventEmitter {
     const matches = (item: Media) => /songs/.test(item.type) && (item.id === id || !library && !!catalog && !item.type.startsWith("library-") && item.id === catalog);
     let changed = false;
     const lists = [this.items, ...this.history.map(entry => entry.items), ...[...this.lists.values()].map(entry => entry.items)];
-    for (const items of new Set(lists)) for (const item of items) if (matches(item) && item.loved !== undefined && item.loved !== reported) { item.loved = reported; changed = true; }
+    for (const items of new Set(lists)) for (const item of items) if (matches(item) && item.loved !== undefined && item.loved !== value) { item.loved = value; changed = true; }
     if (changed) this.lovedRevision++;
   }
 
@@ -715,18 +723,20 @@ export class Model extends EventEmitter {
     return song ? song.playParams?.catalogId ?? song.playParams?.id ?? `${song.name}/${song.artistName}` : "";
   }
 
-  // The player can take seconds to report a song's favourite mark, or never report it, so Peel
-  // asks Apple itself as soon as a song starts. A failed lookup is tried again on the next refresh.
+  // The player can take seconds to report a song's favourite mark, or never report it, and it knows
+  // only the mark on the ID it plays. So Peel asks Apple itself once for each song, counting the
+  // song's other versions too. A failed lookup is tried again on the next refresh.
   private favouriteLookup = "";
   private async lookUpFavourite() {
     const key = this.songKey(), song = this.playback.nowPlaying;
-    if (!key || !song || this.favourite !== undefined || this.favouriteLookup === key) return;
+    if (!key || !song || this.favouriteLookup === key || this.loved?.key === key) return;
     this.favouriteLookup = key;
     const id = song.playParams?.id ?? key;
     const catalogId = song.playParams?.catalogId ?? (/^\d+$/.test(id) ? id : undefined);
+    const duration = this.playback.time.duration > 0 ? this.playback.time.duration : 0;
     try {
-      const loved = await this.library.ratings([{ id, catalogId, type: "songs", name: song.name ?? "", artist: song.artistName ?? "", album: song.albumName ?? "", duration: 0 }]);
-      if (this.songKey() === key && this.loved?.key !== key) { this.loved = { key, value: loved.has(id) }; this.changed(); }
+      const loved = await this.library.ratings([{ id, catalogId, type: "songs", name: song.name ?? "", artist: song.artistName ?? "", album: song.albumName ?? "", duration }]);
+      if (this.songKey() === key && this.loved?.key !== key) { this.loved = { key, value: loved.has(id) }; this.followFavourite(); this.changed(); }
     } catch { if (this.favouriteLookup === key) this.favouriteLookup = ""; }
   }
 
@@ -736,7 +746,8 @@ export class Model extends EventEmitter {
     // Toggling an unknown state could remove a favourite, which would move it in Favourite Songs.
     if (this.favourite === undefined) { this.status = "Still checking whether this song is a favourite."; this.changed(); return; }
     const value = !this.favourite;
-    const id = this.playback.nowPlaying?.playParams?.id;
+    const song = this.playback.nowPlaying;
+    const id = song?.playParams?.id;
     this.loved = { key, value, local: true }; this.changed();
     // The player rates whatever plays when the command runs. A command queued before this one,
     // such as starting another song, can change that, so the song is checked first.
@@ -761,6 +772,16 @@ export class Model extends EventEmitter {
         if (saved !== value) await Bun.sleep(100);
       }
     } catch {}
+    // The player removed the mark on the ID it plays. Other versions of the song can hold one too,
+    // and the song would stay a favourite through them.
+    let forgotten = true;
+    if (done && !value && saved === value && song) {
+      const playing = id ?? key, catalogId = song.playParams?.catalogId ?? (/^\d+$/.test(playing) ? playing : undefined);
+      try {
+        await this.library.forgetFavourite?.({ id: playing, catalogId, type: "songs", name: song.name ?? "", artist: song.artistName ?? "", album: song.albumName ?? "", duration: this.playback.time.duration > 0 ? this.playback.time.duration : 0 });
+      } catch { forgotten = false; }
+    }
+    this.library.favouritesChanged?.();
     if (this.songKey() !== key) return;
     this.loved = { key, value: saved, local: true };
     // The song's row shows its heart too.
@@ -768,6 +789,7 @@ export class Model extends EventEmitter {
     this.favouriteEdits++;
     this.lovedRevision++;
     if (saved !== value) this.status = "Apple Music did not save the favourite. Try again.";
+    else if (!forgotten) this.status = "Removed the favourite from this version, but another version of the song may still be one. Try again.";
     else this.status = value ? "Added to Favourite Songs" : "Removed from Favourite Songs";
     this.changed();
   }

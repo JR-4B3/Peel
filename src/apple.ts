@@ -1,5 +1,6 @@
 import { cacheDir, readCache, saveJson } from "./config";
 import { media, type ArtistPage, type Library, type Media, type Page } from "./types";
+import { Versions } from "./versions";
 
 type Resource = Record<string, any>;
 
@@ -55,7 +56,20 @@ export interface AppleOptions {
   storefront?: string;
   // Asks the playback engine for a current Music User Token after Apple rejects the saved one.
   renewUser?: () => Promise<string | undefined>;
+  // False makes a song's heart follow only the mark on its own ID. The interface tests use it,
+  // because their fixture lists songs in Favourite Songs that have no mark.
+  favouriteVersions?: boolean;
+  // Where Peel keeps its copy of Favourite Songs. Peel's cache folder unless given.
+  cacheDir?: string;
 }
+
+// How long Peel trusts its copy of Favourite Songs before reading it again.
+const favouriteVersionsAge = 10 * 60 * 1000;
+// Peel's copy of Favourite Songs in its cache folder, for the first answer after a start.
+const favouriteVersionsFile = "favourite-songs.json";
+interface SavedVersions { base: string; songs: (Media & { isrc?: string })[] }
+// How long a removed favourite stays out of Peel's copy of Favourite Songs while Apple catches up.
+const forgottenAge = 5 * 60 * 1000;
 
 export class AppleMusic implements Library {
   readonly base: string;
@@ -186,10 +200,22 @@ export class AppleMusic implements Library {
     return [...results("songs"), ...results("albums"), ...results("artists")];
   }
 
-  // A library song's rating can differ from its linked catalog song. Use the library ID for
-  // library songs, including ones with catalog links, and the catalog ID for catalog songs.
+  // A song is a favourite when any version of it is: its own ID has the mark, or it is the same
+  // recording as a song in the library's Favourite Songs (src/versions.ts). Apple lists one
+  // recording under several IDs, and a mark on one of them counts for all.
   async ratings(items: Media[]): Promise<Set<string>> {
     const songs = items.filter(item => /songs/.test(item.type));
+    const [loved, versions] = await Promise.all([this.ownRatings(songs), this.options.favouriteVersions === false ? undefined : this.favouriteVersions()]);
+    if (!versions) return loved;
+    const rest = songs.filter(item => !loved.has(item.id) && !versions.has(item));
+    await this.readIsrcs(rest.flatMap(item => item.isrc || !item.catalogId ? [] : [item.catalogId]));
+    for (const item of songs) if (!loved.has(item.id) && versions.has(item, item.isrc ?? this.isrcOf(item.catalogId))) loved.add(item.id);
+    return loved;
+  }
+
+  // The marks on the songs' own IDs. A library song's rating can differ from its linked catalog
+  // song, so library songs are asked by their library ID and catalog songs by their catalog ID.
+  private async ownRatings(songs: Media[]): Promise<Set<string>> {
     const ask = async (kind: string, ids: string[]) => {
       const loved = new Set<string>();
       for (let start = 0; start < ids.length; start += 100) {
@@ -203,6 +229,85 @@ export class AppleMusic implements Library {
       ask("library-songs", [...new Set(songs.filter(item => item.id.startsWith("i.")).map(item => item.id))]),
     ]);
     return new Set(songs.filter(item => item.id.startsWith("i.") ? library.has(item.id) : !!item.catalogId && catalog.has(item.catalogId)).map(item => item.id));
+  }
+
+  // The songs in the library's Favourite Songs, with the ISRC of each one's catalog song. Read
+  // again after favouriteVersionsAge, and at once after Peel changes a favourite. Reading two
+  // thousand songs takes several seconds, so the first answer after a start comes from the copy
+  // saved last time while the fresh read runs. Without any answer, hearts follow each song's own
+  // mark as before.
+  private versions?: { at: number; read: Promise<Versions | undefined> };
+  private savedVersionsUsed = false;
+  private async favouriteVersions(): Promise<Versions | undefined> {
+    if (this.versions && Date.now() - this.versions.at < favouriteVersionsAge) return this.versions.read;
+    const read = this.readFavouriteVersions().catch(() => undefined);
+    const versions = { at: Date.now(), read };
+    this.versions = versions;
+    // A failed read is tried again with the next question.
+    void read.then(answer => { if (!answer && this.versions === versions) this.versions = undefined; });
+    if (!this.savedVersionsUsed) {
+      this.savedVersionsUsed = true;
+      const saved = await readCache<SavedVersions>(favouriteVersionsFile, this.options.cacheDir ?? cacheDir);
+      if (saved?.base === this.base && Array.isArray(saved.songs)) return this.versionsOf(saved.songs);
+    }
+    return read;
+  }
+
+  private async readFavouriteVersions(): Promise<Versions> {
+    const playlist = (await this.playlists()).find(item => item.favourite);
+    const songs: Media[] = [];
+    // Four pages at a time, so a list of two thousand songs takes a few seconds.
+    for (let offset = 0, more = !!playlist; more && offset < 50000; offset += 400) {
+      const pages = await Promise.all([0, 100, 200, 300].map(step => this.songs(playlist!.id, offset + step)));
+      for (const page of pages) { songs.push(...page.items); if (!page.more) { more = false; break; } }
+    }
+    await this.readIsrcs(songs.flatMap(song => song.catalogId ? [song.catalogId] : []));
+    const saved = songs.map(song => ({ id: song.id, type: song.type, name: song.name, artist: song.artist, album: "", duration: song.duration,
+      ...song.catalogId ? { catalogId: song.catalogId } : {}, ...song.reportingId ? { reportingId: song.reportingId } : {},
+      ...this.isrcOf(song.catalogId) ? { isrc: this.isrcOf(song.catalogId) } : {} }));
+    await saveJson(favouriteVersionsFile, { base: this.base, songs: saved } satisfies SavedVersions, this.options.cacheDir ?? cacheDir).catch(() => {});
+    return this.versionsOf(saved);
+  }
+
+  // Apple updates Favourite Songs a little after a favourite is removed, so a song removed in the
+  // last few minutes stays out although the list still holds it.
+  private versionsOf(songs: (Media & { isrc?: string })[]) {
+    const forgotten = new Versions(this.forgotten.filter(entry => Date.now() - entry.at < forgottenAge).flatMap(entry => entry.songs));
+    return new Versions(songs.filter(song => !forgotten.has(song)));
+  }
+
+  favouritesChanged() { this.versions = undefined; }
+  private forgotten: { at: number; songs: (Media & { isrc?: string })[] }[] = [];
+
+  // Removes the mark from the song and from every version of it in Favourite Songs.
+  async forgetFavourite(song: Media) {
+    const versions = this.options.favouriteVersions === false ? undefined : await this.favouriteVersions();
+    if (song.catalogId && !song.isrc) await this.readIsrcs([song.catalogId]);
+    const isrc = song.isrc ?? this.isrcOf(song.catalogId);
+    const all = [{ ...song, isrc }, ...versions?.of(song, isrc) ?? []];
+    this.forgotten = [...this.forgotten.filter(entry => Date.now() - entry.at < forgottenAge), { at: Date.now(), songs: all }];
+    const paths = new Set(all.flatMap(item => [
+      ...item.id.startsWith("i.") ? [`v1/me/ratings/library-songs/${encodeURIComponent(item.id)}`] : [],
+      ...item.catalogId ? [`v1/me/ratings/songs/${encodeURIComponent(item.catalogId)}`] : [],
+    ]));
+    try { await Promise.all([...paths].map(path => this.request(path, { method: "DELETE" }))); }
+    finally { this.favouritesChanged(); }
+  }
+
+  // ISRCs of catalog songs, read 300 at a time and kept. An ID Apple no longer serves is kept
+  // as unknown, so it is not asked again.
+  private isrcs = new Map<string, string>();
+  private isrcOf(catalogId?: string) { return catalogId ? this.isrcs.get(catalogId) || undefined : undefined; }
+  private async readIsrcs(ids: string[]) {
+    const missing = [...new Set(ids)].filter(id => /^\d+$/.test(id) && !this.isrcs.has(id));
+    const batches = Array.from({ length: Math.ceil(missing.length / 300) }, (_, index) => missing.slice(index * 300, index * 300 + 300));
+    await Promise.all(batches.map(async batch => {
+      try {
+        const response = await this.request(`v1/catalog/$STOREFRONT/songs?ids=${batch.join(",")}`);
+        for (const id of batch) this.isrcs.set(id, "");
+        for (const song of response.data ?? []) if (song.attributes?.isrc) this.isrcs.set(String(song.id), String(song.attributes.isrc));
+      } catch {}
+    }));
   }
 
   // Apple keeps an album's favourite mark on the catalog album, which library albums reach through
