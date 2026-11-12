@@ -72,6 +72,8 @@
 #define PLAYBACK_PERIOD_COUNT 4
 #define PLAYBACK_PERIOD_START_THRESHOLD 2
 #define PLAYBACK_CODEC_SAMPLING_RATE 48000
+/* Peel: frames the ALSA device buffers at 48 kHz, scaled to the stream's rate (out_alsa_buffer_frames). */
+#define PLAYBACK_BUFFER_FRAMES_48K 4096
 #define MIN_WRITE_SLEEP_US      2000
 
 struct alsa_audio_device {
@@ -157,6 +159,18 @@ static void select_devices(struct alsa_audio_device *adev)
     ALOGV("hp=%c speaker=%c headset-mic=%c", headphones_on ? 'y' : 'n', speaker_on ? 'y' : 'n', headset_mic_on ? 'y' : 'n');
 }
 
+/* Peel: the frames the ALSA device holds at a rate. PipeWire feeds a device that cannot switch to
+ * the stream's rate, such as a 48 kHz headset, in steps of its quantum, usually 1024 and at most
+ * 2048 frames at 48 kHz. Each step needs that many frames scaled to the stream's rate: about 1650
+ * at 88.2 kHz for a quantum of 900. A buffer of AudioFlinger's 1024 frames can never hold one
+ * step, so PipeWire waits for frames the buffer cannot take and the write never returns. 4096
+ * frames at 48 kHz, scaled the same way, hold two of the largest steps at every rate. */
+static snd_pcm_uframes_t out_alsa_buffer_frames(unsigned int rate)
+{
+    uint64_t frames = (uint64_t)PLAYBACK_BUFFER_FRAMES_48K * rate / PLAYBACK_CODEC_SAMPLING_RATE;
+    return (snd_pcm_uframes_t)((frames + 255) / 256 * 256);
+}
+
 /* must be called with hw device and output stream mutexes locked */
 static int start_output_stream(struct alsa_stream_out *out)
 {
@@ -174,7 +188,10 @@ static int start_output_stream(struct alsa_stream_out *out)
     unsigned int pcm_retry_count = PCM_OPEN_RETRIES;
  
     while (1) {
-        ret = snd_pcm_open(&out->pcm, "pulse", SND_PCM_STREAM_PLAYBACK, 0);
+        /* Peel: non-blocking, so a device that stops taking frames returns -EAGAIN. out_write then
+         * waits at most about a second, closes the output and opens it again with the next write,
+         * where a blocking write would wait forever and stall every later song. */
+        ret = snd_pcm_open(&out->pcm, "pulse", SND_PCM_STREAM_PLAYBACK, SND_PCM_NONBLOCK);
         if (ret < 0) {
             if (out->pcm != NULL) {
                 snd_pcm_close(out->pcm);
@@ -222,8 +239,7 @@ static int start_output_stream(struct alsa_stream_out *out)
         goto fail;
     }
 
-    snd_pcm_uframes_t num_frames = out_get_buffer_size((struct audio_stream *)out) /
-                                   audio_stream_out_frame_size((struct audio_stream_out *)out);
+    snd_pcm_uframes_t num_frames = out_alsa_buffer_frames(out->config.rate);
     if (snd_pcm_hw_params_set_buffer_size(out->pcm, hwparams, num_frames) < 0) {
         ALOGE("Error setting buffer size.\n");
         goto fail;
@@ -485,7 +501,8 @@ static uint32_t out_get_latency(const struct audio_stream_out *stream)
 {
     ALOGV("out_get_latency");
     struct alsa_stream_out *out = (struct alsa_stream_out *)stream;
-    return (PLAYBACK_PERIOD_SIZE * PLAYBACK_PERIOD_COUNT * 1000) / out->config.rate;
+    /* Peel: the ALSA buffer, which now holds more than AudioFlinger's periods. */
+    return (uint32_t)((uint64_t)out_alsa_buffer_frames(out->config.rate) * 1000 / out->config.rate);
 }
 
 static int out_set_volume(struct audio_stream_out *stream, float left,

@@ -10,5 +10,11 @@ trap 'rm -rf "$build"' EXIT
 sed -n '/^static ssize_t out_write(/,/^static int out_get_render_position(/p' "$here/../../android/audio_hw.c" | sed '$d' > "$build/out_write.c"
 "${CC:-cc}" -std=gnu11 -Wall -Wno-unused-function -I"$build" "$here/hal-write.c" -o "$build/hal-write" -lpthread
 timeout 10 "$build/hal-write"
+# The driver's buffer size for each rate, with the constants it reads.
+grep -E '^#define (PLAYBACK_BUFFER_FRAMES_48K|PLAYBACK_CODEC_SAMPLING_RATE) ' "$here/../../android/audio_hw.c" > "$build/buffer_frames.c"
+[ "$(wc -l < "$build/buffer_frames.c")" -eq 2 ] || { echo "FAIL could not find the buffer constants in audio_hw.c"; exit 1; }
+sed -n '/^static snd_pcm_uframes_t out_alsa_buffer_frames(/,/^}/p' "$here/../../android/audio_hw.c" >> "$build/buffer_frames.c"
+"${CC:-cc}" -std=gnu11 -Wall -I"$build" "$here/hal-buffer.c" -o "$build/hal-buffer"
+"$build/hal-buffer"
 bash "$here/health.sh"
 bash "$here/update.sh"
