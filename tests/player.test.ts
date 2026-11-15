@@ -854,15 +854,29 @@ describe("the compact player", () => {
   });
 
   test.each([
-    ["hi-res above 48 kHz", "hires", 96000, "Hi-Res Lossless · 96 kHz"],
-    ["hi-res at 44.1 kHz", "hires", 44100, "Lossless · 44.1 kHz"],
-    ["hi-res before the rate is known", "hires", undefined, "Lossless"],
-    ["the web engine", undefined, undefined, "AAC · 256 kbps"],
-  ] as const)("the quality tag names %s", async (_, version, rate, label) => {
+    ["hi-res above 48 kHz", "hires", 96000, 96000, "Hi-Res Lossless · 96 kHz"],
+    ["hi-res at 44.1 kHz", "hires", 44100, 44100, "Lossless · 44.1 kHz"],
+    ["hi-res before the rate is known", "hires", undefined, undefined, "Lossless"],
+    ["hi-res before the song's rate is known, without Android's rate", "hires", undefined, 192000, "Lossless"],
+    ["a song Android resamples", "hires", 44100, 192000, "Lossless · 44.1 kHz resampled to 192 kHz"],
+    ["a hi-res song Android resamples", "hires", 96000, 48000, "Hi-Res Lossless · 96 kHz resampled to 48 kHz"],
+    ["the web engine", undefined, undefined, undefined, "AAC · 256 kbps"],
+  ] as const)("the quality tag names %s", async (_, version, rate, output, label) => {
     const app = await setup(120, 30, undefined, undefined, { version });
-    if (rate) { app.playback.sampleRate = rate; await app.model.refresh(); await app.flush(); }
+    if (rate || output) { app.playback.sampleRate = rate; app.playback.outputRate = output; await app.model.refresh(); await app.flush(); }
     const quality = app.renderer.root.findDescendantById("quality")!;
     expect(cells(app)[quality.y]!.join("")).toContain(`${icon.capLeft}${label}${icon.capRight}`);
+  });
+
+  // The rate of a resampled song is never shown alone, as if Android sent it at that rate. Narrower
+  // rows keep the word, in a shorter label.
+  test.each([[100, "Lossless · 44.1 kHz resampled to 192 kHz"], [70, "44.1 kHz resampled to 192 kHz"], [60, "Resampled"]] as const)("a resampled song's tag says so at %i columns", async (width, label) => {
+    const app = await setup(width, 24, undefined, undefined, { version: "hires" });
+    app.playback.sampleRate = 44100; app.playback.outputRate = 192000; await app.model.refresh(); await app.flush();
+    const quality = app.renderer.root.findDescendantById("quality")!;
+    expect(quality.visible).toBe(true);
+    expect(cells(app)[quality.y]!.join("")).toContain(`${icon.capLeft}${label}${icon.capRight}`);
+    expect(quality.x + quality.width).toBeLessThanOrEqual(width - 1);
   });
 
   // Before, a long device name pushed the devices button past the window below 76 columns.

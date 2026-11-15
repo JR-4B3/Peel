@@ -143,15 +143,24 @@ export class PlayerPanel {
 
   // What the player streams: Apple's lossless ALAC through the hi-res player, at the song's own
   // rate, or AAC at the quality chosen in Settings. Apple calls rates above 48 kHz Hi-Res Lossless.
-  // The second label is the short one for narrow rows, without the rate.
-  private qualityLabels(): [string, string] {
-    const rate = this.model.playback.sampleRate;
+  // When Android sends the song at another rate than its own, the tag says it is resampled. Later
+  // labels are shorter ones for narrow rows.
+  private qualityLabels(): string[] {
+    const { sampleRate: rate, outputRate: output } = this.model.playback;
     if (this.model.player.lossless) {
       const hires = !!rate && rate > 48000;
       const name = hires ? "Hi-Res Lossless" : "Lossless";
-      return [rate ? `${name} · ${Number((rate / 1000).toFixed(1))} kHz` : name, hires ? "Hi-Res" : "Lossless"];
+      const kHz = (hz: number) => `${Number((hz / 1000).toFixed(1))} kHz`;
+      if (rate && output && output !== rate) return [`${name} · ${kHz(rate)} resampled to ${kHz(output)}`, `${kHz(rate)} resampled to ${kHz(output)}`, "Resampled"];
+      return [rate ? `${name} · ${kHz(rate)}` : name, hires ? "Hi-Res" : "Lossless"];
     }
     return [this.model.preferences.quality === "standard" ? "AAC · 64 kbps" : "AAC · 256 kbps", "AAC"];
+  }
+
+  // A resampled song shows its tag in the muted colour, like AAC, since it is not bit-perfect.
+  private resampled() {
+    const { sampleRate: rate, outputRate: output } = this.model.playback;
+    return this.model.player.lossless && !!rate && !!output && output !== rate;
   }
 
   draw() {
@@ -188,7 +197,7 @@ export class PlayerPanel {
     const wanted = Math.min(12, Bun.stringWidth(artist ? `${name}  ${artist}` : name));
     const quality = this.qualityLabels().find(text => this.deckWidth - fixed - tagWidth(text) >= wanted);
     this.quality.visible = shown && !!quality;
-    if (quality) this.quality.content = tag(quality, this.model.player.lossless ? colour.accent : colour.muted);
+    if (quality) this.quality.content = tag(quality, this.model.player.lossless && !this.resampled() ? colour.accent : colour.muted);
     // A name too long for the room left ends in an ellipsis. The artist after it gets what remains.
     const room = this.deckWidth - fixed - (quality ? tagWidth(quality) : 0);
     const title = fit(name, Math.max(1, room));

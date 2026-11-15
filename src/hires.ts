@@ -220,7 +220,9 @@ const STOPPED = 1, PAUSED = 2, PLAYING = 3, BUFFERING = 6, CONNECTING = 8;
 const stopped = (state: { state?: number }) => state.state === PAUSED || state.state === STOPPED || state.state === 0;
 const repeats = ["none", "one", "all"] as const;
 
-interface Control { state?: number; position?: number; item?: number; title?: string; artist?: string; album?: string; id?: string; duration?: number; error?: string }
+// mixerRate is the rate Android mixes at. songRate is the rate of the audio track Apple Music
+// plays the entry rateItem on, which is that song's own rate.
+interface Control { state?: number; position?: number; item?: number; title?: string; artist?: string; album?: string; id?: string; duration?: number; error?: string; mixerRate?: number; songRate?: number; rateItem?: number }
 interface Entry { queueId: number; song: Media; added: boolean; unknown?: boolean }
 interface Listed { song: Media; added: boolean; at: number }
 
@@ -238,7 +240,7 @@ const batchOf = (id: number) => Math.floor(id / 2 ** 32);
 // caller reads Apple Music's state to see whether it took effect.
 export class Uncertain extends Error {}
 // Commands that set a value, or only read, have the same effect when Android receives them twice.
-const repeatable = new Set(["ping", "state", "queue", "volume", "repeat", "shuffle", "autoplay", "seek", "pause", "stop", "play", "skip", "restart"]);
+const repeatable = new Set(["ping", "state", "queue", "volume", "repeat", "shuffle", "autoplay", "seek", "pause", "stop", "play", "skip", "restart", "rebind"]);
 
 // One line-based connection to the controller in Android. Requests go one at a time.
 class Controller {
@@ -504,7 +506,8 @@ export async function runHiresHost() {
   // 40 a second in normal playback.
   //
   // A silent song once followed a song at another rate: its track opened while the mixer still ran
-  // at the old rate, and the mixer switched in the same moment the song started. So when the
+  // at the old rate, and the mixer switched in the same moment the song started. The controller now
+  // keeps such tracks playing through a switch, and this watcher stays as the backstop. So when the
   // stream's rate differs from the one read before, the song's first check comes at 1.5 seconds,
   // a check follows every second, and fastLimit of zeros counts. That ends once the song sounds,
   // or after fastChecks checks that heard no sound, for example with the stream muted on the
@@ -516,9 +519,10 @@ export async function runHiresHost() {
   const checkEvery = Math.min(5000, silenceLimit / 2);
   const fastLimit = Math.min(3000, silenceLimit), fastEvery = Math.min(1000, fastLimit / 2), fastChecks = 10;
   const silenceAgain = Number(process.env.PEEL_HIRES_SILENCE_AGAIN_MS) || 60000;
-  let silent: { item?: number; since: number } | undefined, listened = 0, silenced = 0, quiet: number | undefined;
+  let silent: { item?: number; since: number } | undefined, listened = 0, silenced = 0, quiet: number | undefined, rebound: number | undefined;
   // The stream's rate as last read and the entry it was read for, and the entry whose stream
-  // changed rate with the fast checks it has left. The player's quality tag shows the same rate.
+  // changed rate with the fast checks it has left. The quality tag uses it as the rate Android sends
+  // only when the controller does not report its mixer's rate.
   let heard: { item?: number; rate: number } | undefined, switched: { item?: number; left: number } | undefined;
   function noteRate(item: number | undefined, rate: number | undefined) {
     if (!rate) return;
@@ -539,12 +543,11 @@ export async function runHiresHost() {
   }
   const early = (item: number | undefined) => (current.position ?? 0) < 3000 && !fastFor(item);
 
-  // Android's streams are read in this one place, for the rate on the player's quality tag and for
-  // the silence watcher, so the two never disagree and pactl never runs twice for one moment. It
-  // reads from Android's stream in PipeWire, not from the controller, whose rate lookups can wait
-  // seconds on Android's mixer. The controller switches the mixer to each song's own rate about a
-  // second after the song changes, so a song's first reading comes 1.5 seconds after the host saw
-  // it start, or sooner once its position reaches 1.5 seconds while the silence watcher listens.
+  // Android's streams are read in this one place, for the silence watcher and for the rate Android
+  // sends when the controller does not report it, so pactl never runs twice for one moment. The
+  // controller switches the mixer to each song's own rate within about a second of the song
+  // change, so a song's first reading comes 1.5 seconds after the host saw it start, or sooner
+  // once its position reaches 1.5 seconds while the silence watcher listens.
   // That reading tells the silence watcher whether the rate changed, and when it did, the watcher
   // records at once from the same listing. After that a reading comes whenever the silence watcher
   // is due to check, every checkEvery or every fastEvery after a rate change. While it does not
@@ -582,6 +585,15 @@ export async function runHiresHost() {
       return;
     }
     say(`heard only zeros${fast ? " after the stream changed rate" : ""}: ${where(rate)}`);
+    // A track that Android's mixer left on its old buffer when it changed rate stays silent until
+    // the track moves to the new one. The controller moves every track at once, which changes
+    // nothing for a song that is silent on purpose, so the first zeros after a rate change ask for
+    // it before any restart.
+    if (fast && rebound !== item) {
+      rebound = item;
+      void control.request("rebind").then(answer => say(`moved Android's tracks to the mixer's current buffer (${answer.sessions ?? 0} sessions): ${spot()}`))
+        .catch(error => say(`could not move Android's tracks to the mixer's current buffer: ${message(error)}`));
+    }
     const since = silent && silent.item === item ? silent.since : listened;
     silent = { item, since };
     if (listened - since < (fast ? fastLimit : silenceLimit)) return;
@@ -598,7 +610,7 @@ export async function runHiresHost() {
 
   type Stream = { index: number; corked?: boolean; mute?: boolean; volume?: Record<string, { value?: number }>; sample_specification?: string; properties?: Record<string, string> };
   // Android's playing streams in PipeWire, or undefined without PulseAudio's tools. Only
-  // readStreams runs it, so each pactl run serves the quality tag and the silence watcher alike.
+  // readStreams runs it, so each pactl run serves the silence watcher and the rate it reads alike.
   async function streams(): Promise<Stream[] | undefined> {
     if (!Bun.which("pactl")) return undefined;
     const list = Bun.spawn(["pactl", "-f", "json", "list", "sink-inputs"], { stdout: "pipe", stderr: "ignore" });
@@ -608,7 +620,7 @@ export async function runHiresHost() {
   }
   const rateOf = (stream: Stream) => Number(/(\d+)Hz/.exec(stream.sample_specification ?? "")?.[1]) || undefined;
   // The rate Android's mixer runs at, from a listing of streams(). This is the one place that
-  // decides which stream plays, for the quality tag and the silence watcher alike. It takes the
+  // decides which stream plays, for the silence watcher and the rate it reads alike. It takes the
   // newest stream, the one with the highest index, since PipeWire counts its indexes up. Android
   // has two streams open only for a moment: when the mixer changes rate, as during a song change,
   // Android's driver opens a new stream at the new rate while the old one is still listed, and
@@ -997,6 +1009,15 @@ export async function runHiresHost() {
     if (playingSong()?.id === song.id && value !== undefined) rated = { id: song.id, value, checked: Date.now() };
   }
 
+  // The playing song's own rate, from the audio track Apple Music plays it on, and the rate
+  // Android mixes at, which the stream in PipeWire also runs at. The two differ when the
+  // controller could not switch the mixer, and then Android resamples the song.
+  function rates(): Pick<Playback, "sampleRate" | "outputRate"> {
+    const song = current.rateItem === current.item ? current.songRate : undefined;
+    const output = current.mixerRate ?? knownRate();
+    return { ...song ? { sampleRate: song } : {}, ...output ? { outputRate: output } : {} };
+  }
+
   function playback(): Playback {
     if (current.title) lookUp();
     const song = playingSong();
@@ -1011,7 +1032,7 @@ export async function runHiresHost() {
       } : null,
       time: { currentTime: (current.position ?? 0) / 1000, duration: (current.duration ?? 0) / 1000 },
       volume, repeatMode: repeats[repeat] ?? "none", shuffleMode: shuffle, queueRevision: revision(),
-      ...(knownRate() && current.title ? { sampleRate: knownRate() } : {}),
+      ...current.title ? rates() : {},
       ...(notice ? { error: notice } : current.error ? { error: current.error } : note && Date.now() <= note.until ? { error: note.text } : {}),
     };
   }
