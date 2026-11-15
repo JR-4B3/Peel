@@ -19,13 +19,15 @@ try {
     await (await import("./remote-host")).runRemoteHost();
   } else if (process.argv.includes("--stop-host")) {
     await Promise.allSettled([new Engine().quit(), new Hires().quit()]);
+  } else if (process.argv.includes("--try")) {
+    process.exitCode = await (await import("./try")).runTry(process.argv.slice(2));
   } else if (process.argv.includes("--install-launcher")) {
     process.exitCode = await installLauncher();
   } else if (process.argv.includes("--version")) {
     const build = await currentBuild();
     console.log(build ? `Peel ${build.version} (${build.channel}, ${build.commit.slice(0, 7)}, built ${build.date})` : "Peel from a source folder");
   } else if (process.argv.includes("--help")) {
-    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote HOST  Control HOST through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\npeel --install-launcher  Write the peel command and the menu entry again\n\nWhere hi-res (hires/) is installed, Peel plays through it. Set PEEL_PLAYER=web for the web engine.");
+    console.log("Peel, an OpenTUI Apple Music interface\n\nbun run connect  Sign in to Apple Music once\nbun start        Open the player\n\nAn Apple Music subscription is required.\nPress d in Peel to choose which device on the network plays.\n\npeel --remote HOST  Control HOST through SSH, keeping its queue there\npeel --local        Control this computer\npeel --stop-host    Stop the playback engine on this computer at once\npeel --install-launcher  Write the peel command and the menu entry again\npeel --try [NUMBER]  Start the code of pull request NUMBER, or of the open pull request changed last\npeel --try main     Start the newest code on main before the nightly release has it\n\nWhere hi-res (hires/) is installed, Peel plays through it. Set PEEL_PLAYER=web for the web engine.");
   } else if (process.argv.includes("--connect")) {
     const engine = new Engine();
     await ensureEngine(engine, console.log);

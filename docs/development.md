@@ -38,6 +38,14 @@ bun start
 
 On Linux with a systemd user session, the engine runs as the `peel-engine` user unit and the hi-res host as `peel-hires-host`, both in `app-peel.slice`. Without systemd, the engine runs as a detached process and logs to `engine.log` in its profile folder.
 
+## Trying a pull request
+
+`peel --try 118` starts Peel from the code of pull request #118 without a checkout and without changing the installed Peel. `peel --try` without a number takes the open pull request that changed last, and `peel --try main` takes the newest commit on `main` before the nightly release has it. Other options, such as `--local`, pass through to the test build.
+
+Peel downloads each commit from GitHub once into a `try` folder beside its versions (on Linux `~/.local/share/peel/try`), runs `bun install`, and starts it in the same terminal. It keeps the three test builds used last. A new push to the pull request is a new commit, so the same command picks it up. A test build never updates itself. Closing it and running `peel` returns to the installed Peel.
+
+A test build counts as the newest build while it runs, so it restarts the hi-res host with its own code. When it closes and no other Peel uses that host, it stops the host, and the next Peel starts the host from its own code. A test build that controls another computer over SSH uses the Peel installed there.
+
 ## Files and variables
 
 | System | Settings and sign-in | Cache | Engine profile |
