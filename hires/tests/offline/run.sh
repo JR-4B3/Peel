@@ -18,3 +18,4 @@ sed -n '/^static snd_pcm_uframes_t out_alsa_buffer_frames(/,/^}/p' "$here/../../
 "$build/hal-buffer"
 bash "$here/health.sh"
 bash "$here/update.sh"
+bash "$here/control.sh"
