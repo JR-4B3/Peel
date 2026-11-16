@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ImageRenderable, RGBA } from "@opentui/core";
+import { ImageRenderable, RGBA, type TextRenderable } from "@opentui/core";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { AppleMusic } from "../src/apple";
 import { Engine } from "../src/engine";
 import { Model, parseFilter } from "../src/model";
 import { PeelUI } from "../src/ui";
+import { ClickList } from "../src/ui/click-list";
 import { type Home, type Media } from "../src/types";
 import { colour, icon } from "../src/theme";
 import { artworkUrl } from "../src/artwork";
@@ -895,6 +896,51 @@ describe("the compact player", () => {
     expect(app.ui.sidebar.selectedId()).toBe("songs");
     app.mockInput.pressEnter();
     await waitFor(() => app.model.view === "songs");
+  });
+
+  // Names wider than the tab row are cut with an ellipsis, so the chosen tab still shows and opens.
+  for (const name of [
+    "A playlist with a title much longer than the entire narrow terminal window width",
+    "とても長いプレイリストの名前は狭いウィンドウの幅よりずっと長いです🎧🎧🎧",
+  ]) test(`a tab named "${name.slice(0, 12)}…" fits the narrow tab row`, async () => {
+    const app = await setup(60, 24);
+    app.model.playlists.find(playlist => playlist.id === "p.chill")!.name = name;
+    app.model.changed();
+    app.ui.sidebar.focus(); app.ui.sidebar.selectKey("playlist:p.chill"); await app.flush();
+    const sidebar = app.ui.sidebar;
+    const tab = app.renderer.root.findDescendantById("sidebar:row:playlist:p.chill")!;
+    expect(tab).toBeDefined();
+    expect(tab.x).toBeGreaterThanOrEqual(sidebar.x);
+    expect(tab.x + tab.width).toBeLessThanOrEqual(sidebar.x + sidebar.width);
+    const label = tab.getChildren().at(-1) as TextRenderable;
+    expect(label.plainText.endsWith("…")).toBe(true);
+    expect(name.startsWith(label.plainText.slice(0, -1))).toBe(true);
+    expect(Bun.stringWidth(label.plainText)).toBeLessThanOrEqual(tab.width - 2);
+    const row = app.captureCharFrame().split("\n")[sidebar.y]!;
+    expect(row).toContain(name.slice(0, 6));
+    expect(row).toContain("…");
+    // A click on the cut tab opens its playlist.
+    await click(app, "sidebar:row:playlist:p.chill");
+    await waitFor(() => app.model.view === "playlist:p.chill");
+    // The keys move off the long tab and back, and each chosen tab shows.
+    app.ui.sidebar.focus(); app.mockInput.pressArrow("left"); await app.flush();
+    const before = app.ui.sidebar.selectedId()!;
+    expect(before).not.toBe("playlist:p.chill");
+    expect(app.renderer.root.findDescendantById(`sidebar:row:${before}`)).toBeDefined();
+    app.mockInput.pressArrow("right"); await app.flush();
+    expect(app.ui.sidebar.selectedId()).toBe("playlist:p.chill");
+    expect(app.renderer.root.findDescendantById("sidebar:row:playlist:p.chill")).toBeDefined();
+  });
+
+  test("the chosen tab shows even where its icon and an ellipsis do not fit", async () => {
+    const app = await createTestRenderer({ width: 3, height: 2 }); cleanup.push(() => app.renderer.destroy());
+    const tabs = new ClickList(app.renderer, "tabs", 1);
+    tabs.horizontal = true;
+    app.renderer.root.add(tabs);
+    tabs.setRows([{ id: "favourites", lead: icon.heart, name: "Favourite Songs", activate: () => {} }]);
+    await app.flush();
+    expect(tabs.getChildren().map(child => child.id)).toEqual(["tabs:row:favourites"]);
+    expect(app.captureCharFrame().split("\n")[0]).toContain(icon.heart);
   });
 
   test("the sidebar lists the library and the playlists apart, and editing moves an entry only within its group", async () => {
