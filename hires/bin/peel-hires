@@ -40,7 +40,8 @@ notify() {
 
 # Android's address over adb. Asking Waydroid takes about 0.1 seconds, and a start asks a few dozen
 # times, so the address is kept once known. adb_cache runs in this shell, not in a subshell, so
-# the address it keeps reaches every later call; a session start forgets it.
+# the address it keeps reaches every later call. Starting, stopping or restarting the session or
+# the container forgets it.
 ADB_TARGET=
 adb_cache() {
   [ -n "$ADB_TARGET" ] && return 0
@@ -136,6 +137,7 @@ cmd_session() {
     stop)
       systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service peel-hires-display.service 2>/dev/null || true
       session_running && waydroid session stop >/dev/null 2>&1 || true
+      ADB_TARGET=
       log "session stopped" ;;
     idle)  # run by Peel's hi-res host when the last Peel closes, while it still answers
       # An update, test or health check holds this lock while it uses Android, and stops Android
@@ -357,6 +359,7 @@ cmd_activate() {
 
 settle_container() {  # waits until the restarted container and its network are up
   local i
+  ADB_TARGET=
   for i in $(seq 30); do
     waydroid status 2>/dev/null | grep -q '^Container:\s*\(RUNNING\|STOPPED\)' && pgrep -x dnsmasq >/dev/null && break
     sleep 1
