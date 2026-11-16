@@ -2,7 +2,7 @@
 // Android or Apple. The simulated controller applies commands as Apple Music does, and each test
 // can make it fail a command, ignore it, or drop the connection after applying it.
 import { afterAll, beforeAll, beforeEach, expect, test } from "bun:test";
-import { closeSync, openSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { closeSync, openSync, readFileSync, rmSync, unlinkSync, writeFileSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, writeFile } from "node:fs/promises";
 import { createServer, type Server } from "node:net";
 import { tmpdir } from "node:os";
@@ -212,13 +212,15 @@ beforeAll(async () => {
   await mkdir(cache);
   await writeFile(join(cache, "apple-developer-token.json"), JSON.stringify({ token: "offline", expires: Date.now() + 7 * 86400000 }));
   // The simulated peel-hires records each call, answers `controller` with the controller's
-  // address, and takes half a second to stop Android.
+  // address, and takes half a second to stop Android, or 5 seconds while the idle-waits file
+  // exists, as when it waits for Android's audio to close. USR1 interrupts it, as it does the
+  // real one.
   const command = join(temporary, "controller"), log = join(temporary, "calls");
   await writeFile(command, [
     "#!/bin/sh",
     `echo "$*" >> '${log}'`,
     `[ "$1" = controller ] && printf '%s\\n' '{"host":"127.0.0.1","port":${controlPort},"key":"offline"}'`,
-    `[ "$1 $2" = "session idle" ] && { /bin/sleep 0.5; echo stopped >> '${log}'; }`,
+    `[ "$1 $2" = "session idle" ] && { trap "echo interrupted >> '${log}'; exit 0" USR1; echo waiting >> '${log}'; t=0.5; [ -e '${join(temporary, "idle-waits")}' ] && t=5; /bin/sleep $t & wait $!; echo stopped >> '${log}'; }`,
     "exit 0", "",
   ].join("\n"), { mode: 0o700 });
   // PulseAudio's tools, simulated: one playing Waydroid stream at the rate in the rate file,
@@ -1113,17 +1115,28 @@ test.skipIf(!supported)("the last Peel on this computer closing pauses the music
   expect(android.state).toBe(3);
 }, 20000);
 
-test.skipIf(!supported)("a Peel that attaches while Android stops plays after Android starts again", async () => {
-  await send("/release", {});
-  for (let attempt = 0; attempt < 100 && !(await calls()).includes("session idle"); attempt++) await Bun.sleep(20);
-  const before = (await calls()).length;
-  // Attaches and plays while Android is still stopping.
-  await play("201");
-  const after = (await calls()).slice(before - 1);
-  expect(after.indexOf("stopped")).toBeGreaterThanOrEqual(0);
-  expect(after.indexOf("controller")).toBeGreaterThan(after.indexOf("stopped"));
-  expect(android.queue.map(item => item.id)).toEqual(["201"]);
-  expect(await Promise.race([host.exited, Bun.sleep(1500).then(() => "running")])).toBe("running");
+// Standby belongs to the hi-res pipeline, which runs only on Linux. On macOS the simulated idle
+// missed the host's signal on CI, so the test runs on Linux only.
+test.skipIf(process.platform !== "linux")("a Peel that attaches while Android is put away interrupts it and plays without waiting", async () => {
+  // peel-hires waits up to 8 seconds for Android's audio to close after the pause.
+  writeFileSync(join(temporary, "idle-waits"), "");
+  try {
+    await send("/release", {});
+    // The simulated idle notes "waiting" once it handles USR1. A USR1 before that would end it
+    // without a word, as it ends the real one before its trap is set.
+    for (let attempt = 0; attempt < 100 && !(await calls()).includes("waiting"); attempt++) await Bun.sleep(20);
+    const before = (await calls()).length;
+    // Attaches and plays while idle is still waiting.
+    const started = Date.now();
+    await play("201");
+    expect(Date.now() - started).toBeLessThan(2500);
+    const after = (await calls()).slice(before - 1);
+    expect(after).not.toContain("stopped");
+    expect(after.indexOf("interrupted")).toBeGreaterThanOrEqual(0);
+    expect(after.indexOf("controller")).toBeGreaterThan(after.indexOf("interrupted"));
+    expect(android.queue.map(item => item.id)).toEqual(["201"]);
+    expect(await Promise.race([host.exited, Bun.sleep(1500).then(() => "running")])).toBe("running");
+  } finally { unlinkSync(join(temporary, "idle-waits")); }
 }, 20000);
 
 test.skipIf(!supported)("without the controller's mixer rate, the state reports the rate of Android's stream in PipeWire as the rate it sends", async () => {

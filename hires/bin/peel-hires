@@ -22,7 +22,11 @@ TEST_RATE=192000
 AGENT=off            # "claude" lets a Claude Code agent try to repair a failed update
 NOTIFY=on            # desktop notifications about updates
 APPLE_PLAY_TEST=on   # play a real hi-res song during tests, only when nothing is playing
+STANDBY_HOURS=24     # how long Android stays frozen in standby after the last Peel closes; 0 stops it
+IDLE_STREAM_SECONDS=8  # how long `session idle` waits for Android's audio to close after a pause
 [ -f "$CONFIG" ] && . "$CONFIG"
+[[ $STANDBY_HOURS =~ ^[0-9]+$ ]] || { printf 'peel-hires: STANDBY_HOURS must be a whole number of hours; using 24\n' >&2; STANDBY_HOURS=24; }
+[[ $IDLE_STREAM_SECONDS =~ ^[0-9]+$ ]] || IDLE_STREAM_SECONDS=8
 
 mkdir -p "$CACHE" "$STATE/reports"
 log() { printf '%s\n' "$*" >&2; }
@@ -106,7 +110,8 @@ wait_boot() {  # waits up to BOOT_TIMEOUT seconds (default 180) for Android to f
 }
 
 apple_playing() {  # true when Apple Music plays in Android or in Peel's web engine
-  if adb_target >/dev/null 2>&1 && adb_connect; then
+  # An Android in standby plays nothing, and adb would only wait for it until its timeouts.
+  if ! android_frozen && adb_target >/dev/null 2>&1 && adb_connect; then
     A shell dumpsys media_session 2>/dev/null | grep -A20 "package=$APPLE" | grep -q "state=PlaybackState {state=3" && return 0
   fi
   local key="${XDG_CONFIG_HOME:-$HOME/.config}/peel-engine/key.json"
@@ -122,12 +127,100 @@ apple_playing() {  # true when Apple Music plays in Android or in Peel's web eng
 
 session_running() { waydroid status 2>/dev/null | grep -q '^Session:\s*RUNNING'; }
 
+# --- Standby: Android frozen between uses ----------------------------------------------------
+
+# When the last Peel closes, Android is frozen instead of stopped. Freezing and waking each take
+# about 10 ms, so the next Peel plays without waiting for a boot. A frozen Android answers
+# nothing: adb waits until its timeouts. So everything that talks to Android wakes it first, or
+# treats it as not playing without asking it. Waydroid's session stays RUNNING meanwhile, and
+# `waydroid status` shows the container as FROZEN.
+STANDBY=$STATE/standby  # when standby began, in seconds since 1970
+android_frozen() { waydroid status 2>/dev/null | grep -q '^Container:\s*FROZEN'; }
+# Waydroid's container service freezes and wakes the container for the user, without root.
+container_call() {
+  timeout 10 busctl --system call id.waydro.Container /ContainerManager id.waydro.ContainerManager "$1" >/dev/null 2>&1 7>&- 9>&-
+}
+
+# Wakes Android from standby. Fails when it stays frozen.
+unfreeze_android() {
+  android_frozen || { rm -f "$STANDBY"; return 0; }
+  container_call Unfreeze || return 1
+  rm -f "$STANDBY"
+  ADB_TARGET=
+  log "Android woke from standby"
+}
+# Run before anything talks to Android. An Android that does not wake is stopped, so the caller
+# starts it anew instead of waiting on adb.
+thaw_android() {
+  unfreeze_android && return 0
+  log "Android does not wake from standby; stopping it"
+  cmd_session stop
+}
+# For commands run by hand that need Android: one in standby wakes for the command and goes back
+# into standby when it ends, through release_android.
+wake_for_command() {
+  android_frozen || return 0
+  trap release_android EXIT
+  thaw_android
+}
+
+# Freezes an Android no Peel uses. Fails, leaving it running, when standby is off or the freeze
+# does not work; the caller then stops it.
+standby_android() {
+  [ "$STANDBY_HOURS" -gt 0 ] || return 1
+  # Background apps would only take memory while Android sleeps. An Android adb can't reach may
+  # be broken, so it is stopped rather than kept.
+  adb_connect >/dev/null 2>&1 && ADB_TIMEOUT=10 A shell am kill-all >/dev/null 2>&1 ||
+    { log "adb can't reach Android; stopping it instead of keeping it in standby"; return 1; }
+  container_call Freeze && android_frozen || { log "Android could not be frozen; stopping it"; return 1; }
+  date +%s > "$STANDBY"
+  # Reclaiming takes a few seconds. It runs after the session lock is released (reclaim_later), so a
+  # Peel that opens meanwhile wakes Android without waiting, which also ends the reclaim.
+  RECLAIM=1
+  log "Android is in standby for up to $STANDBY_HOURS hours"
+}
+RECLAIM=
+reclaim_later() { [ -n "$RECLAIM" ] || return 0; RECLAIM=; reclaim_android; }
+
+# A frozen Android still holds about 1.5 GB, most of it its page cache and its own memory. The
+# root helper reclaims it: the page cache is dropped and the rest moves to compressed swap, which
+# leaves about 300 MB. A root helper installed before it could do this only lacks the saving, so
+# that is said once per installed helper.
+reclaim_android() {
+  local helper out
+  helper=$(sha256sum 2>/dev/null < "$ROOT_HELPER" | cut -c1-16) || helper=
+  helper=${helper:-unreadable}
+  [ "$(cat "$STATE/no-reclaim" 2>/dev/null)" = "$helper" ] && return 0
+  # Neither the helper nor the subshell waiting for it keeps the session or update lock, so a
+  # killed caller leaves no lock held while the helper still runs. A redirection on the function
+  # call would keep saved copies of both in the subshell.
+  if out=$(exec 7>&- 9>&-; root reclaim 2>&1); then log "$out"; return 0; fi
+  if grep -q "unknown verb" <<<"$out"; then
+    log "the installed root helper can't reclaim Android's memory in standby; reinstall it to save about 1.2 GB: sudo hires/install.sh \"\$USER\""
+    echo "$helper" > "$STATE/no-reclaim"
+  else
+    log "Android's memory was not reclaimed: $(tail -1 <<<"$out")"
+  fi
+}
+
+# Seconds since standby began. A frozen Android without a record, frozen by something else, counts
+# from now.
+standby_age() {
+  local since; since=$(cat "$STANDBY" 2>/dev/null) || since=
+  [[ $since =~ ^[0-9]+$ ]] || { since=$(date +%s); echo "$since" > "$STANDBY"; }
+  echo $(( $(date +%s) - since ))
+}
+standby_expired() { [ "$STANDBY_HOURS" = 0 ] || [ "$(standby_age)" -ge $((STANDBY_HOURS * 3600)) ]; }
+
 cmd_session() {
   case "${1:-status}" in
     start)
       local mode=headless; [ "${2:-}" = --visible ] && mode=visible
+      # Android stops more cleanly awake: a frozen one can't run its shutdown.
+      unfreeze_android || true
       systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service 2>/dev/null || true
       session_running && waydroid session stop >/dev/null 2>&1 || true
+      rm -f "$STANDBY"
       systemctl --user start "peel-hires-session@$mode.service" || die "the session did not start"
       ADB_TARGET=
       if ! wait_boot; then
@@ -146,17 +239,29 @@ cmd_session() {
       apply_android_settings
       log "session running ($mode)" ;;
     stop)
+      unfreeze_android || true
       systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service peel-hires-display.service 2>/dev/null || true
       session_running && waydroid session stop >/dev/null 2>&1 || true
+      rm -f "$STANDBY"
       ADB_TARGET=
       log "session stopped" ;;
     idle)  # run by Peel's hi-res host when the last Peel closes, while it still answers
-      # An update, test or health check holds this lock while it uses Android, and stops Android
-      # itself when it ends and no Peel uses it.
-      update_lock || { log "an update, test or health check is running; it stops Android when it ends"; return 0; }
+      # Peel's host sends USR1 when a Peel attaches meanwhile: Android then stays as it is.
+      local serial; serial=$(controller_serial)
+      trap 'IDLE_CANCELLED=1' USR1
+      # An update, test or health check holds this lock while it uses Android, and puts Android
+      # into standby or stops it itself when it ends and no Peel uses it.
+      update_lock || { log "an update, test or health check is running; it puts Android away when it ends"; return 0; }
+      wait_stream_closed "$serial"
       session_lock || return 0
-      stop_unused ;;
-    status) waydroid status ;;
+      if [ -n "$IDLE_CANCELLED" ] || [ "$(controller_serial)" != "$serial" ]; then
+        log "a Peel is using Android again; it keeps running"; return 0
+      fi
+      stop_unused
+      flock -u 7
+      reclaim_later ;;
+    status) waydroid status
+      if android_frozen; then echo "Standby: since $(date -d "@$(( $(date +%s) - $(standby_age) ))" '+%Y-%m-%d %H:%M')"; fi ;;
     run)  # used by the systemd unit: peel-hires session run <headless|visible>
       if [ "${2:-}" = headless ]; then export WAYLAND_DISPLAY=$HEADLESS_DISPLAY
       else export WAYLAND_DISPLAY=${WAYLAND_DISPLAY:-$(systemctl --user show-environment | sed -n 's/^WAYLAND_DISPLAY=//p')}; fi
@@ -166,13 +271,34 @@ cmd_session() {
   esac
 }
 
-# Android holds about 1.6 GB while it runs and boots in about 7 seconds, so it runs only while
-# Peel plays through it. Stops the session unless a sign-in window is open or Android plays audio.
+# Android holds about 1.6 GB while it runs, so it runs only while Peel plays through it. Without a
+# Peel it goes into standby (see standby_android), or stops when standby is off or fails. It keeps
+# running while a sign-in window is open or Android plays audio.
 stop_unused() {
   session_running || return 0
+  android_frozen && return 0
   systemctl --user -q is-active peel-hires-session@visible.service && { log "the sign-in window is open; Android keeps running"; return 0; }
   android_streaming && { log "Android is playing audio; it keeps running"; return 0; }
-  cmd_session stop
+  standby_android || cmd_session stop
+}
+
+# Each `peel-hires controller` writes a new value here as it starts, so `session idle` can tell that
+# a Peel asked for Android while it waited.
+controller_serial() { cat "$STATE/controller.serial" 2>/dev/null || true; }
+IDLE_CANCELLED=
+
+# The host pauses the music just before `session idle`, and Android's audio output stays open for
+# a few seconds after a pause, until Android's mixer closes it. So idle waits up to
+# IDLE_STREAM_SECONDS for it to close before deciding. It waits without the session lock, and
+# stops waiting when a controller starts or Peel's host signals that a Peel attached. A stream
+# still open after that is another app playing, and stop_unused leaves Android running.
+wait_stream_closed() {
+  local serial=$1 end=$(( $(date +%s%N) / 1000000 + IDLE_STREAM_SECONDS * 1000 ))
+  while [ "$(( $(date +%s%N) / 1000000 ))" -lt "$end" ]; do
+    [ -z "$IDLE_CANCELLED" ] && [ "$(controller_serial)" = "$serial" ] || return 0
+    session_running && android_streaming || return 0
+    sleep 0.5
+  done
 }
 
 # True while Peel's hi-res host (src/hires.ts) runs. Peel starts it as the peel-hires-host unit
@@ -199,11 +325,13 @@ session_lock() {
   flock -w 120 7 || { log "Android is being started or stopped elsewhere; leaving it as it is"; return 1; }
 }
 
-# Run by everything that holds the update lock, when it ends: stops Android unless a Peel uses it.
+# Run by everything that holds the update lock, when it ends: puts Android into standby or stops
+# it, unless a Peel uses it.
 release_android() {
   session_lock || return 0
   host_running || stop_unused || true
   flock -u 7
+  reclaim_later
 }
 # An earlier version turned these apps off to save about 60 MB. Without a home screen app or
 # with the persistent Phone app off, Android's boot slowed by 2 seconds or stalled, so they are
@@ -243,9 +371,11 @@ enable_apps() {
 }
 
 # Frees what Android accumulates over a day: Apple Music's caches (it grows from about 115 to
-# 475 MB) and background processes. Only while nothing plays; it starts again when needed.
+# 475 MB) and background processes. Only while nothing plays; it starts again when needed. An
+# Android in standby wakes for it; callers hold the update lock and put it back with release_android.
 trim_android() {
   apple_playing && return 0
+  thaw_android
   adb_connect || return 0
   A shell am force-stop "$APPLE" >/dev/null 2>&1 || true
   A shell am kill-all >/dev/null 2>&1 || true
@@ -501,9 +631,13 @@ apple_apk() { A shell pm path "$APPLE" 2>/dev/null | head -1 | sed 's/^package:/
 # left alone. The controller loads Apple's classes from its APK, so an update replaces it.
 cmd_controller() {
   local host dex build apk=""
+  # Tells a `session idle` that is waiting for Android's audio to close that a Peel wants Android.
+  date +%s%N > "$STATE/controller.serial"
   session_lock || die "Android is being started or stopped elsewhere"
   dex=$(build_dex Control) || exit 1
   build=$(basename "$(dirname "$dex")")
+  # The controller of an Android in standby still runs, and answers once Android wakes.
+  thaw_android
   if session_running && adb_connect >/dev/null 2>&1; then apk=$(apple_apk); fi
   if ! control_ping "$build" "$apk"; then
     session_running && adb_connect && [ "$(ADB_TIMEOUT=5 A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] || cmd_session start
@@ -638,6 +772,7 @@ t_rate_switch() {
 test_standalone() {
   update_lock || die "an update is running; wait for it with: peel-hires wait"
   trap release_android EXIT
+  thaw_android
   session_running || cmd_session start
   cmd_test
 }
@@ -702,6 +837,7 @@ cmd_setup() {
   preflight
   update_lock || die "an update is running; wait for it with: peel-hires wait"
   trap release_android EXIT
+  thaw_android
   session_running || cmd_session start
   id=$(cmd_build) || die "building the first release failed"
   cur=$(root list | sed -n 's/^current=//p')
@@ -723,6 +859,8 @@ cmd_update() {
   echo $$ > "$STATE/update.pid"
   trap 'rm -f "$STATE/update.pid"; release_android' EXIT
   if postpone "$force"; then return 75; fi
+  # Every step below talks to Android. One in standby goes back into standby when the update ends.
+  thaw_android
   local key; key="$(latest | awk '{print $2}' | tr '\n' ' ')$(inputs_hash) $(host_versions | sha256sum | cut -c1-8)"
   if [ "$force" = --force ] || [ "$(cat "$STATE/seen" 2>/dev/null)" != "$key" ]; then
     session_running || cmd_session start
@@ -797,8 +935,10 @@ EOF
 
 # --- Health -------------------------------------------------------------------------------------
 
-# True while Android sends audio to PipeWire, read on the host, so it works when adb doesn't.
+# True while Android sends audio to PipeWire, read on the host, so it works when adb doesn't. A
+# frozen Android's stream may stay open, but it plays nothing.
 android_streaming() {
+  android_frozen && return 1
   pactl -f json list sink-inputs 2>/dev/null | python3 -c 'import json, sys
 sys.exit(0 if any(s["properties"].get("application.name") == "Waydroid" and not s.get("corked") for s in json.load(sys.stdin)) else 1)'
 }
@@ -809,9 +949,26 @@ sys.exit(0 if any(s["properties"].get("application.name") == "Waydroid" and not 
 cmd_watchdog() {
   systemctl --user -q is-active peel-hires-session@headless.service || systemctl --user -q is-active peel-hires-session@visible.service || return 0
   update_lock || return 0
-  # Android left running without a Peel, for example after the host was killed, stops here.
+  # Android left running without a Peel, for example after the host was killed, goes into standby here.
   trap release_android EXIT
   local strikes=$STATE/watchdog.strikes problem=
+  # Android in standby answers nothing, and is healthy. It stops once standby has lasted longer
+  # than STANDBY_HOURS.
+  if android_frozen; then
+    rm -f "$strikes"
+    standby_expired || return 0
+    # A controller holds the session lock while it wakes Android, so a busy lock means a Peel is
+    # using it, and this run leaves it. Android may have woken before the lock was free, so both
+    # checks are made again under it.
+    exec 7>"$STATE/session.lock"
+    flock -n 7 || { log "watchdog: Android is being woken or started; leaving it"; return 0; }
+    if android_frozen && standby_expired; then
+      log "watchdog: Android was in standby for $STANDBY_HOURS hours; stopping it"
+      cmd_session stop
+    fi
+    flock -u 7
+    return 0
+  fi
   if ! session_running; then problem="the session is not running"
   elif ! adb_connect; then problem="adb can't reach Android"
   elif [ "$(ADB_TIMEOUT=10 A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" != 1 ]; then problem="Android is not booted"
@@ -865,7 +1022,14 @@ Last report: $(cat "$STATE/reports/last.json" 2>/dev/null)" \
 cmd_status() {
   root list
   echo
-  root probe 2>/dev/null || echo "container: not running"
+  # The root helper's probe runs a shell inside Android, which a frozen Android would never answer.
+  if android_frozen; then
+    echo "standby since $(date -d "@$(( $(date +%s) - $(standby_age) ))" '+%Y-%m-%d %H:%M'), for up to $STANDBY_HOURS hours"
+    local cg=/sys/fs/cgroup/lxc.payload.waydroid
+    [ -r "$cg/memory.current" ] && echo "container memory: $(( $(cat "$cg/memory.current") / 1048576 )) MB"
+  else
+    root probe 2>/dev/null || echo "container: not running"
+  fi
   echo
   systemctl --user list-timers peel-hires-update.timer --no-pager 2>/dev/null | sed -n 2p
   [ -f "$STATE/reports/last.json" ] && python3 - "$STATE/reports/last.json" <<'EOF'
@@ -879,7 +1043,7 @@ EOF
 
 case "${1:-help}" in
   status)   cmd_status ;;
-  build)    update_lock || die "an update is running; wait for it with: peel-hires wait"; cmd_build ;;
+  build)    update_lock || die "an update is running; wait for it with: peel-hires wait"; wake_for_command; cmd_build ;;
   activate) shift; cmd_activate "$@" ;;
   rollback) cmd_rollback ;;
   test)     test_standalone ;;
@@ -888,10 +1052,10 @@ case "${1:-help}" in
   preflight) preflight; log "ready for setup" ;;
   watchdog) cmd_watchdog ;;
   prune)    cmd_prune ;;
-  trim)     trim_android ;;
+  trim)     update_lock || die "an update is running; it trims Android when it ends"; trap release_android EXIT; trim_android ;;
   session)  shift; cmd_session "$@" ;;
   signin)   cmd_signin ;;
-  apple-update) shift; update_lock || die "an update is running; wait for it with: peel-hires wait"; cmd_apple_update "$@" ;;
+  apple-update) shift; update_lock || die "an update is running; wait for it with: peel-hires wait"; wake_for_command; cmd_apple_update "$@" ;;
   controller) cmd_controller ;;
   wait)     shift; cmd_wait "$@" ;;
   releases) root list ;;
@@ -909,7 +1073,8 @@ peel-hires: Apple Music in hi-res through a slimmed Waydroid
   rollback            switch back to the last confirmed release
   test                run the test suite against the active release, starting Android if needed
   session start [--visible] | stop | idle | status
-                      idle stops Android unless an update, a sign-in or Android's audio uses it
+                      idle puts Android into standby (frozen; see STANDBY_HOURS) or stops it,
+                      unless an update, a sign-in or Android's audio uses it; stop always stops it
   signin              open Apple Music visibly to sign in; hides it again when done
   apple-update        update the Apple Music app (checks Apple's signature)
   controller          start Android and Peel's playback controller if needed; prints where it listens
@@ -917,7 +1082,7 @@ peel-hires: Apple Music in hi-res through a slimmed Waydroid
   releases, remove ID manage built releases
   prune               delete old releases, stock Waydroid's images and cached image zips
   trim                restart Apple Music and stop background apps, unless music plays
-  watchdog            check Android's health; run every 5 minutes by a timer
+  watchdog            check Android's health and end standby after STANDBY_HOURS; run every 5 minutes by a timer
 EOF
   ;;
 esac

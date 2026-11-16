@@ -99,7 +99,7 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
   let current = await state();
   for (let restarts = 0; ;) {
     // A host started before Peel updated itself keeps running the old code, while the interface
-    // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
+    // runs the new one. The new host uses the Android the old one ran.
     if (current && outdated(current, mine, remote, running)) {
       if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} tries. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
       // others counts the Peels besides this one. A host that does not say counts as used.
@@ -1532,18 +1532,25 @@ export async function runHiresHost() {
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } };
   // `peel-hires session idle` leaves Android running while an update or a sign-in uses it. It runs
   // between controller requests, so a Peel that attaches meanwhile waits and its first request
-  // starts Android again, instead of playing into an Android that is stopping.
+  // starts Android again, instead of playing into an Android that is stopping. Idle first waits
+  // up to 8 seconds for Android's audio to close after the pause. A Peel that attaches sends it
+  // USR1, which ends that wait and leaves Android running, so the Peel doesn't wait for it.
+  let idle: ReturnType<typeof Bun.spawn> | undefined;
   const stopAndroid = () => control.exclusive(async () => {
     const command = hiresCommand();
     if (!command) return;
     const run = Bun.spawn([...command, "session", "idle"], { stdout: "ignore", stderr: "ignore" });
+    idle = run;
     const timer = setTimeout(() => run.kill(), 150000);
     await run.exited;
     clearTimeout(timer);
+    idle = undefined;
   });
+  // A Peel that asks the host to quit while Peels still use it starts a newer host right after,
+  // which uses the same Android, so Android keeps running then.
   const quit = async () => {
     await control.request("pause").catch(() => {});
-    await stopAndroid();
+    if (!owners.size) await stopAndroid();
     process.exit(0);
   };
   // A Peel that attaches while the last one leaves keeps the host: ownership is checked again
@@ -1602,7 +1609,10 @@ export async function runHiresHost() {
         if (!owners.size) setTimeout(() => void quitUnowned(), 10);
         return reply(200, null);
       }
-      if (known && !owners.has(owner)) owners.set(owner, request.headers.get("x-peel-remote") === "1");
+      if (known && !owners.has(owner)) {
+        owners.set(owner, request.headers.get("x-peel-remote") === "1");
+        idle?.kill("SIGUSR1");
+      }
       try {
         if (path === "/retain") return reply(200, null);
         if (path === "/state") {
