@@ -80,8 +80,12 @@ esac
 EOF
 fake pactl <<'EOF'
 #!/bin/bash
-# Android's stream, while $F/stream exists. A frozen Android's stream may stay listed, uncorked.
-if [ -f "$F/stream" ]; then echo '[{"properties": {"application.name": "Waydroid"}, "corked": false}]'; else echo '[]'; fi
+# Android's stream, while $F/stream exists or until the time in $F/stream-until (milliseconds),
+# as an output that Android closes a while after a pause. A frozen Android's stream may stay
+# listed, uncorked.
+open=; [ -f "$F/stream" ] && open=1
+[ -f "$F/stream-until" ] && [ "$(( $(date +%s%N) / 1000000 ))" -lt "$(cat "$F/stream-until")" ] && open=1
+if [ -n "$open" ]; then echo '[{"properties": {"application.name": "Waydroid"}, "corked": false}]'; else echo '[]'; fi
 EOF
 # flock, which can also stand for a Peel's controller that wakes Android while the caller waits
 # for the session lock.
@@ -137,9 +141,26 @@ fresh; setting STANDBY_HOURS=0; peel session idle
 expect "with standby off, idle stops Android" not running
 expect "with standby off, idle does not freeze" not called "busctl Freeze"
 
-fresh; touch "$F/stream"; peel session idle
+# After the host's pause, Android's output closes a few seconds later. Idle waits for that.
+now_ms() { echo $(( $(date +%s%N) / 1000000 )); }
+between() { [ "$1" -ge "$2" ] && [ "$1" -lt "$3" ]; }
+fresh; echo $(( $(now_ms) + 2000 )) >"$F/stream-until"; start=$(now_ms); peel session idle; took=$(( $(now_ms) - start ))
+expect "idle waits for Android's audio to close after the pause, then freezes it" in_standby
+expect "idle waited about 2 seconds for the audio to close ($took ms)" between "$took" 1800 5000
+# Still playing after the wait: another app plays, and Android keeps running.
+fresh; setting IDLE_STREAM_SECONDS=2; touch "$F/stream"; start=$(now_ms); peel session idle; took=$(( $(now_ms) - start ))
 expect "idle leaves Android running while it plays audio" running
 expect "idle does not freeze Android while it plays audio" not frozen
+expect "idle gives up waiting after IDLE_STREAM_SECONDS ($took ms)" between "$took" 1800 5000
+# Peel's host sends USR1 when a Peel attaches during the wait: idle ends and leaves Android.
+fresh; touch "$F/stream"; start=$(now_ms)
+bash "$HIRES/bin/peel-hires" session idle >"$F/out" 2>&1 </dev/null & idle=$!
+/bin/sleep 0.7; kill -USR1 "$idle"; rc=0; wait "$idle" || rc=$?; took=$(( $(now_ms) - start ))
+expect "idle handles the host's signal and ends cleanly" [ "$rc" = 0 ]
+expect "idle says a Peel uses Android again after the signal" grep -q "a Peel is using Android again" "$F/out"
+expect "a Peel attaching ends idle's wait ($took ms)" [ "$took" -lt 3000 ]
+expect "a Peel attaching during idle's wait leaves Android running" running
+expect "a Peel attaching during idle's wait leaves Android awake" not frozen
 
 fresh; touch "$F/freeze-fails"; peel session idle
 expect "a failed freeze stops Android" not running
@@ -220,6 +241,18 @@ expect "the controller wakes Android before using adb" before "busctl Unfreeze" 
 expect "the controller does not ask adb while frozen" no_adb_while_frozen
 expect "the controller reuses the running controller" not calls_like "systemctl --user start"
 expect "the controller leaves Android awake" not frozen
+# A controller that starts while idle waits for the audio to close: idle holds no lock it needs,
+# stops waiting, and leaves the Android the controller uses.
+touch "$F/stream"; : >"$F/calls"; start=$(now_ms)
+bash "$HIRES/bin/peel-hires" session idle >"$F/idle-out" 2>&1 </dev/null & idle=$!
+/bin/sleep 0.7; cstart=$(now_ms); peel controller; ctook=$(( $(now_ms) - cstart ))
+wait "$idle" || true; took=$(( $(now_ms) - start ))
+expect "a controller during idle's wait succeeds" [ "$(cat "$F/rc")" = 0 ]
+expect "a controller during idle's wait is not held up ($ctook ms)" [ "$ctook" -lt 3000 ]
+expect "idle stops waiting once a controller starts ($took ms)" [ "$took" -lt 4000 ]
+expect "idle does not freeze Android under the controller" not called "busctl Freeze"
+expect "Android stays awake and running for the controller" running
+expect "idle says a Peel uses Android again" grep -q "a Peel is using Android again" "$F/idle-out"
 kill "$server" 2>/dev/null || true; server=
 
 # Update and trim wake Android and put it back into standby when they end.

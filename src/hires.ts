@@ -1297,14 +1297,19 @@ export async function runHiresHost() {
   const alive = (pid: number) => { try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; } };
   // `peel-hires session idle` leaves Android running while an update or a sign-in uses it. It runs
   // between controller requests, so a Peel that attaches meanwhile waits and its first request
-  // starts Android again, instead of playing into an Android that is stopping.
+  // starts Android again, instead of playing into an Android that is stopping. Idle first waits
+  // up to 8 seconds for Android's audio to close after the pause. A Peel that attaches sends it
+  // USR1, which ends that wait and leaves Android running, so the Peel doesn't wait for it.
+  let idle: ReturnType<typeof Bun.spawn> | undefined;
   const stopAndroid = () => control.exclusive(async () => {
     const command = hiresCommand();
     if (!command) return;
     const run = Bun.spawn([...command, "session", "idle"], { stdout: "ignore", stderr: "ignore" });
+    idle = run;
     const timer = setTimeout(() => run.kill(), 150000);
     await run.exited;
     clearTimeout(timer);
+    idle = undefined;
   });
   const quit = async () => {
     await control.request("pause").catch(() => {});
@@ -1367,7 +1372,10 @@ export async function runHiresHost() {
         if (!owners.size) setTimeout(() => void quitUnowned(), 10);
         return reply(200, null);
       }
-      if (known && !owners.has(owner)) owners.set(owner, request.headers.get("x-peel-remote") === "1");
+      if (known && !owners.has(owner)) {
+        owners.set(owner, request.headers.get("x-peel-remote") === "1");
+        idle?.kill("SIGUSR1");
+      }
       try {
         if (path === "/retain") return reply(200, null);
         if (path === "/state") {

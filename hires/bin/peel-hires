@@ -23,8 +23,10 @@ AGENT=off            # "claude" lets a Claude Code agent try to repair a failed 
 NOTIFY=on            # desktop notifications about updates
 APPLE_PLAY_TEST=on   # play a real hi-res song during tests, only when nothing is playing
 STANDBY_HOURS=24     # how long Android stays frozen in standby after the last Peel closes; 0 stops it
+IDLE_STREAM_SECONDS=8  # how long `session idle` waits for Android's audio to close after a pause
 [ -f "$CONFIG" ] && . "$CONFIG"
 [[ $STANDBY_HOURS =~ ^[0-9]+$ ]] || { printf 'peel-hires: STANDBY_HOURS must be a whole number of hours; using 24\n' >&2; STANDBY_HOURS=24; }
+[[ $IDLE_STREAM_SECONDS =~ ^[0-9]+$ ]] || IDLE_STREAM_SECONDS=8
 
 mkdir -p "$CACHE" "$STATE/reports"
 log() { printf '%s\n' "$*" >&2; }
@@ -241,10 +243,17 @@ cmd_session() {
       ADB_TARGET=
       log "session stopped" ;;
     idle)  # run by Peel's hi-res host when the last Peel closes, while it still answers
+      # Peel's host sends USR1 when a Peel attaches meanwhile: Android then stays as it is.
+      local serial; serial=$(controller_serial)
+      trap 'IDLE_CANCELLED=1' USR1
       # An update, test or health check holds this lock while it uses Android, and puts Android
       # into standby or stops it itself when it ends and no Peel uses it.
       update_lock || { log "an update, test or health check is running; it puts Android away when it ends"; return 0; }
+      wait_stream_closed "$serial"
       session_lock || return 0
+      if [ -n "$IDLE_CANCELLED" ] || [ "$(controller_serial)" != "$serial" ]; then
+        log "a Peel is using Android again; it keeps running"; return 0
+      fi
       stop_unused
       flock -u 7
       reclaim_later ;;
@@ -268,6 +277,25 @@ stop_unused() {
   systemctl --user -q is-active peel-hires-session@visible.service && { log "the sign-in window is open; Android keeps running"; return 0; }
   android_streaming && { log "Android is playing audio; it keeps running"; return 0; }
   standby_android || cmd_session stop
+}
+
+# Each `peel-hires controller` writes a new value here as it starts, so `session idle` can tell that
+# a Peel asked for Android while it waited.
+controller_serial() { cat "$STATE/controller.serial" 2>/dev/null || true; }
+IDLE_CANCELLED=
+
+# The host pauses the music just before `session idle`, and Android's audio output stays open for
+# a few seconds after a pause, until Android's mixer closes it. So idle waits up to
+# IDLE_STREAM_SECONDS for it to close before deciding. It waits without the session lock, and
+# stops waiting when a controller starts or Peel's host signals that a Peel attached. A stream
+# still open after that is another app playing, and stop_unused leaves Android running.
+wait_stream_closed() {
+  local serial=$1 end=$(( $(date +%s%N) / 1000000 + IDLE_STREAM_SECONDS * 1000 ))
+  while [ "$(( $(date +%s%N) / 1000000 ))" -lt "$end" ]; do
+    [ -z "$IDLE_CANCELLED" ] && [ "$(controller_serial)" = "$serial" ] || return 0
+    session_running && android_streaming || return 0
+    sleep 0.5
+  done
 }
 
 # True while Peel's hi-res host (src/hires.ts) runs. Peel starts it as the peel-hires-host unit
@@ -600,6 +628,8 @@ apple_apk() { A shell pm path "$APPLE" 2>/dev/null | head -1 | sed 's/^package:/
 # left alone. The controller loads Apple's classes from its APK, so an update replaces it.
 cmd_controller() {
   local host dex build apk=""
+  # Tells a `session idle` that is waiting for Android's audio to close that a Peel wants Android.
+  date +%s%N > "$STATE/controller.serial"
   session_lock || die "Android is being started or stopped elsewhere"
   dex=$(build_dex Control) || exit 1
   build=$(basename "$(dirname "$dex")")
