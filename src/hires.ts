@@ -343,7 +343,8 @@ class Controller {
   request(command: string): Promise<any> {
     const safe = repeatable.has(command.split(" ")[0]!);
     const uncertain = () => new Uncertain(`Apple Music may not have received "${command.split(" ")[0]}".`);
-    const run = async (retry: boolean): Promise<any> => {
+    // While Apple Music starts, waiting returns its no-session answer instead of throwing it.
+    const run = async (retry: boolean, waiting = false): Promise<any> => {
       await this.connect();
       const answer = await new Promise<string>((resolve, reject) => {
         this.waiting.push(resolve);
@@ -353,10 +354,17 @@ class Controller {
       const value = JSON.parse(answer);
       if (value?.error === "closed" && !safe) throw uncertain();
       if (value?.error === "closed" && retry) return run(false);
+      if (value?.error === "no-session" && waiting) return value;
       if (value?.error === "no-session" && retry) {
         // Apple Music's playback service is not running. A pause key starts it without playing.
+        // Its session usually shows within a second. The command did nothing without a session,
+        // so it is asked again until one answers, for up to 5 seconds.
         Bun.spawnSync(["adb", "-s", `${this.access!.host}:5555`, "shell", "cmd", "media_session", "dispatch", "pause"], { stdout: "ignore", stderr: "ignore" });
-        await sleep(1500);
+        for (const end = Date.now() + 5000; Date.now() < end;) {
+          await sleep(100);
+          const again = await run(false, true);
+          if (again?.error !== "no-session") return again;
+        }
         return run(false);
       }
       if (value?.error) throw new Error(value.error === "no-session" ? "Apple Music's player is not running." : value.error);

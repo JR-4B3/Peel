@@ -38,19 +38,28 @@ notify() {
 
 # --- Android access -------------------------------------------------------------------------
 
-adb_target() {
+# Android's address over adb. Asking Waydroid takes about 0.1 seconds, and a start asks a few dozen
+# times, so the address is kept once known. adb_cache runs in this shell, not in a subshell, so
+# the address it keeps reaches every later call. Starting, stopping or restarting the session or
+# the container forgets it.
+ADB_TARGET=
+adb_cache() {
+  [ -n "$ADB_TARGET" ] && return 0
   local ip; ip=$(waydroid status 2>/dev/null | sed -n 's/^IP address:\s*//p')
   [ -n "$ip" ] && [ "$ip" != UNKNOWN ] || return 1
-  echo "$ip:5555"
+  ADB_TARGET="$ip:5555"
 }
+adb_target() { adb_cache && echo "$ADB_TARGET"; }
 # adb starts its server the first time it runs, and the server keeps the files of the command that
 # started it open. Started under the session lock (7) or the update lock (9), it would hold that
 # lock until it exits, and nothing could start or stop Android meanwhile. So adb runs without them.
-A() { timeout "${ADB_TIMEOUT:-30}" adb -s "$(adb_target)" "$@" 7>&- 9>&-; }
+A() { adb_cache || return 1; timeout "${ADB_TIMEOUT:-30}" adb -s "$ADB_TARGET" "$@" 7>&- 9>&-; }
+# ADB_WAIT is how many seconds each step may take. While Android boots, a short wait lets
+# wait_boot ask again soon instead of waiting out an attempt that cannot work yet.
 adb_connect() {
-  local t; t=$(adb_target) || return 1
-  timeout 5 adb connect "$t" >/dev/null 2>&1 7>&- 9>&- || true
-  timeout 5 adb -s "$t" wait-for-device 2>/dev/null 7>&- 9>&-
+  adb_cache || return 1
+  timeout "${ADB_WAIT:-5}" adb connect "$ADB_TARGET" >/dev/null 2>&1 7>&- 9>&- || true
+  timeout "${ADB_WAIT:-5}" adb -s "$ADB_TARGET" wait-for-device 2>/dev/null 7>&- 9>&-
 }
 
 # Android only accepts adb from keys listed in its data partition. A new key would wait for a
@@ -66,14 +75,32 @@ adb_unauthorized() {
   timeout 5 adb devices 2>/dev/null 7>&- 9>&- | grep -q "^$t[[:space:]]*unauthorized"
 }
 
+# Whether Android's adb port takes a TCP connection. A plain connection leaves no state behind,
+# unlike adb connect, whose failed attempts adb keeps and tries again later on its own.
+adb_port_open() {
+  adb_cache || return 1
+  timeout 1 bash -c 'exec 3<>"/dev/tcp/$1/$2"' _ "${ADB_TARGET%:*}" "${ADB_TARGET##*:}" 2>/dev/null 7>&- 9>&-
+}
+
 wait_boot() {  # waits up to BOOT_TIMEOUT seconds (default 180) for Android to finish booting
-  local deadline=$((SECONDS + ${BOOT_TIMEOUT:-180})) authorized= enabled=
+  local deadline=$((SECONDS + ${BOOT_TIMEOUT:-180})) authorized= enabled= connected=
+  # Android boots in about 6 seconds, and its adb port opens partway. adb connect before that
+  # leaves a connection adb tries again on its own, less and less often, and cutting adb connect
+  # short left one that stayed offline for up to a minute. So adb connects once the port takes a
+  # TCP connection, with time to finish, and the boot property is asked every fifth of a second.
   while [ $SECONDS -lt $deadline ]; do
-    adb_connect && [ "$(ADB_TIMEOUT=5 A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && return 0
-    if [ -z "$authorized" ] && adb_unauthorized; then authorize_adb && authorized=1; fi
-    # A home screen app must be on before boot can complete; see ENABLED_APPS.
-    if [ -z "$enabled" ] && adb_connect 2>/dev/null; then enable_apps && enabled=1; fi
-    sleep 2
+    if adb_port_open; then
+      # A connection that still isn't a device after 10 seconds is asked for again.
+      if [ -z "$connected" ] || { [ $((SECONDS - connected)) -ge 10 ] && [ "$(ADB_TIMEOUT=1 A get-state 2>/dev/null)" != device ]; }; then
+        timeout 5 adb connect "$ADB_TARGET" >/dev/null 2>&1 7>&- 9>&- || true
+        connected=$SECONDS
+      fi
+      [ "$(ADB_TIMEOUT=2 A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && return 0
+      if [ -z "$authorized" ] && adb_unauthorized; then authorize_adb && authorized=1 && connected=; fi
+      # A home screen app must be on before boot can complete; see ENABLED_APPS.
+      if [ -z "$enabled" ] && [ "$(ADB_TIMEOUT=1 A get-state 2>/dev/null)" = device ]; then enable_apps && enabled=1; fi
+    fi
+    sleep 0.2
   done
   return 1
 }
@@ -102,6 +129,7 @@ cmd_session() {
       systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service 2>/dev/null || true
       session_running && waydroid session stop >/dev/null 2>&1 || true
       systemctl --user start "peel-hires-session@$mode.service" || die "the session did not start"
+      ADB_TARGET=
       if ! wait_boot; then
         # Right after a container restart Android sometimes boots without its network, so adb
         # can't reach it. One session restart fixes that; a release that really fails to boot
@@ -112,6 +140,7 @@ cmd_session() {
         if BOOT_TIMEOUT=20 wait_boot; then apply_android_settings; log "session running ($mode)"; return 0; fi
         log "Android booted but is unreachable; restarting the session once"
         systemctl --user restart "peel-hires-session@$mode.service" || die "the session did not restart"
+        ADB_TARGET=
         BOOT_TIMEOUT=90 wait_boot || die "Android booted but stays unreachable over adb"
       fi
       apply_android_settings
@@ -119,6 +148,7 @@ cmd_session() {
     stop)
       systemctl --user stop peel-hires-session@headless.service peel-hires-session@visible.service peel-hires-display.service 2>/dev/null || true
       session_running && waydroid session stop >/dev/null 2>&1 || true
+      ADB_TARGET=
       log "session stopped" ;;
     idle)  # run by Peel's hi-res host when the last Peel closes, while it still answers
       # An update, test or health check holds this lock while it uses Android, and stops Android
@@ -340,6 +370,7 @@ cmd_activate() {
 
 settle_container() {  # waits until the restarted container and its network are up
   local i
+  ADB_TARGET=
   for i in $(seq 30); do
     waydroid status 2>/dev/null | grep -q '^Container:\s*\(RUNNING\|STOPPED\)' && pgrep -x dnsmasq >/dev/null && break
     sleep 1
