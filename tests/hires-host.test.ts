@@ -418,6 +418,72 @@ test.skipIf(!supported)("a jump in a shuffled queue whose end Apple does not lis
   expect(now.left).toEqual(expect.arrayContaining(left));
 }, 20000);
 
+// Jumps to a song at the index and with the ID the host's queue gives it, as Peel does.
+async function jumpTo(id: string) {
+  const queue = (await call("queue")).body;
+  const result = await call("jump", ids(queue.items).indexOf(id), id);
+  expect(result.body?.error).toBeUndefined();
+  expect(result.status).toBe(200);
+  expect(android.queue[android.selected]?.id).toBe(id);
+}
+// The host's queue next to Apple Music's: each song once and no song missing, the same song
+// playing, and every song the host counts as played has played. So every song Apple Music still
+// has is upcoming in the host's queue too. Returns the host's position.
+async function sameAsApple() {
+  const queue = (await call("queue")).body, shown = ids(queue.items), actual = ids(android.queue);
+  expect(new Set(shown).size).toBe(shown.length);
+  expect(new Set(shown)).toEqual(new Set(actual));
+  expect(shown[queue.position]).toBe(actual[android.selected]);
+  expect(actual.slice(0, android.selected)).toEqual(expect.arrayContaining(shown.slice(0, queue.position)));
+  return queue.position as number;
+}
+
+test.skipIf(!supported)("a song a shuffled jump counted as played can be jumped to again", async () => {
+  // The jump to 9004 counts the songs Apple's answer leaves out as played, 9012 among them.
+  await jumpShuffled("9004");
+  await jumpTo("9012");
+  expect(await sameAsApple()).toBe(8);
+}, 20000);
+
+test.skipIf(!supported)("a second jump in a shuffled queue counts no song as played that Apple still has", async () => {
+  // After the jump to 9010, Apple lists 9010 to 9003. 9012 comes before 9010, so after the jump
+  // to it, 9005 to 9003 still come too.
+  await jumpShuffled("9010");
+  await jumpTo("9012");
+  expect(await sameAsApple()).toBe(8);
+  const exported = (await call("exportPlayback")).body, actual = ids(android.queue);
+  expect(exported.position).toBe(8);
+  expect(ids(exported.items).slice(exported.position)).toEqual(expect.arrayContaining(actual.slice(android.selected)));
+  // Apple listed 9005 to 9003 right after 9006, the last song its new answer lists, so they follow it.
+  expect(ids(exported.items).slice(15, 18)).toEqual(["9005", "9004", "9003"]);
+}, 20000);
+
+test.skipIf(!supported)("jumps back and forth in a shuffled queue keep the songs Apple still has upcoming", async () => {
+  // Apple's queue is 9000, then 9019 down to 9001. Each jump compares the host's queue with it.
+  await jumpShuffled("9010");
+  await sameAsApple();
+  // Back past songs Apple's answers never listed, then back into the songs that played.
+  await jumpTo("9012");
+  expect(await sameAsApple()).toBe(8);
+  await jumpTo("9017");
+  expect(await sameAsApple()).toBe(3);
+  // To the last song, whose answer ends Apple's queue, so every other song has played.
+  await jumpTo("9001");
+  expect(await sameAsApple()).toBe(19);
+  // Back into those songs, with an answer as long as Apple lists.
+  await jumpTo("9008");
+  expect(await sameAsApple()).toBe(12);
+  await jumpTo("9015");
+  expect(await sameAsApple()).toBe(5);
+
+  // Another device gets every song Apple still has, and none twice.
+  const left = ids(android.queue).slice(android.selected + 1);
+  expect((await call("importPlayback", (await call("exportPlayback")).body)).status).toBe(200);
+  const now = playingOnce();
+  expect(now.playing).toBe("9015");
+  expect(now.left).toEqual(expect.arrayContaining(left));
+}, 30000);
+
 test.skipIf(!supported)("a song the catalog no longer has stays out of Apple's list, so the chosen song plays", async () => {
   // Clears songs added in earlier tests, which play would keep.
   await call("importPlayback", { items: [song("999")], playing: true });

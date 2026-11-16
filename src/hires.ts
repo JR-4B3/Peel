@@ -413,15 +413,18 @@ export async function runHiresHost() {
     const queue: { queueId: number; id: string; title: string }[] = (await control.request("queue")).queue ?? [];
     // An empty queue means Apple has nothing queued any more, so Peel's mirror empties too. Songs
     // of a long list not sent yet stay, so the list continues.
-    if (!queue.length) { order = []; entries.clear(); sent.clear(); removed.clear(); synced = Date.now(); return; }
+    if (!queue.length) { order = []; entries.clear(); sent.clear(); removed.clear(); links.clear(); regroup([]); synced = Date.now(); return; }
     for (const item of queue) align(item);
     order = [...history(queue.map(item => item.queueId)), ...queue.map(item => item.queueId)];
     widest = Math.max(widest, queue.length);
-    for (const item of queue) {
-      if (entries.has(item.queueId)) continue;
-      const queued = sent.get(batchOf(item.queueId))?.[item.queueId % 2 ** 32];
-      entries.set(item.queueId, queued ? { queueId: item.queueId, ...queued }
-        : { queueId: item.queueId, added: false, unknown: true, song: { id: item.id, type: "songs", name: item.title, artist: "", album: "", duration: 0, catalogId: item.id } });
+    // Every entry in order has its own record: one the host sent has its song, and one Apple added
+    // by itself has what Apple's answer names.
+    const listed = new Map(queue.map(item => [item.queueId, item]));
+    for (const id of order) {
+      if (entries.has(id)) continue;
+      const queued = sent.get(batchOf(id))?.[id % 2 ** 32], item = listed.get(id);
+      entries.set(id, queued ? { queueId: id, ...queued }
+        : { queueId: id, added: false, unknown: true, song: { id: item?.id ?? "", type: "songs", name: item?.title ?? "", artist: "", album: "", duration: 0, catalogId: item?.id } });
     }
     // Songs of queues that were replaced are forgotten.
     const kept = new Set(order);
@@ -432,22 +435,120 @@ export async function runHiresHost() {
   // limit, so an answer with fewer lists the end of its queue.
   let synced = 0, widest = 0;
 
-  // The entries before the playing one, which is the first in Apple's answer listed. Those the
-  // host saw before it are history. When the playing entry is one Apple had not listed, as after a
-  // jump past the end of its answer, some sent entries Apple never listed are history too:
-  // - With shuffle off, those sent before it, since Apple keeps the order the host sent.
-  // - With shuffle on, Apple mixed them, so their order is unknown (#126). Only an answer shorter
-  //   than widest shows that Apple's queue ends there, and then every one it leaves out is
-  //   history. Otherwise they stay upcoming, so no song Apple may still play counts as played.
+  // The entries before the playing one, which is the first in Apple's answer listed. With shuffle
+  // off, Apple keeps the order the host sent, so the entries the host saw before the playing one
+  // are history, and when it plays one Apple had not listed, as after a jump past the end of its
+  // answer, so are the sent entries before it. With shuffle on, mixed tells the history (#126).
   // An entry in Apple's answer is never history, so each entry shows once.
   function history(listed: number[]) {
     const playing = listed[0]!, unseen = hidden(), shown = new Set(listed);
     // A playing entry the host never sent or saw belongs to a queue another Peel sent.
-    if (!order.includes(playing) && !unseen.includes(playing)) return [];
-    const before = order.includes(playing) ? order.slice(0, order.indexOf(playing))
-      : shuffle ? [...order] : [...order, ...unseen.slice(0, unseen.indexOf(playing))];
-    if (shuffle && listed.length < widest) before.push(...unseen);
+    const foreign = !order.includes(playing) && !unseen.includes(playing);
+    if (shuffle) {
+      if (foreign) { links.clear(); regroup([]); }
+      return mixed(listed, foreign ? [] : [...order, ...unseen]);
+    }
+    if (foreign) return [];
+    const before = order.includes(playing) ? order.slice(0, order.indexOf(playing)) : [...order, ...unseen.slice(0, unseen.indexOf(playing))];
     return before.filter(id => !shown.has(id));
+  }
+
+  // With shuffle on, the host's order says little about Apple's: Apple mixed the songs, also those
+  // its answers never listed, and a jump can land before songs it listed earlier. So the host keeps
+  // what Apple's answers prove about its order, and only an entry proved to come before the playing
+  // one is history. Every other entry stays upcoming, also when it may have played, so no song
+  // Apple still has counts as played.
+  // links holds, for an entry, the entry Apple listed right after it. groups holds the entries the
+  // host knows in groups, in Apple's order: each entry comes before every entry of a later group.
+  // Within a group the order is unknown, except where links tell it.
+  const links = new Map<number, number>();
+  let groups: number[][] = [];
+  const rank = new Map<number, number>();
+  function regroup(list: number[][]) {
+    groups = list.filter(group => group.length);
+    rank.clear();
+    groups.forEach((group, at) => { for (const id of group) rank.set(id, at); });
+  }
+  // When shuffle turns on, Apple keeps the entries up to the playing one where they were, and
+  // mixes the rest. A new list sent while shuffle is on counts the same way.
+  function unmixed() {
+    links.clear(); regroup([]);
+    const list = [...order, ...hidden()], at = position();
+    regroup([...list.slice(0, at + 1).map(id => [id]), list.slice(at + 1)]);
+  }
+  // A moved or removed entry has other neighbours, so what Apple listed beside it no longer holds.
+  function unlink(id: number) { for (const [from, to] of links) if (from === id || to === id) links.delete(from); }
+
+  // Learns from Apple's answer, listed, and returns the entries proved to come before its first.
+  // known holds the other entries the host has: those in order and those Apple has not listed.
+  // - Apple lists entries one after the other, so each one comes right after the one before it,
+  //   and none of them comes before a group an earlier one of them is in.
+  // - An answer shorter than widest ends Apple's queue, so every entry it leaves out comes before.
+  // - An entry right after one of an earlier group starts its group, and the entry before it ends
+  //   its own. So the entries Apple listed after the last one known in place get their place too.
+  // An entry the host has not placed yet, such as one of a part added at the end, goes in the last
+  // group.
+  function mixed(listed: number[], known: number[]) {
+    const keep = new Set([...known, ...listed]), shown = new Set(listed);
+    regroup(groups.map(group => group.filter(id => keep.has(id))));
+    for (const [from, to] of links) if (!keep.has(from) || !keep.has(to)) links.delete(from);
+    // Two groups out of order with Apple's answer, as after an edit the host did not see, become
+    // one, so nothing counts as known that the answer contradicts.
+    const merge = (from: number, to: number) => regroup([...groups.slice(0, from), groups.slice(from, to + 1).flat(), ...groups.slice(to + 1)]);
+    let highest = -1;
+    for (const id of listed) {
+      const at = rank.get(id);
+      if (at === undefined) {
+        if (highest < 0) highest = groups.length;
+        regroup(highest < groups.length ? groups.map((group, index) => index === highest ? [...group, id] : group) : [...groups, [id]]);
+      } else if (at < highest) { merge(at, highest); highest = at; }
+      else highest = at;
+    }
+    const unplaced = known.filter(id => !rank.has(id));
+    if (unplaced.length) regroup(groups.length ? [...groups.slice(0, -1), [...groups.at(-1)!, ...unplaced]] : [unplaced]);
+    listed.forEach((id, at) => {
+      const next = listed[at + 1];
+      if (next === undefined) return;
+      for (const [from, to] of links) if (to === next && from !== id) links.delete(from);
+      links.set(id, next);
+    });
+    if (listed.length < widest) regroup([...groups.map(group => group.filter(id => !shown.has(id))), listed]);
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const [from, to] of links) {
+        const a = rank.get(from)!, b = rank.get(to)!;
+        if (a >= b) continue;
+        if (b > a + 1) merge(a, b);
+        else if (groups[a]!.length > 1) regroup([...groups.slice(0, a), groups[a]!.filter(id => id !== from), [from], ...groups.slice(a + 1)]);
+        else if (groups[b]!.length > 1) regroup([...groups.slice(0, b), [to], groups[b]!.filter(id => id !== to), ...groups.slice(b + 1)]);
+        else continue;
+        changed = true;
+      }
+    }
+    // The entries of earlier groups, and those linked one after the other up to the playing entry.
+    const playing = listed[0]!, before = new Set(known.filter(id => rank.get(id)! < rank.get(playing)!));
+    const previous = new Map([...links].map(([from, to]) => [to, from]));
+    for (let id = previous.get(playing); id !== undefined && !before.has(id) && !shown.has(id); id = previous.get(id)) before.add(id);
+    return arrange([...before].filter(id => !shown.has(id)));
+  }
+
+  // Puts entries in the order the host knows: group by group, and within a group along links.
+  // Entries whose order is unknown keep the order they come in. One linked from after, which
+  // Apple listed right after it, comes first in its group.
+  function arrange(ids: number[], after?: number) {
+    const level = (id: number) => rank.get(id) ?? groups.length;
+    const sorted = [...ids].sort((a, b) => level(a) - level(b)), result: number[] = [], done = new Set<number>();
+    for (let start = 0, end = 0; start < sorted.length; start = end) {
+      while (end < sorted.length && level(sorted[end]!) === level(sorted[start]!)) end++;
+      const group = sorted.slice(start, end), members = new Set(group);
+      const followed = new Set(group.map(id => links.get(id)).filter(id => id !== undefined && members.has(id)));
+      const heads = group.filter(id => !followed.has(id)), first = after === undefined ? undefined : links.get(after);
+      heads.sort((a, b) => Number(b === first) - Number(a === first));
+      for (const head of [...heads, ...group]) {
+        for (let id: number | undefined = head; id !== undefined && members.has(id) && !done.has(id); id = links.get(id)) { result.push(id); done.add(id); }
+      }
+    }
+    return result;
   }
 
   // Apple's entry holds another song than the host sent at its place when Apple dropped songs it
@@ -845,7 +946,7 @@ export async function runHiresHost() {
     sent.clear(); removed.clear();
     sent.set(batchOf(base), playable.map(entry => ({ song: entry.song, added: marks.has(entry.at) })));
     rest = listed.slice(to).map((song, at) => ({ song, added: marks.has(to + at), at: to + at }));
-    if (shuffle) mix(rest);
+    if (shuffle) { mix(rest); unmixed(); }
     extendAfter = 0; part = undefined;
     await sync();
     return playable[start]!.at;
@@ -855,10 +956,12 @@ export async function runHiresHost() {
   const upcoming = () => order.length - position() - 1 + hidden().length;
   // Entries the host sent that Apple's answer does not list, in the order they were sent: those
   // beyond its 101 entries, also ones an added song pushed back out of them.
+  // With shuffle on, they come in the order the host knows of them, the ones Apple listed right
+  // after the last entry in order first.
   function hidden() {
     const listed = new Set(order), ids: number[] = [];
     for (const [batch, songs] of sent) songs.forEach((_, index) => { const id = batch * 2 ** 32 + index; if (!listed.has(id) && !removed.has(id)) ids.push(id); });
-    return ids;
+    return shuffle && groups.length ? arrange(ids, order.at(-1)) : ids;
   }
   const mix = (list: Listed[]) => { for (let i = list.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [list[i], list[j]] = [list[j]!, list[i]!]; } };
 
@@ -1055,6 +1158,7 @@ export async function runHiresHost() {
   // Songs of a long list not sent yet are mixed and put back here, in the same way.
   async function setShuffle(enabled: boolean) {
     if (enabled !== shuffle) { if (enabled) mix(rest); else rest.sort((a, b) => a.at - b.at); }
+    if (enabled && !shuffle) { shuffle = true; unmixed(); }
     shuffle = enabled;
     const before = order.join();
     await control.request(`shuffle ${enabled ? 1 : 0}`);
@@ -1208,6 +1312,7 @@ export async function runHiresHost() {
       const at = position();
       if (Math.min(from, to) <= at) return;
       const id = order[from]!, beside = order[to]!, after = to > from;
+      unlink(id);
       await control.request(`move ${id} ${beside} ${after ? 1 : 2}`).catch(unless);
       await syncUntil(() => order.indexOf(id) === order.indexOf(beside) + (after ? 1 : -1), "Apple Music did not move the song.");
     },
@@ -1216,6 +1321,7 @@ export async function runHiresHost() {
       if (index <= position()) return;
       const list = whole(), id = list[index]?.id;
       if (id === undefined) { rest.splice(index - (list.length - rest.length), 1); return; }
+      unlink(id);
       await control.request(`remove ${id}`).catch(unless);
       await syncUntil(() => !order.includes(id), "Apple Music did not remove the song.");
       removed.add(id);
