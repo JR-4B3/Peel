@@ -42,6 +42,9 @@ const android = {
   commands: [] as string[],
   // When Apple Music was last restarted.
   restartedAt: 0,
+  // Until this time Apple Music's playback service is not running, so commands that need its
+  // session answer no-session, as after Android started or Apple Music stopped.
+  noSessionUntil: 0,
 };
 // The simulated pactl reports Android's stream at this rate.
 const streamRate = (hz: number) => writeFileSync(join(temporary, "rate"), String(hz));
@@ -75,7 +78,7 @@ const silence = (times: number) => {
 };
 function reset() {
   // Queue IDs keep counting, as Apple's do: a new queue never reuses an old entry's ID.
-  Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [], stall: 0, restarts: 0, seekDelay: 0,
+  Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [], stall: 0, restarts: 0, seekDelay: 0, noSessionUntil: 0,
     repeat: 0, shuffle: false, unshuffled: undefined, error: undefined });
   silence(0); streamRate(96000); muteStream(false); noStream(false); oldStream();
   android.ignore.clear(); android.fail.clear(); android.dropAfter.clear(); android.drops.clear(); android.gone.clear();
@@ -87,6 +90,7 @@ const snapshot = () => {
 const batchOf = (ids: string[]) => { android.batch++; return ids.filter(id => !android.drops.has(id)).map((id, index) => ({ queueId: android.batch * 2 ** 32 + index, id, title: `Song ${id}` })); };
 
 function apply(name: string, args: string[]): unknown {
+  if (!["ping", "rate", "restart"].includes(name) && Date.now() < android.noSessionUntil) return { error: "no-session" };
   if (android.ignore.has(name)) return undefined;
   if (android.fail.has(name) || android.fail.has([name, ...args].join(" "))) return { error: `simulated ${name} failure` };
   switch (name) {
@@ -455,6 +459,23 @@ test.skipIf(!supported)("a dropped connection after an addition or a skip applie
   expect((await call("play", [song("201"), song("202")], 0)).status).toBe(200);
   expect(android.commands.filter(command => command.startsWith("list"))).toHaveLength(1);
   expect(android.queue[android.selected]?.id).toBe("201");
+}, 20000);
+
+// The host starts Apple Music's playback service when it finds none and sends the command again
+// as soon as the session is there, instead of after a fixed wait.
+test.skipIf(!supported)("a command that finds Apple Music's player stopped runs once its session is there", async () => {
+  await play("101", "102");
+  android.noSessionUntil = Date.now() + 300;
+  let began = Date.now();
+  expect((await call("pause")).status).toBe(200);
+  expect(Date.now() - began).toBeLessThan(1000);
+  expect(android.state).toBe(2);
+  // A session that takes longer than the old fixed wait of 1.5 seconds still gets the command.
+  android.noSessionUntil = Date.now() + 2500;
+  began = Date.now();
+  expect((await call("resume")).status).toBe(200);
+  expect(Date.now() - began).toBeGreaterThanOrEqual(2400);
+  expect(android.state).toBe(3);
 }, 20000);
 
 test.skipIf(!supported)("a failed paused import stays silent", async () => {
