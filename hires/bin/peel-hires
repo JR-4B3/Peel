@@ -76,7 +76,7 @@ adb_unauthorized() {
 }
 
 wait_boot() {  # waits up to BOOT_TIMEOUT seconds (default 180) for Android to finish booting
-  local deadline=$((SECONDS + ${BOOT_TIMEOUT:-180})) authorized= enabled=
+  local deadline=$((SECONDS + ${BOOT_TIMEOUT:-180})) authorized= enabled= dropped=-3
   # Android boots in about 6 seconds. Its network comes up partway, and until then an adb
   # connection hangs, so each attempt gets a second and the next one follows a fifth of a second
   # later. It asks for the boot property right away instead of waiting for the device, which
@@ -85,9 +85,12 @@ wait_boot() {  # waits up to BOOT_TIMEOUT seconds (default 180) for Android to f
     if adb_cache; then
       # adb keeps the connection of a session that stopped, marked offline, and tries it again
       # less and less often. After Android was stopped for a while, it took up to half a minute
-      # to notice the new boot, so an offline connection is dropped and made anew.
-      timeout 2 adb devices 2>/dev/null 7>&- 9>&- | grep -q "^$ADB_TARGET[[:space:]]*offline" &&
-        { timeout 2 adb disconnect "$ADB_TARGET" >/dev/null 2>&1 7>&- 9>&- || true; }
+      # to notice the new boot, so a connection that stays offline is dropped and made anew. A
+      # new connection is offline too until its handshake ends, so it gets 3 seconds first.
+      if [ $((SECONDS - dropped)) -ge 3 ] && timeout 2 adb devices 2>/dev/null 7>&- 9>&- | grep -q "^$ADB_TARGET[[:space:]]*offline"; then
+        timeout 2 adb disconnect "$ADB_TARGET" >/dev/null 2>&1 7>&- 9>&- || true
+        dropped=$SECONDS
+      fi
       timeout 1 adb connect "$ADB_TARGET" >/dev/null 2>&1 7>&- 9>&- || true
       [ "$(ADB_TIMEOUT=1 A shell getprop sys.boot_completed 2>/dev/null | tr -d '\r')" = 1 ] && return 0
     fi
