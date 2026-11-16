@@ -50,6 +50,7 @@ Repacking and switching images need root. `install.sh` installs [`root/peel-hire
 - Image trees live in a root-only folder, mounted `nosuid,nodev,noexec` while they are copied.
 - Properties are checked to be plain `key=value` lines before they reach `waydroid.cfg`.
 - Steps that change state hold one lock, and a switch stops the container before touching anything Android has mounted.
+- `reclaim` takes no arguments. It finds the container's cgroup from the kernel's record of the container's init process, and writes to that cgroup's `memory.reclaim` only while LXC and the kernel both report the container as frozen. It reclaims in steps of 64 MB and checks between them that the container is still frozen, so it can't slow down a playing Android.
 
 The helper doesn't update itself. After changing it, run `sudo install.sh "$USER"` again.
 
@@ -68,7 +69,7 @@ The helper doesn't update itself. After changing it, run `sudo install.sh "$USER
 
 The audio tests play into a temporary silent sink and put Waydroid's streams back on their own sinks afterwards. The test signal starts with silence, and the default output is muted for the moment Apple Music starts, so nothing is heard. The last test uses the Apple account's single stream, so it is skipped while music is playing. It shows that Apple's audio reaches PipeWire at 192 kHz with full 24-bit samples; only the test signal is compared sample by sample, because Apple's decoded audio has no reference to compare against.
 
-`hires/tests/offline/run.sh` tests parts of the pipeline without Waydroid, Android or audio hardware: the audio driver's write function against a simulated ALSA device, and the health checks against a simulated adb that fails in different ways. It needs bash, python3 and a C compiler, and `bun test` runs it too.
+`hires/tests/offline/run.sh` tests parts of the pipeline without Waydroid, Android or audio hardware: the audio driver's write function against a simulated ALSA device, the health checks against a simulated adb that fails in different ways, the update against a simulated root helper, and standby against simulated `waydroid`, `busctl`, `adb` and root helper commands. It needs bash, python3 and a C compiler, and `bun test` runs it too.
 
 ## Updates
 
@@ -76,7 +77,7 @@ The audio tests play into a temporary silent sink and put Waydroid's streams bac
 
 After a passing release it updates the Apple Music app and runs the tests again. Android won't downgrade an app without wiping its data, so a bad Apple Music version is reported, not undone. Last, if nothing is playing, it restarts Apple Music and stops Android's background apps (`peel-hires trim`). Apple Music grows from about 115 to 475 MB over a day of use.
 
-`peel-hires-watchdog.timer` runs `peel-hires watchdog` every 5 minutes. If Android stops answering over adb, isn't booted, or has no `system_server` in two checks in a row, it restarts the session and sends a notification. It waits while music plays or an update runs. It also stops an Android that runs without a Peel, for example after Peel's host was killed.
+`peel-hires-watchdog.timer` runs `peel-hires watchdog` every 5 minutes. If Android stops answering over adb, isn't booted, or has no `system_server` in two checks in a row, it restarts the session and sends a notification. It waits while music plays or an update runs. It also puts an Android that runs without a Peel into standby, for example after Peel's host was killed. An Android in standby counts as healthy, and the watchdog stops it once standby has lasted `STANDBY_HOURS`.
 
 ## Playback from Peel
 
@@ -106,9 +107,19 @@ Turning off Android apps that playback doesn't use saved about 60 MB, but Androi
 
 Releases leave out SystemUI, the status bars and notifications, which saves about 150 MB. Android's default wallpaper is part of SystemUI, and Android 13's window manager holds the end of boot until a wallpaper is drawn. Without SystemUI it waited for its 30-second timeout, so Android booted in about 37 seconds. The framework overlay sets `config_checkWallpaperAtBoot` to false, and Android boots in about 6 seconds, also right after the PC starts with nothing cached. All tests pass without SystemUI.
 
-Android runs only while Peel uses it. When the last Peel on this computer closes while a Peel on another computer still controls it over SSH, the host pauses the music and Android keeps running for that controller. When the last Peel closes, Peel's hi-res host pauses the music and runs `peel-hires session idle` between two controller requests, so a Peel that attaches meanwhile waits and then starts Android again. `session idle` stops Android unless the sign-in window is open or Android plays audio. Setup, updates, `peel-hires test`, `build`, `apple-update` and the watchdog hold the update lock while they use Android, so `session idle` and the watchdog leave Android to them. Setup, updates, tests and the watchdog stop it when they end unless Peel's host runs: the `peel-hires-host` unit is active, or something answers on the host's port. Starting the controller and stopping Android take a second lock, so a stop that found no host finishes before that host's controller starts Android again. The next Peel starts Android as it opens, and `peel-hires controller` answers about 7 seconds later. The nightly update starts Android even when nothing changed, to check Apple Music's version.
+Android runs only while Peel uses it. When the last Peel on this computer closes while a Peel on another computer still controls it over SSH, the host pauses the music and Android keeps running for that controller. When the last Peel closes, Peel's hi-res host pauses the music and runs `peel-hires session idle` between two controller requests, so a Peel that attaches meanwhile waits and then starts Android again. `session idle` puts Android into standby (see below) unless the sign-in window is open or Android plays audio. Setup, updates, `peel-hires test`, `build`, `apple-update` and the watchdog hold the update lock while they use Android, so `session idle` and the watchdog leave Android to them. Setup, updates, tests, `trim` and the watchdog put it into standby when they end unless Peel's host runs: the `peel-hires-host` unit is active, or something answers on the host's port. Starting the controller and putting Android away take a second lock, so a standby or stop that found no host finishes before that host's controller starts Android again. When Android was stopped, the next Peel starts it as it opens, and `peel-hires controller` answers about 7 seconds later. The nightly update starts Android even when nothing changed, to check Apple Music's version.
 
 While it runs, Android's container holds about 1.6 GB: about 800 MiB of anonymous and kernel memory after Apple Music has played, and about 800 MiB of file cache, which the kernel can reclaim.
+
+### Standby
+
+When no Peel uses Android, `peel-hires` freezes it instead of stopping it. It stops Android's background apps (`am kill-all`), then freezes the container through Waydroid's D-Bus service (`id.waydro.ContainerManager.Freeze`), which the user may call without root. Freezing takes about 10 ms, and so does waking. A Peel that opens during standby wakes Android, finds Peel's controller still running in it, and plays its first song about 2 seconds after the click instead of waiting about 9 seconds for a boot. `waydroid status` shows `Container: FROZEN` and `Session: RUNNING` during standby, and `peel-hires status` shows since when.
+
+Frozen, Android still holds about 1.5 GB: about 540 MB of its own memory and about 910 MB of page cache. After freezing, `peel-hires` asks the root helper's `reclaim` to free it. The kernel drops the page cache and compresses the rest into swap where zswap or zram is set up, and the container then holds about 290 MB. Waking from there is just as fast. A root helper installed before `reclaim` existed leaves Android frozen at about 1.5 GB, and `peel-hires` says so once. Run `sudo hires/install.sh "$USER"` again to install the new helper.
+
+A frozen Android answers nothing, and adb would wait for it until its timeouts. Every command that talks to Android therefore wakes it first: the controller, `session start` and `stop`, updates, `test`, `trim`, `build`, `apple-update`, setup and sign-in. A command run by hand puts Android back into standby when it ends. Checks that only ask whether music plays, and the watchdog, treat a frozen Android as not playing and leave it frozen. `peel-hires session stop` always stops Android fully.
+
+`STANDBY_HOURS` in `~/.config/peel-hires/config` sets how long standby lasts, in whole hours. The default is 24. After that, the watchdog stops Android, and the next Peel boots it again. `STANDBY_HOURS=0` turns standby off: Android stops when the last Peel closes, as before standby existed. If the freeze fails, or adb can't reach Android just before it, Android stops instead.
 
 `peel-hires prune` deletes stock Waydroid's images (2.4 GB) once no release state refers to them, and the image zips in `~/.cache/peel-hires/downloads`, which the root helper keeps its own verified copies of. It and every passing update also remove releases that are neither active, confirmed, nor the fallback.
 
