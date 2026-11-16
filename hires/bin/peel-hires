@@ -622,6 +622,16 @@ t_apple_play() {
   full_volume
   python3 "$HIRES/tests/apple-play.py" --adb "$(adb_target)" --rate "$TEST_RATE"
 }
+# Plays songs at four rates through Peel's controller and checks that Android's mixer follows each
+# one with sound. Starts the controller when it does not run, and turns the volume up again after.
+t_rate_switch() {
+  apple_playing && { echo "skipped: music is playing"; return 0; }
+  cmd_controller >/dev/null || { echo "the controller did not start"; return 1; }
+  local rc=0
+  python3 "$HIRES/tests/rate-switch.py" --state "$CONTROL_STATE" --adb "$(adb_target)" || rc=$?
+  full_volume
+  return "$rc"
+}
 
 # `peel-hires test` by hand: holds the update lock, so Peel closing doesn't stop Android between
 # steps, and starts Android when it is stopped.
@@ -642,6 +652,7 @@ cmd_test() {
   check audio-driver-rate t_driver
   check apple-music-app t_apple_app
   [ "$APPLE_PLAY_TEST" = on ] && check apple-music-hires-playback t_apple_play
+  [ "$APPLE_PLAY_TEST" = on ] && check apple-music-rate-switch t_rate_switch
   local probe; probe=$(root probe 2>/dev/null || true)
   local report="$STATE/reports/$(date +%Y%m%d-%H%M%S)-${id:-unknown}.json"
   python3 - "$report" "${id:-}" "$probe" "${TESTS[@]}" <<'EOF'

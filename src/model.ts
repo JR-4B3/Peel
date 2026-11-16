@@ -47,6 +47,12 @@ const fold = (text: string) => text.normalize("NFD").replace(/\p{Diacritic}/gu, 
 // New releases need one request per hundred library artists, so reuse them for a while.
 const releasesFresh = 6 * 60 * 60 * 1000;
 const navigationRetry = 10000;
+// Peel asks Apple again whether the playing song is a favourite once its last answer is this old,
+// so a change made in another app or Peel window shows while the song plays.
+const favouriteRecheck = 60 * 1000;
+// Apple updates Favourite Songs a few minutes after a favourite is removed. For this long after the
+// player reports another mark than before, each lookup reads Favourite Songs again.
+const favouriteSettle = 5 * 60 * 1000;
 // Apple returns a hundred items per request. Lists load backgroundLimit items without scrolling.
 const pageSize = 100;
 export const backgroundLimit = 500;
@@ -67,6 +73,8 @@ export class Model extends EventEmitter {
   // Counts changes to songs' favourite marks, which change the songs in place.
   lovedRevision = 0;
   status = "Loading your library...";
+  // "Test build #118 be400a9" while this Peel is a test build (peel --try).
+  testBuild?: string;
   playlists: Media[] = [];
   items: Media[] = [];
   title = "Home";
@@ -702,6 +710,14 @@ export class Model extends EventEmitter {
   private followFavourite() {
     const key = this.songKey(), reported = this.playback.nowPlaying?.inFavorites, song = this.playback.nowPlaying;
     if (reported === undefined || !song) return;
+    // The player's mark changed while the song kept playing, and not through a change made here, so
+    // another app or Peel window changed it. Its "no" covers only the ID it plays, so the heart
+    // keeps Peel's earlier answer until a new lookup with a fresh Favourite Songs replaces it.
+    const before = this.reportedMark;
+    this.reportedMark = { key, value: reported };
+    if (before?.key === key && before.value !== reported && !(this.loved?.key === key && this.loved.local)) {
+      this.favouriteLookup = { key, at: 0, running: false, settleUntil: Date.now() + favouriteSettle };
+    }
     if (this.loved?.key === key && this.loved.local) {
       if (this.loved.value !== reported) return;
       this.loved = { key, value: reported };
@@ -727,20 +743,33 @@ export class Model extends EventEmitter {
   }
 
   // The player can take seconds to report a song's favourite mark, or never report it, and it knows
-  // only the mark on the ID it plays. So Peel asks Apple itself once for each song, counting the
-  // song's other versions too. A failed lookup is tried again on the next refresh.
-  private favouriteLookup = "";
+  // only the mark on the ID it plays. So Peel asks Apple itself, counting the song's other versions
+  // too: when the song starts, again every favouriteRecheck while it plays, and at once when the
+  // player's mark changes. A failed lookup is tried again on the next refresh.
+  private favouriteLookup?: { key: string; at: number; running: boolean; settleUntil: number };
+  // The player's last mark for the playing song.
+  private reportedMark?: { key: string; value: boolean };
   private async lookUpFavourite() {
-    const key = this.songKey(), song = this.playback.nowPlaying;
-    if (!key || !song || this.favouriteLookup === key || this.loved?.key === key) return;
-    this.favouriteLookup = key;
+    const key = this.songKey(), song = this.playback.nowPlaying, last = this.favouriteLookup;
+    if (!key || !song || last?.key === key && (last.running || Date.now() - last.at < favouriteRecheck)) return;
+    const lookup = { key, at: Date.now(), running: true, settleUntil: last?.key === key ? last.settleUntil : 0 };
+    this.favouriteLookup = lookup;
+    // Apple's Favourite Songs may still list a favourite just removed elsewhere, and the library
+    // keeps its copy for minutes, so it is read again until the answer agrees with the player.
+    if (Date.now() < lookup.settleUntil) this.library.favouritesChanged?.();
     const id = song.playParams?.id ?? key;
     const catalogId = song.playParams?.catalogId ?? (/^\d+$/.test(id) ? id : undefined);
     const duration = this.playback.time.duration > 0 ? this.playback.time.duration : 0;
+    // A favourite changed here meanwhile wins over this answer, which may predate it.
+    const edits = this.favouriteEdits;
     try {
       const loved = await this.library.ratings([{ id, catalogId, type: "songs", name: song.name ?? "", artist: song.artistName ?? "", album: song.albumName ?? "", duration }]);
-      if (this.songKey() === key && this.loved?.key !== key) { this.loved = { key, value: loved.has(id) }; this.followFavourite(); this.changed(); }
-    } catch { if (this.favouriteLookup === key) this.favouriteLookup = ""; }
+      if (this.favouriteLookup !== lookup || this.songKey() !== key || edits !== this.favouriteEdits || this.loved?.key === key && this.loved.local) return;
+      const value = loved.has(id);
+      if (value === this.playback.nowPlaying?.inFavorites) lookup.settleUntil = 0;
+      if (this.loved?.key !== key || this.loved.value !== value) { this.loved = { key, value }; this.followFavourite(); this.changed(); }
+    } catch { lookup.at = 0; }
+    finally { lookup.running = false; }
   }
 
   async toggleFavourite() {
@@ -867,7 +896,7 @@ export class Model extends EventEmitter {
         const text = await change();
         if (text) {
           this.connected = false; this.queueRevision++;
-          this.loved = undefined; this.favouriteLookup = "";
+          this.loved = undefined; this.favouriteLookup = undefined; this.reportedMark = undefined;
           this.status = text;
         }
       } catch (error) { this.fail(error); }

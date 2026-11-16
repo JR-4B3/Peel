@@ -1,10 +1,11 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { ImageRenderable, RGBA } from "@opentui/core";
+import { ImageRenderable, RGBA, type TextRenderable } from "@opentui/core";
 import { createTestRenderer, type TestRendererSetup } from "@opentui/core/testing";
 import { AppleMusic } from "../src/apple";
 import { Engine } from "../src/engine";
 import { Model, parseFilter } from "../src/model";
 import { PeelUI } from "../src/ui";
+import { ClickList } from "../src/ui/click-list";
 import { type Home, type Media } from "../src/types";
 import { colour, icon } from "../src/theme";
 import { artworkUrl } from "../src/artwork";
@@ -854,15 +855,29 @@ describe("the compact player", () => {
   });
 
   test.each([
-    ["hi-res above 48 kHz", "hires", 96000, "Hi-Res Lossless · 96 kHz"],
-    ["hi-res at 44.1 kHz", "hires", 44100, "Lossless · 44.1 kHz"],
-    ["hi-res before the rate is known", "hires", undefined, "Lossless"],
-    ["the web engine", undefined, undefined, "AAC · 256 kbps"],
-  ] as const)("the quality tag names %s", async (_, version, rate, label) => {
+    ["hi-res above 48 kHz", "hires", 96000, 96000, "Hi-Res Lossless · 96 kHz"],
+    ["hi-res at 44.1 kHz", "hires", 44100, 44100, "Lossless · 44.1 kHz"],
+    ["hi-res before the rate is known", "hires", undefined, undefined, "Lossless"],
+    ["hi-res before the song's rate is known, without Android's rate", "hires", undefined, 192000, "Lossless"],
+    ["a song Android resamples", "hires", 44100, 192000, "Lossless · 44.1 kHz resampled to 192 kHz"],
+    ["a hi-res song Android resamples", "hires", 96000, 48000, "Hi-Res Lossless · 96 kHz resampled to 48 kHz"],
+    ["the web engine", undefined, undefined, undefined, "AAC · 256 kbps"],
+  ] as const)("the quality tag names %s", async (_, version, rate, output, label) => {
     const app = await setup(120, 30, undefined, undefined, { version });
-    if (rate) { app.playback.sampleRate = rate; await app.model.refresh(); await app.flush(); }
+    if (rate || output) { app.playback.sampleRate = rate; app.playback.outputRate = output; await app.model.refresh(); await app.flush(); }
     const quality = app.renderer.root.findDescendantById("quality")!;
     expect(cells(app)[quality.y]!.join("")).toContain(`${icon.capLeft}${label}${icon.capRight}`);
+  });
+
+  // The rate of a resampled song is never shown alone, as if Android sent it at that rate. Narrower
+  // rows keep the word, in a shorter label.
+  test.each([[100, "Lossless · 44.1 kHz resampled to 192 kHz"], [70, "44.1 kHz resampled to 192 kHz"], [60, "Resampled"]] as const)("a resampled song's tag says so at %i columns", async (width, label) => {
+    const app = await setup(width, 24, undefined, undefined, { version: "hires" });
+    app.playback.sampleRate = 44100; app.playback.outputRate = 192000; await app.model.refresh(); await app.flush();
+    const quality = app.renderer.root.findDescendantById("quality")!;
+    expect(quality.visible).toBe(true);
+    expect(cells(app)[quality.y]!.join("")).toContain(`${icon.capLeft}${label}${icon.capRight}`);
+    expect(quality.x + quality.width).toBeLessThanOrEqual(width - 1);
   });
 
   // Before, a long device name pushed the devices button past the window below 76 columns.
@@ -895,6 +910,51 @@ describe("the compact player", () => {
     expect(app.ui.sidebar.selectedId()).toBe("songs");
     app.mockInput.pressEnter();
     await waitFor(() => app.model.view === "songs");
+  });
+
+  // Names wider than the tab row are cut with an ellipsis, so the chosen tab still shows and opens.
+  for (const name of [
+    "A playlist with a title much longer than the entire narrow terminal window width",
+    "とても長いプレイリストの名前は狭いウィンドウの幅よりずっと長いです🎧🎧🎧",
+  ]) test(`a tab named "${name.slice(0, 12)}…" fits the narrow tab row`, async () => {
+    const app = await setup(60, 24);
+    app.model.playlists.find(playlist => playlist.id === "p.chill")!.name = name;
+    app.model.changed();
+    app.ui.sidebar.focus(); app.ui.sidebar.selectKey("playlist:p.chill"); await app.flush();
+    const sidebar = app.ui.sidebar;
+    const tab = app.renderer.root.findDescendantById("sidebar:row:playlist:p.chill")!;
+    expect(tab).toBeDefined();
+    expect(tab.x).toBeGreaterThanOrEqual(sidebar.x);
+    expect(tab.x + tab.width).toBeLessThanOrEqual(sidebar.x + sidebar.width);
+    const label = tab.getChildren().at(-1) as TextRenderable;
+    expect(label.plainText.endsWith("…")).toBe(true);
+    expect(name.startsWith(label.plainText.slice(0, -1))).toBe(true);
+    expect(Bun.stringWidth(label.plainText)).toBeLessThanOrEqual(tab.width - 2);
+    const row = app.captureCharFrame().split("\n")[sidebar.y]!;
+    expect(row).toContain(name.slice(0, 6));
+    expect(row).toContain("…");
+    // A click on the cut tab opens its playlist.
+    await click(app, "sidebar:row:playlist:p.chill");
+    await waitFor(() => app.model.view === "playlist:p.chill");
+    // The keys move off the long tab and back, and each chosen tab shows.
+    app.ui.sidebar.focus(); app.mockInput.pressArrow("left"); await app.flush();
+    const before = app.ui.sidebar.selectedId()!;
+    expect(before).not.toBe("playlist:p.chill");
+    expect(app.renderer.root.findDescendantById(`sidebar:row:${before}`)).toBeDefined();
+    app.mockInput.pressArrow("right"); await app.flush();
+    expect(app.ui.sidebar.selectedId()).toBe("playlist:p.chill");
+    expect(app.renderer.root.findDescendantById("sidebar:row:playlist:p.chill")).toBeDefined();
+  });
+
+  test("the chosen tab shows even where its icon and an ellipsis do not fit", async () => {
+    const app = await createTestRenderer({ width: 3, height: 2 }); cleanup.push(() => app.renderer.destroy());
+    const tabs = new ClickList(app.renderer, "tabs", 1);
+    tabs.horizontal = true;
+    app.renderer.root.add(tabs);
+    tabs.setRows([{ id: "favourites", lead: icon.heart, name: "Favourite Songs", activate: () => {} }]);
+    await app.flush();
+    expect(tabs.getChildren().map(child => child.id)).toEqual(["tabs:row:favourites"]);
+    expect(app.captureCharFrame().split("\n")[0]).toContain(icon.heart);
   });
 
   test("the sidebar lists the library and the playlists apart, and editing moves an entry only within its group", async () => {

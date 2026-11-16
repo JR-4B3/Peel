@@ -53,6 +53,7 @@ export class PeelUI {
   private albumFavouriteButton: Button;
   private actions: BoxRenderable;
   private hints: TextRenderable;
+  private testBuild?: TextRenderable;
   private lastRows = "";
   private lastView = "";
   private lastItems?: Media[];
@@ -82,7 +83,7 @@ export class PeelUI {
     this.topBar.focusChanged();
   };
   private change = () => this.update();
-  private resize = () => this.resizeLayout();
+  private resize = () => { this.resizeLayout(); this.drawHints(); };
   private key = (event: KeyEvent) => this.handleKey(event);
 
   constructor(readonly renderer: CliRenderer, readonly model: Model, private quit = () => renderer.destroy(), lyrics?: LyricsSource) {
@@ -177,8 +178,12 @@ export class PeelUI {
     this.root.add(this.player.panel);
 
     const footer = new BoxRenderable(ctx, { height: 1, flexDirection: "row", paddingX: 1, gap: 2 });
-    // One line. A long message is cut off, so the key hints beside it stay visible.
-    this.status = new TextRenderable(ctx, { id: "status", content: model.status, fg: colour.muted, height: 1, flexGrow: 1, minWidth: 0, truncate: true, wrapMode: "none" });
+    // A test build says so in front of every message, so the listener knows which code runs.
+    // drawHints shortens it in narrow windows.
+    if (model.testBuild) footer.add(this.testBuild = new TextRenderable(ctx, { id: "test-build", content: model.testBuild, fg: colour.accent, height: 1, flexShrink: 0, selectable: false }));
+    // One line. It takes the room the other parts leave, and a long message is cut off, so the
+    // key hints beside it stay visible.
+    this.status = new TextRenderable(ctx, { id: "status", content: model.status, fg: colour.muted, height: 1, flexGrow: 1, flexShrink: 1, flexBasis: 0, minWidth: 0, truncate: true, wrapMode: "none" });
     footer.add(this.status);
     this.hints = new TextRenderable(ctx, { id: "hints", content: "", height: 1, flexShrink: 0, selectable: false });
     footer.add(this.hints);
@@ -510,6 +515,22 @@ export class PeelUI {
     while (pairs.length > 2 && length() > this.renderer.terminalWidth / 2) pairs.shift();
     this.hints.content = new StyledText(pairs.flatMap(([key, label], index) => [fg(colour.muted)(`${index ? "  " : ""}${key} `), fg(colour.faint)(label)]));
     this.hints.width = length();
+    this.fitTestBuild(length());
+  }
+
+  // The test build's label gets shorter as the window gets narrower, from "Test build #118
+  // be400a9" to "#118 be400a9" and "#118", and goes when even that leaves the status message
+  // fewer than 10 columns. The terminal's title still names the test build. It takes the hints'
+  // new width, since their width reads the old one until the next layout.
+  private fitTestBuild(hints: number) {
+    const label = this.testBuild, full = this.model.testBuild;
+    if (!label || !full) return;
+    const short = full.replace(/^Test build /, ""), labels = [full, short, short.split(" ")[0]!];
+    // The padding, the hints and the gaps of two after the label and the status message.
+    const room = this.renderer.terminalWidth - 2 - hints - 2 - 2 - 10;
+    const text = labels.find(text => Bun.stringWidth(text) <= room);
+    label.visible = !!text;
+    if (text) label.content = text;
   }
 
 

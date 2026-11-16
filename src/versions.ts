@@ -6,7 +6,9 @@ import type { Media } from "./types";
 // is one, so a song does not lose its heart because Apple shows it under another ID.
 //
 // Versions match by ID, then by ISRC, then by title, artist and length. The last rule is for a
-// library song whose catalog song Apple no longer serves, so no ISRC can be read for it.
+// library song whose catalog song Apple no longer serves, so no ISRC can be read for it. Two songs
+// whose ISRCs are both known and differ are separate masters, such as a remaster, and never match
+// by title, artist and length.
 
 // Two songs with the same title and a shared artist are the same recording when their lengths
 // differ by at most this many seconds. A live take, an extended mix or a radio edit has another
@@ -30,24 +32,31 @@ export class Versions {
   private titles = new Map<string, Version[]>();
 
   // songs are the favourites, each with the ISRC of the catalog song it links to when Apple serves it.
-  constructor(readonly songs: Version[]) {
+  // byTitle says whether a favourite may match by title, artist and length. A favourite whose ISRC
+  // was never read could be a separate master of the song, so it matches by ID only.
+  constructor(readonly songs: Version[], private byTitle: (song: Version) => boolean = () => true) {
     for (const song of songs) {
       for (const id of [song.id, song.catalogId, song.reportingId]) if (id) this.ids.add(id);
       if (song.isrc) this.isrcs.add(song.isrc);
-      if (song.duration > 0 && song.name) this.titles.set(title(song.name), [...this.titles.get(title(song.name)) ?? [], song]);
+      if (song.duration > 0 && song.name && byTitle(song)) this.titles.set(title(song.name), [...this.titles.get(title(song.name)) ?? [], song]);
     }
   }
 
   // Whether song is a version of one of the favourites. isrc is the song's ISRC when known.
   has(song: Media, isrc = (song as Version).isrc): boolean {
-    if ([song.id, song.catalogId, song.reportingId].some(id => id && this.ids.has(id))) return true;
+    if (this.hasId(song)) return true;
     if (isrc && this.isrcs.has(isrc)) return true;
-    return !!this.titles.get(title(song.name))?.some(favourite => sameTitle(favourite, song));
+    return !!this.titles.get(title(song.name))?.some(favourite => !(favourite.isrc && isrc) && sameTitle(favourite, song));
+  }
+
+  // Whether one of song's IDs is a favourite's.
+  hasId(song: Media): boolean {
+    return [song.id, song.catalogId, song.reportingId].some(id => id && this.ids.has(id));
   }
 
   // The favourites that are versions of song, for removing every mark it has.
   of(song: Media, isrc = (song as Version).isrc): Version[] {
-    return this.songs.filter(favourite => sameRecording(favourite, song, isrc));
+    return this.songs.filter(favourite => sameRecording(favourite, song, isrc, this.byTitle(favourite)));
   }
 }
 
@@ -58,9 +67,10 @@ function sameTitle(a: Media, b: Media) {
   return [...artists(b.artist)].some(name => credited.has(name));
 }
 
-export function sameRecording(a: Version, b: Media, isrc = (b as Version).isrc): boolean {
+// byTitle false lets only the IDs and ISRCs decide.
+export function sameRecording(a: Version, b: Media, isrc = (b as Version).isrc, byTitle = true): boolean {
   const ids = new Set([b.id, b.catalogId, b.reportingId].filter(Boolean));
   if ([a.id, a.catalogId, a.reportingId].some(id => id && ids.has(id))) return true;
-  if (a.isrc && isrc && a.isrc === isrc) return true;
-  return sameTitle(a, b);
+  if (a.isrc && isrc) return a.isrc === isrc;
+  return byTitle && sameTitle(a, b);
 }
