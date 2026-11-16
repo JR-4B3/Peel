@@ -128,6 +128,7 @@ cmd_session() {
         if BOOT_TIMEOUT=20 wait_boot; then apply_android_settings; log "session running ($mode)"; return 0; fi
         log "Android booted but is unreachable; restarting the session once"
         systemctl --user restart "peel-hires-session@$mode.service" || die "the session did not restart"
+        ADB_TARGET=
         BOOT_TIMEOUT=90 wait_boot || die "Android booted but stays unreachable over adb"
       fi
       apply_android_settings
