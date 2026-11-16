@@ -177,6 +177,8 @@ export class PeelUI {
     this.root.add(this.player.panel);
 
     const footer = new BoxRenderable(ctx, { height: 1, flexDirection: "row", paddingX: 1, gap: 2 });
+    // A test build says so in front of every message, so the listener knows which code runs.
+    if (model.testBuild) footer.add(new TextRenderable(ctx, { id: "test-build", content: model.testBuild, fg: colour.accent, height: 1, flexShrink: 0, selectable: false }));
     // One line. A long message is cut off, so the key hints beside it stay visible.
     this.status = new TextRenderable(ctx, { id: "status", content: model.status, fg: colour.muted, height: 1, flexGrow: 1, minWidth: 0, truncate: true, wrapMode: "none" });
     footer.add(this.status);

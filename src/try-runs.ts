@@ -19,6 +19,13 @@ export interface TestRun { dir: string; version: string; pids: number[] }
 // peel --try gives a test build a version that says so: 0.1.1-try.pr118.be400a9.
 export const testVersion = (version?: string) => /^[^-]+-try\./.test(version ?? "");
 
+// What a test build's version names, for the terminal's title and Peel's status line:
+// "Test build #118 be400a9" or "Test build main 1a2b3c4". It is undefined for other versions.
+export function testLabel(version?: string) {
+  const match = /^[^-]+-try\.(?:pr(\d+)|(main))\.([0-9a-f]+)$/.exec(version ?? "");
+  return match ? `Test build ${match[1] ? `#${match[1]}` : "main"} ${match[3]}` : undefined;
+}
+
 // A process that runs as another user answers EPERM, and runs too.
 export function alive(pid: number) {
   try { process.kill(pid, 0); return true; } catch (error) { return (error as NodeJS.ErrnoException).code === "EPERM"; }

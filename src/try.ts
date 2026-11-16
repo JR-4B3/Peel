@@ -1,14 +1,15 @@
 // peel --try [PR number | main]: starts Peel from the code of a pull request, or of main before the
 // nightly release has it, without changing the installed Peel. Without a number it takes the open
-// pull request that changed last. Each build is downloaded from GitHub once into <root>/try. The
-// three used last are kept, and so is each build that runs or whose code the hi-res host runs.
-// A test build never updates itself.
+// pull request that changed last, skipping pull requests from forks. It runs only branches of
+// this repository. Each build is downloaded from GitHub once into <root>/try. The three used last
+// are kept, and so is each build that runs or whose code the hi-res host runs. A test build never
+// updates itself.
 //
+// peel --try starts only while no other Peel uses the hi-res host on this computer (sharedHost).
 // Before the test build starts, peel --try starts the hi-res host from the test build's code,
 // also for a branch older than the installed release, and records the test build as running
 // (src/try-runs.ts). While it runs, the installed Peel's windows leave that host alone. When the
-// test build closes and no other Peel uses that host, the host is stopped. Otherwise the next
-// command of the installed Peel restarts it into the installed code (outdated in src/hires.ts).
+// test build closes, peel --try stops that host, so the installed Peel starts its own again.
 import { existsSync } from "node:fs";
 import { mkdir, readdir, readFile, rename, rm, stat, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
@@ -18,7 +19,7 @@ import { fileURLToPath } from "node:url";
 import { hiresBuild } from "./build";
 import { readPreferences } from "./config";
 import { ensureHires, Hires, hiresHome, hiresSelected, launchHost, testRunsDir } from "./hires";
-import { endTestRun, recordTestRun, testRuns } from "./try-runs";
+import { endTestRun, recordTestRun, testLabel, testRuns } from "./try-runs";
 import { defaultRoot, installRoot, repository } from "./update";
 
 const appDir = fileURLToPath(new URL("..", import.meta.url));
@@ -42,23 +43,34 @@ async function github<T>(path: string): Promise<T> {
   return await response.json() as T;
 }
 
-interface Pull { number: number; title: string; head: { sha: string } }
+// head.repo is null when the fork that held the branch was deleted.
+interface Pull { number: number; title: string; head: { sha: string; repo: { full_name: string } | null } }
 
-export async function resolveTarget(target?: string): Promise<TryTarget> {
+// Whether the pull request's branch is in this repository. A fork's branch holds code that anyone
+// with a GitHub account can push, and peel --try would run it on this computer, so peel --try
+// runs only branches of this repository.
+const ownBranch = (pull: Pull) => pull.head.repo?.full_name.toLowerCase() === repository.toLowerCase();
+
+// Tests pass a stand-in for GitHub's API.
+export async function resolveTarget(target?: string, get: <T>(path: string) => Promise<T> = github): Promise<TryTarget> {
   let label: string, sha: string, title: string;
   if (target === "main") {
-    const commit = await github<{ sha: string; commit: { message: string } }>("/commits/main");
+    const commit = await get<{ sha: string; commit: { message: string } }>("/commits/main");
     ({ sha } = commit);
     label = "main"; title = commit.commit.message.split("\n")[0]!;
   } else {
-    const pull = target
-      ? await github<Pull>(`/pulls/${target}`)
-      : (await github<Pull[]>("/pulls?state=open&sort=updated&direction=desc&per_page=1"))[0];
-    if (!pull) throw new Error("There is no open pull request. peel --try main starts the newest code on main.");
+    let pull: Pull | undefined;
+    if (target) {
+      pull = await get<Pull>(`/pulls/${target}`);
+      if (!ownBranch(pull)) throw new Error(`Pull request #${pull.number} comes from ${pull.head.repo ? `the fork ${pull.head.repo.full_name}` : "a deleted fork"}. peel --try runs only branches of ${repository}, since it runs the code on this computer.`);
+    } else {
+      pull = (await get<Pull[]>("/pulls?state=open&sort=updated&direction=desc&per_page=50")).find(ownBranch);
+      if (!pull) throw new Error(`There is no open pull request from a branch of ${repository}. peel --try main starts the newest code on main.`);
+    }
     label = `pr${pull.number}`; sha = pull.head.sha; title = pull.title;
   }
   if (!/^[0-9a-f]{40}$/.test(sha)) throw new Error("GitHub gave no valid commit.");
-  const commit = await github<{ commit: { committer: { date: string } } }>(`/commits/${sha}`);
+  const commit = await get<{ commit: { committer: { date: string } } }>(`/commits/${sha}`);
   return { label, sha, title, time: new Date(commit.commit.committer.date).toISOString() };
 }
 
@@ -130,15 +142,32 @@ async function prune(tries: string, runs: string, host?: string) {
   }
 }
 
-// The version of the code the hi-res host runs. It asks without the x-peel-owner header, which
-// would make peel --try one of the Peels that keep the host running.
-async function hostVersion(home = hiresHome): Promise<string | undefined> {
+// What the hi-res host on this computer says about itself, or undefined when none runs: the version
+// of the code it runs, and how many Peels use it. It asks without the x-peel-owner header, which
+// would make peel --try one of the Peels that keep the host running, so others counts every Peel
+// that uses it. Tests pass their own folder with the host's key.
+export async function hostState(home = hiresHome): Promise<{ version?: string; others?: number } | undefined> {
   try {
     const { port, key } = JSON.parse(await readFile(join(home, "key.json"), "utf8")) as { port: number; key: string };
     const response = await fetch(`http://127.0.0.1:${port}/state`, { headers: { "x-peel-key": key }, signal: AbortSignal.timeout(5000) });
-    const build = (await response.json() as { build?: { version?: unknown } } | null)?.build;
-    return typeof build?.version === "string" ? build.version : undefined;
+    if (!response.ok) return undefined;
+    const state = await response.json() as { build?: { version?: unknown }; others?: unknown } | null;
+    return { version: typeof state?.build?.version === "string" ? state.build.version : undefined, others: typeof state?.others === "number" ? state.others : undefined };
   } catch { return undefined; }
+}
+
+const hostVersion = async () => (await hostState())?.version;
+
+// Why peel --try does not start, when other Peels use the hi-res host. A Peel window of a version
+// from before peel --try orders builds only by release number. It restarts a test build's host
+// whose branch has an older release number into its own code, and after the test build closed it
+// keeps a host whose code is newer by time, so the installed Peel would not get its host back.
+// Those windows cannot be changed, so peel --try starts only while no other Peel uses the host.
+// A host that does not say how many Peels use it counts as used.
+export function sharedHost(host: { others?: number } | undefined) {
+  if (!host || host.others === 0) return undefined;
+  const count = host.others === undefined ? "Other Peel windows use" : host.others === 1 ? "Another Peel window uses" : `${host.others} other Peel windows use`;
+  return `${count} hi-res playback on this computer. Close them, also Peels that control this computer from another one, and run peel --try again.`;
 }
 
 // Runs the test build in this terminal and returns its exit code.
@@ -147,12 +176,18 @@ export async function runTry(args: string[]) {
   const status = (text: string) => console.log(text);
   const resolved = await resolveTarget(target);
   status(`Peel test build: ${resolved.label === "main" ? "main" : `pull request #${resolved.label.slice(2)}`}, ${resolved.title} (${resolved.sha.slice(0, 7)})`);
+  // A test build that controls another computer starts no host here, unless one runs already.
+  const local = rest.includes("--local") || (!rest.includes("--remote") && !(await readPreferences()).remote);
+  const host = hiresSelected() ? await hostState() : undefined, ownHost = hiresSelected() && (local || !!host);
+  const shared = ownHost ? sharedHost(host) : undefined;
+  if (shared) { console.error(shared); return 1; }
   const { dir, version } = await installTry(resolved, installRoot(appDir) ?? defaultRoot(), status);
   let code: number;
   try {
-    // A test build that controls another computer starts no host here, unless one runs already.
-    const local = rest.includes("--local") || (!rest.includes("--remote") && !(await readPreferences()).remote);
-    if (hiresSelected() && (local || await hostVersion())) await useOwnHost(dir, status).catch(error => status(`The test build's hi-res playback did not start: ${error instanceof Error ? error.message : error}`));
+    if (ownHost) await useOwnHost(dir, status).catch(error => status(`The test build's hi-res playback did not start: ${error instanceof Error ? error.message : error}`));
+    // The terminal's title names the test build, also for a branch from before Peel showed it.
+    const label = testLabel(version);
+    if (label && process.stdout.isTTY) process.stdout.write(`\x1b]2;Peel ${label}\x07`);
     const child = Bun.spawn([process.execPath, "src/index.ts", ...rest], { cwd: dir, stdio: ["inherit", "inherit", "inherit"] });
     // The test build counts as running while it or peel --try runs.
     await recordTestRun(testRunsDir, { dir, version, pids: [process.pid, child.pid] });
@@ -174,10 +209,12 @@ async function useOwnHost(dir: string, status: (text: string) => void) {
   await ensureHires(new Hires(), status, undefined, { build: { hash, version, time }, launch: () => launchHost(code) });
 }
 
-// Once the test build closed, a hi-res host that runs its code stops when no other Peel uses it,
-// so the installed Peel starts its own host next time. A test build of the same version that
-// still runs keeps it. A Peel that still uses it restarts it with its next command, as the
-// test build ended. The test build's process leaves the host's list of users within a second.
+// Once the test build closed, a hi-res host that runs its code stops, so the installed Peel starts
+// its own host next time. A test build of the same version that still runs keeps it. The test
+// build's process leaves the host's list of users within a second. A Peel window opened while the
+// test build ran may still use the host. It stops anyway, since a window of a version from before
+// peel --try would keep the test build's code running (sharedHost). That window's next command
+// starts the host again with its own code.
 // Tests pass a stand-in for the host, their records' folder and a shorter wait.
 export async function releaseHost(version: string, hires: Pick<Hires, "state" | "quit" | "release"> = new Hires(), runs = testRunsDir, wait = 2000) {
   let state = await hires.state().catch(() => undefined);
@@ -187,7 +224,7 @@ export async function releaseHost(version: string, hires: Pick<Hires, "state" | 
     state = await hires.state().catch(() => undefined);
   }
   if (!state || state.build?.version !== version) return;
-  if (state.others || testRuns(runs).live.some(run => run.version === version)) { await hires.release().catch(() => {}); return; }
-  console.log("Stopping the test build's hi-res playback...");
+  if (testRuns(runs).live.some(run => run.version === version)) { await hires.release().catch(() => {}); return; }
+  console.log(state.others ? "Stopping the test build's hi-res playback. Another Peel window used it and starts its own with its next command..." : "Stopping the test build's hi-res playback...");
   await hires.quit().catch(() => {});
 }

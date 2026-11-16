@@ -3,8 +3,14 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { installTry, releaseHost, tryArgument, type TryTarget } from "../src/try";
-import { endTestRun, recordTestRun, testRuns, testVersion } from "../src/try-runs";
+import { hostState, installTry, releaseHost, resolveTarget, sharedHost, tryArgument, type TryTarget } from "../src/try";
+import { endTestRun, recordTestRun, testLabel, testRuns, testVersion } from "../src/try-runs";
+import { repository } from "../src/update";
+import { createTestRenderer } from "@opentui/core/testing";
+import { defaults } from "../src/config";
+import { Model } from "../src/model";
+import { PeelUI } from "../src/ui";
+import { fixture } from "./fixture";
 import { checkForUpdate } from "../src/update";
 
 test("--try takes a pull request number, main, or nothing, and passes the other arguments on", () => {
@@ -116,7 +122,7 @@ test("a test build's version says it is one, also in a folder downloaded before"
 });
 
 // #124: the installed Peel gets its own host code back once the test build closed.
-test("a closed test build stops its host unless another Peel or a test build of that version uses it", async () => {
+test("a closed test build stops its host unless a test build of that version still runs", async () => {
   const runs = await mkdtemp(join(tmpdir(), "peel-try-release-")), version = "0.1.0-try.pr1.abcdef0";
   const host = (build: string, others: number[]) => {
     const calls: string[] = [];
@@ -132,10 +138,12 @@ test("a closed test build stops its host unless another Peel or a test build of 
     let fake = host(version, [1, 0]);
     await releaseHost(version, fake, runs, 1000);
     expect(fake.calls).toEqual(["quit"]);
-    // A window of the installed Peel uses it. That window restarts it with its next command.
+    // A window opened while the test build ran still uses it. A window of a version from before
+    // peel --try would keep the test build's code running, so the host stops anyway, and that
+    // window starts its own with its next command.
     fake = host(version, [1, 1, 1, 1]);
     await releaseHost(version, fake, runs, 100);
-    expect(fake.calls).toEqual(["release"]);
+    expect(fake.calls).toEqual(["quit"]);
     // The host runs other code: nothing to do.
     fake = host("0.1.1", []);
     await releaseHost(version, fake, runs, 100);
@@ -148,4 +156,88 @@ test("a closed test build stops its host unless another Peel or a test build of 
     await endTestRun(runs);
     expect(testRuns(runs).live).toEqual([]);
   } finally { await rm(runs, { recursive: true, force: true }); }
+});
+
+// GitHub's answers for pull requests, as resolveTarget asks for them. Each pull request's branch
+// is in the repository named, or in a deleted fork for null.
+function github(pulls: { number: number; repo: string | null }[]) {
+  const asked: string[] = [];
+  const pull = ({ number, repo }: { number: number; repo: string | null }) => ({ number, title: `Change ${number}`, head: { sha: String(number % 10).repeat(40), repo: repo && { full_name: repo } } });
+  const get = async <T>(path: string): Promise<T> => {
+    asked.push(path);
+    if (path.startsWith("/pulls?")) return pulls.map(pull) as T;
+    const number = /^\/pulls\/(\d+)$/.exec(path)?.[1];
+    if (number) return pull(pulls.find(entry => entry.number === Number(number))!) as T;
+    if (path.startsWith("/commits/")) return { commit: { committer: { date: "2026-11-16T12:00:00Z" } } } as T;
+    throw new Error(`Unexpected ${path}`);
+  };
+  return { get, asked };
+}
+
+test("peel --try runs only pull requests whose branch is in this repository", async () => {
+  const fork = "someone/Peel";
+  const { get, asked } = github([{ number: 7, repo: fork }, { number: 6, repo: null }, { number: 5, repo: repository }, { number: 4, repo: repository }]);
+  // A fork's pull request, named by number, does not run, and nothing is downloaded.
+  await expect(resolveTarget("7", get)).rejects.toThrow(`Pull request #7 comes from the fork ${fork}.`);
+  await expect(resolveTarget("6", get)).rejects.toThrow("Pull request #6 comes from a deleted fork.");
+  expect(asked.filter(path => path.startsWith("/commits/"))).toEqual([]);
+  // Without a number, it takes the newest pull request from a branch of this repository.
+  expect(await resolveTarget(undefined, get)).toMatchObject({ label: "pr5", sha: "5".repeat(40), title: "Change 5" });
+  expect(await resolveTarget("4", get)).toMatchObject({ label: "pr4", sha: "4".repeat(40) });
+  // When every open pull request comes from a fork, there is nothing to run.
+  await expect(resolveTarget(undefined, github([{ number: 7, repo: fork }]).get)).rejects.toThrow("There is no open pull request from a branch of");
+});
+
+test("peel --try starts only while no other Peel uses the hi-res host", async () => {
+  const home = await mkdtemp(join(tmpdir(), "peel-try-shared-"));
+  let others: number | undefined = 2, owner: string | null = null;
+  const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    if (request.headers.get("x-peel-key") !== "secret") return Response.json({ error: "Wrong engine key" }, { status: 403 });
+    owner = request.headers.get("x-peel-owner");
+    return Response.json({ ready: true, build: { hash: "h", version: "0.1.1", time: "" }, others });
+  } });
+  try {
+    // No host runs: there is nothing to share.
+    expect(await hostState(home)).toBeUndefined();
+    expect(sharedHost(undefined)).toBeUndefined();
+    await writeFile(join(home, "key.json"), JSON.stringify({ port: server.port, key: "secret" }));
+    // Two installed Peel windows use it. peel --try asks without joining them.
+    expect(await hostState(home)).toEqual({ version: "0.1.1", others: 2 });
+    expect(owner).toBeNull();
+    expect(sharedHost(await hostState(home))).toStartWith("2 other Peel windows use hi-res playback");
+    others = 1;
+    expect(sharedHost(await hostState(home))).toStartWith("Another Peel window uses hi-res playback");
+    // A host that does not say how many Peels use it counts as used.
+    others = undefined;
+    expect(sharedHost(await hostState(home))).toStartWith("Other Peel windows use");
+    // A host that nobody uses any more lets the test build start.
+    others = 0;
+    expect(sharedHost(await hostState(home))).toBeUndefined();
+  } finally {
+    server.stop(true);
+    await rm(home, { recursive: true, force: true });
+  }
+});
+
+test("a test build names its pull request and commit in the status line", async () => {
+  expect(testLabel("0.1.0-try.pr118.be400a9")).toBe("Test build #118 be400a9");
+  expect(testLabel("0.1.1-try.main.1a2b3c4")).toBe("Test build main 1a2b3c4");
+  expect(testLabel("0.1.1-nightly.20261115.abcdef0")).toBeUndefined();
+  expect(testLabel(undefined)).toBeUndefined();
+
+  const api = fixture(), setup = await createTestRenderer({ width: 120, height: 36 });
+  const model = new Model(api.library, api.player, structuredClone(defaults), async () => {}, { read: async () => undefined, write: async () => {} });
+  model.testBuild = testLabel("0.1.0-try.pr118.be400a9");
+  const ui = new PeelUI(setup.renderer, model);
+  try {
+    await model.start();
+    model.status = "Added to the queue: Soma"; model.changed();
+    await setup.flush();
+    // The label stays in front of other messages.
+    const footer = setup.captureCharFrame().trimEnd().split("\n").at(-1)!;
+    expect(footer).toContain("Test build #118 be400a9");
+    expect(footer).toContain("Added to the queue: Soma");
+  } finally {
+    ui.dispose(); setup.renderer.destroy(); api.server.stop(true);
+  }
 });

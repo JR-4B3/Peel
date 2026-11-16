@@ -8,6 +8,7 @@ import { DeviceNetwork } from "./devices";
 import { Model } from "./model";
 import { PeelUI } from "./ui";
 import { memoryUse } from "./memory";
+import { testLabel } from "./try-runs";
 import { checkForUpdate, currentBuild, installLauncher, readyVersion, restartCommand, type Ready } from "./update";
 
 // Peel plays through its own engine. Where the hi-res pipeline (hires/) is installed, Apple
@@ -153,6 +154,11 @@ try {
       process.exit(await child.exited);
     };
     updates(false);
+    // A test build (peel --try) names its pull request and commit in the status line and the
+    // terminal's title for as long as it runs.
+    const build = await currentBuild().catch(() => undefined);
+    model.testBuild = build?.channel === "try" ? testLabel(build.version) : undefined;
+    if (model.testBuild) renderer.setTerminalTitle(`Peel ${model.testBuild}`);
     let interval: ReturnType<typeof setInterval> | undefined;
     const ui = new PeelUI(renderer, model, () => { clearInterval(interval); ui.dispose(); renderer.destroy(); });
     // q, Ctrl+C, and closing the terminal window all destroy the renderer. The engine stops with it.
