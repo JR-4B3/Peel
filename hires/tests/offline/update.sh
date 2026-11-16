@@ -32,6 +32,7 @@ systemctl() { return 1; }
 android_frozen() { return 1; }
 thaw_android() { :; }
 standby_android() { return 1; }
+reclaim_later() { :; }
 # The root helper's records. Activation fails when asked to and then restores what was current,
 # as the real helper's transaction does.
 root() {

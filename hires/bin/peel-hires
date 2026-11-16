@@ -169,9 +169,13 @@ standby_android() {
     { log "adb can't reach Android; stopping it instead of keeping it in standby"; return 1; }
   container_call Freeze && android_frozen || { log "Android could not be frozen; stopping it"; return 1; }
   date +%s > "$STANDBY"
-  reclaim_android
+  # Reclaiming takes a few seconds. It runs after the session lock is released (reclaim_later), so a
+  # Peel that opens meanwhile wakes Android without waiting, which also ends the reclaim.
+  RECLAIM=1
   log "Android is in standby for up to $STANDBY_HOURS hours"
 }
+RECLAIM=
+reclaim_later() { [ -n "$RECLAIM" ] || return 0; RECLAIM=; reclaim_android; }
 
 # A frozen Android still holds about 1.5 GB, most of it its page cache and its own memory. The
 # root helper reclaims it: the page cache is dropped and the rest moves to compressed swap, which
@@ -182,7 +186,10 @@ reclaim_android() {
   helper=$(sha256sum 2>/dev/null < "$ROOT_HELPER" | cut -c1-16) || helper=
   helper=${helper:-unreadable}
   [ "$(cat "$STATE/no-reclaim" 2>/dev/null)" = "$helper" ] && return 0
-  if out=$(root reclaim 2>&1); then log "$out"; return 0; fi
+  # Neither the helper nor the subshell waiting for it keeps the session or update lock, so a
+  # killed caller leaves no lock held while the helper still runs. A redirection on the function
+  # call would keep saved copies of both in the subshell.
+  if out=$(exec 7>&- 9>&-; root reclaim 2>&1); then log "$out"; return 0; fi
   if grep -q "unknown verb" <<<"$out"; then
     log "the installed root helper can't reclaim Android's memory in standby; reinstall it to save about 1.2 GB: sudo hires/install.sh \"\$USER\""
     echo "$helper" > "$STATE/no-reclaim"
@@ -238,7 +245,9 @@ cmd_session() {
       # into standby or stops it itself when it ends and no Peel uses it.
       update_lock || { log "an update, test or health check is running; it puts Android away when it ends"; return 0; }
       session_lock || return 0
-      stop_unused ;;
+      stop_unused
+      flock -u 7
+      reclaim_later ;;
     status) waydroid status
       if android_frozen; then echo "Standby: since $(date -d "@$(( $(date +%s) - $(standby_age) ))" '+%Y-%m-%d %H:%M')"; fi ;;
     run)  # used by the systemd unit: peel-hires session run <headless|visible>
@@ -291,6 +300,7 @@ release_android() {
   session_lock || return 0
   host_running || stop_unused || true
   flock -u 7
+  reclaim_later
 }
 # An earlier version turned these apps off to save about 60 MB. Without a home screen app or
 # with the persistent Phone app off, Android's boot slowed by 2 seconds or stalled, so they are
@@ -903,8 +913,16 @@ cmd_watchdog() {
   if android_frozen; then
     rm -f "$strikes"
     standby_expired || return 0
-    log "watchdog: Android was in standby for $STANDBY_HOURS hours; stopping it"
-    cmd_session stop
+    # A controller holds the session lock while it wakes Android, so a busy lock means a Peel is
+    # using it, and this run leaves it. Android may have woken before the lock was free, so both
+    # checks are made again under it.
+    exec 7>"$STATE/session.lock"
+    flock -n 7 || { log "watchdog: Android is being woken or started; leaving it"; return 0; }
+    if android_frozen && standby_expired; then
+      log "watchdog: Android was in standby for $STANDBY_HOURS hours; stopping it"
+      cmd_session stop
+    fi
+    flock -u 7
     return 0
   fi
   if ! session_running; then problem="the session is not running"

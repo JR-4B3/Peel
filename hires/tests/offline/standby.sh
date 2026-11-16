@@ -7,8 +7,8 @@ set -euo pipefail
 here=$(cd "$(dirname "$0")" && pwd)
 HIRES=$(cd "$here/../.." && pwd)
 work=$(mktemp -d)
-server=
-trap '[ -z "$server" ] || kill "$server" 2>/dev/null || true; rm -rf "$work"' EXIT
+server= helpers=
+trap 'kill $server $helpers 2>/dev/null || true; rm -rf "$work"' EXIT
 export LC_ALL=C
 
 F=$work/fake        # the simulated machine: session, frozen, and the log of every call
@@ -58,7 +58,8 @@ fake sudo <<'EOF'
 [ "$1" = -n ] && shift; shift
 echo "root $*" >>"$F/calls"
 case "$1" in
-  reclaim) if [ -f "$F/old-helper" ]; then echo "peel-hires-root: unknown verb 'reclaim'. Verbs: latest list" >&2; exit 1; fi
+  reclaim) if [ -f "$F/slow-reclaim" ]; then echo $$ >"$F/reclaim.pid"; touch "$F/reclaiming"; exec /bin/sleep 30; fi
+    if [ -f "$F/old-helper" ]; then echo "peel-hires-root: unknown verb 'reclaim'. Verbs: latest list" >&2; exit 1; fi
     [ -f "$F/frozen" ] || { echo "peel-hires-root: Android is not frozen; nothing reclaimed" >&2; exit 1; }
     echo "reclaimed Android's memory in standby: 1550 MB -> 290 MB" ;;
   list) echo current=A; echo good=A ;;
@@ -81,6 +82,14 @@ fake pactl <<'EOF'
 #!/bin/bash
 # Android's stream, while $F/stream exists. A frozen Android's stream may stay listed, uncorked.
 if [ -f "$F/stream" ]; then echo '[{"properties": {"application.name": "Waydroid"}, "corked": false}]'; else echo '[]'; fi
+EOF
+# flock, which can also stand for a Peel's controller that wakes Android while the caller waits
+# for the session lock.
+fake flock <<'EOF'
+#!/bin/bash
+# Only the watchdog takes the session lock (7) without waiting.
+[ "$*" = "-n 7" ] && [ -f "$F/wake-during-lock" ] && rm -f "$F/frozen" "$XDG_STATE_HOME/peel-hires/standby" "$F/wake-during-lock"
+exec /usr/bin/flock "$@"
 EOF
 fake curl <<'EOF'
 #!/bin/bash
@@ -153,6 +162,19 @@ expect "an old root helper is asked only once" not called "root reclaim"
 expect "an old root helper is not reported again" not grep -q "reinstall it" "$F/out"
 expect "a later standby without reclaim still freezes" in_standby
 
+# Reclaiming runs after the session lock is released, and holds neither lock: a Peel that opens
+# meanwhile is not held up, and an idle killed by the host leaves no lock behind.
+fresh; touch "$F/slow-reclaim"
+bash "$HIRES/bin/peel-hires" session idle >"$F/out" 2>&1 </dev/null & idle=$!
+for _ in $(seq 100); do [ -f "$F/reclaiming" ] && break; /bin/sleep 0.05; done
+expect "a slow reclaim has started" [ -f "$F/reclaiming" ]
+expect "the session lock is free while reclaim runs" /usr/bin/flock -n "$STATE/session.lock" true
+kill "$idle"; wait "$idle" 2>/dev/null || true
+expect "a killed idle leaves the update lock free while reclaim still runs" /usr/bin/flock -n "$STATE/update.lock" true
+expect "a killed idle leaves the session lock free while reclaim still runs" /usr/bin/flock -n "$STATE/session.lock" true
+expect "the slow reclaim was still running" kill -0 "$(cat "$F/reclaim.pid")"
+kill "$(cat "$F/reclaim.pid")" 2>/dev/null || true
+
 # The watchdog leaves a fresh standby alone and stops one older than the limit.
 asleep 600; echo 1 >"$STATE/watchdog.strikes"; peel watchdog
 expect "the watchdog leaves a fresh standby alone" in_standby
@@ -165,6 +187,18 @@ asleep $((3 * 3600)); setting STANDBY_HOURS=2; peel watchdog
 expect "the watchdog follows STANDBY_HOURS" not running
 asleep 60; setting STANDBY_HOURS=0; peel watchdog
 expect "with standby off, the watchdog stops a frozen Android" not running
+# A Peel's controller holds the session lock while it wakes Android: the watchdog leaves it.
+asleep $((25 * 3600)); /usr/bin/flock "$STATE/session.lock" /bin/sleep 3 >/dev/null 2>&1 & holder=$!; helpers="$helpers $holder"
+for _ in $(seq 50); do /usr/bin/flock -n "$STATE/session.lock" true || break; /bin/sleep 0.05; done
+peel watchdog
+expect "the watchdog does not wait for a busy session lock" not called "busctl Unfreeze"
+expect "the watchdog leaves an expired standby whose lock is busy" in_standby
+kill "$holder" 2>/dev/null || true; wait "$holder" 2>/dev/null || true
+# A controller woke Android after the watchdog found the standby expired, before it got the lock.
+asleep $((25 * 3600)); touch "$F/wake-during-lock"; peel watchdog
+expect "the watchdog checks again under the lock and leaves a woken Android running" running
+expect "the watchdog does not stop a woken Android" not calls_like "waydroid session stop"
+expect "the controller woke Android only once the watchdog asked for the lock" [ ! -f "$F/wake-during-lock" ]
 
 # The controller wakes Android before it pings the controller still running in it.
 asleep
@@ -240,6 +274,7 @@ reclaim() {  # runs cmd_reclaim as the helper defines it; prints what it wrote t
   set +e
   ( export R; PATH=$R/bin:$PATH; LXC_PATH=/var/lib/waydroid/lxc LXC_NAME=waydroid CGROUPS=$R/cg PROC=$R/proc
     die() { echo "die: $*"; exit 1; }
+    RECLAIM_SECONDS=${RECLAIM_SECONDS:-5}
     eval "$(sed -n -e '/^container_state() {/p' -e '/^frozen_cgroup() {/,/^}/p' -e '/^cmd_reclaim() {/,/^}/p' "$HIRES/root/peel-hires-root")"
     cmd_reclaim ) >"$R/out" 2>&1
   echo $? >"$R/rc"; set -e
@@ -260,8 +295,38 @@ expect "reclaim refuses when LXC says running" not reclaimed
 setcg FROZEN 1 1; reclaim
 expect "reclaim writes to a frozen container's memory.reclaim" reclaimed
 expect "reclaim succeeds while frozen" [ "$(cat "$R/rc")" = 0 ]
+# Every 64 MB step succeeds, but takes a second: 1.5 GB would take 25 seconds without a deadline.
+setcg FROZEN 1 1; echo 1610612736 >"$cg/memory.current"; rm -f "$cg/memory.reclaim"; mkfifo "$cg/memory.reclaim"
+( while :; do /bin/sleep 1; cat "$cg/memory.reclaim"; done ) >/dev/null 2>&1 & reader=$!; helpers="$helpers $reader"
+start=$SECONDS
+set +e
+( export R; PATH=$R/bin:$PATH; LXC_PATH=/var/lib/waydroid/lxc LXC_NAME=waydroid CGROUPS=$R/cg PROC=$R/proc RECLAIM_SECONDS=2
+  die() { echo "die: $*"; exit 1; }
+  eval "$(sed -n -e '/^container_state() {/p' -e '/^frozen_cgroup() {/,/^}/p' -e '/^cmd_reclaim() {/,/^}/p' "$HIRES/root/peel-hires-root")"
+  cmd_reclaim ) >"$R/out" 2>&1
+set -e
+expect "reclaim stops at its deadline when every step is slow" [ $((SECONDS - start)) -le 4 ]
+expect "reclaim made progress before its deadline" grep -q "MB -> " "$R/out"
+kill "$reader" 2>/dev/null || true; wait "$reader" 2>/dev/null || true
+# A reader that was waiting for the next step ends once a writer opens the pipe.
+timeout 1 sh -c ': >"$1"' sh "$cg/memory.reclaim" 2>/dev/null || true
+rm -f "$cg/memory.reclaim"; touch "$cg/memory.reclaim"; echo 209715200 >"$cg/memory.current"
 echo "0::/../lxc.payload.waydroid" >"$R/proc/4242/cgroup"; reclaim
 expect "reclaim refuses a cgroup path that climbs out" not reclaimed
+
+# probe gives up on a shell in Android that does not return, as one attached to an Android
+# frozen between its check and the shell.
+mkdir -p "$R/probe-bin" "$R/build"
+printf '#!/bin/bash\ncase "$1" in status) printf "Session:\\tRUNNING\\nContainer:\\tRUNNING\\n" ;; shell) exec /bin/sleep 60 ;; esac\n' >"$R/probe-bin/waydroid"
+chmod +x "$R/probe-bin/waydroid"; echo RUNNING >"$R/state"
+start=$SECONDS
+set +e
+( export R; PATH=$R/probe-bin:$R/bin:$PATH; LXC_PATH=/var/lib/waydroid/lxc LXC_NAME=waydroid BUILD=$R/build PROBE_SECONDS=1
+  eval "$(sed -n -e '/^container_state() {/p' -e '/^in_android() {/,/^}/p' -e '/^cmd_probe() {/,/^}/p' "$HIRES/root/peel-hires-root")"
+  cmd_probe ) >"$R/out" 2>&1
+set -e
+expect "probe gives up on a shell in Android that hangs" [ $((SECONDS - start)) -le 5 ]
+expect "probe reports Android as unreachable then" grep -qx "container=unreachable" "$R/out"
 expect "the root helper's reclaim takes no arguments" grep -q 'reclaim)  \[ \$# = 0 \]' "$HIRES/root/peel-hires-root"
 
 [ "$failures" = 0 ]
