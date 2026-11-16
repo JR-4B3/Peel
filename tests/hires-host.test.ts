@@ -196,7 +196,7 @@ beforeAll(async () => {
     "#!/bin/sh",
     `echo "$*" >> '${log}'`,
     `[ "$1" = controller ] && printf '%s\\n' '{"host":"127.0.0.1","port":${controlPort},"key":"offline"}'`,
-    `[ "$1 $2" = "session idle" ] && { trap "echo interrupted >> '${log}'; exit 0" USR1; t=0.5; [ -e '${join(temporary, "idle-waits")}' ] && t=5; /bin/sleep $t & wait $!; echo stopped >> '${log}'; }`,
+    `[ "$1 $2" = "session idle" ] && { trap "echo interrupted >> '${log}'; exit 0" USR1; echo waiting >> '${log}'; t=0.5; [ -e '${join(temporary, "idle-waits")}' ] && t=5; /bin/sleep $t & wait $!; echo stopped >> '${log}'; }`,
     "exit 0", "",
   ].join("\n"), { mode: 0o700 });
   // PulseAudio's tools, simulated: one playing Waydroid stream at the rate in the rate file,
@@ -862,7 +862,9 @@ test.skipIf(!supported)("a Peel that attaches while Android is put away interrup
   writeFileSync(join(temporary, "idle-waits"), "");
   try {
     await send("/release", {});
-    for (let attempt = 0; attempt < 100 && !(await calls()).includes("session idle"); attempt++) await Bun.sleep(20);
+    // The simulated idle notes "waiting" once it handles USR1. A USR1 before that would end it
+    // without a word, as it ends the real one before its trap is set.
+    for (let attempt = 0; attempt < 100 && !(await calls()).includes("waiting"); attempt++) await Bun.sleep(20);
     const before = (await calls()).length;
     // Attaches and plays while idle is still waiting.
     const started = Date.now();
