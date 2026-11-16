@@ -17,9 +17,12 @@ import { AppleMusic } from "./apple";
 import { compareBuilds, hiresBuild, type HostBuild } from "./build";
 import { cacheDir, configDir, readAppleSignIn, systemDir } from "./config";
 import { Engine, ownerRole, systemdSession } from "./engine";
+import { testRuns, testVersion } from "./try-runs";
 import { media, type Media, type Playback } from "./types";
 
 export const hiresHome = process.env.PEEL_HIRES_HOME ?? join(systemDir("config"), "peel-hires-host");
+// Where peel --try records the test builds that run (src/try-runs.ts).
+export const testRunsDir = join(hiresHome, "try");
 const hiresPort = Number(process.env.PEEL_HIRES_PORT ?? 10769);
 
 // Peel's own copy of peel-hires, so the controller always matches this version of Peel. The
@@ -60,13 +63,24 @@ export class Hires extends Engine {
   async appleTokens(): Promise<{ userToken: string; storefront?: string }> { throw new Error("The hi-res player has no Apple sign-in."); }
 }
 
-// How ensureHires treats a host of another build. The SSH helper passes remote. Tests also pass
-// the caller's build, a stand-in for starting a host, and one for telling whether a host runs.
+// How ensureHires treats a host of another build. The SSH helper passes remote. peel --try passes
+// the test build's build and a start of the test build's host. Tests also pass the caller's build,
+// a stand-in for starting a host, one for telling whether a host runs, and one for telling which
+// test builds run. peel --try also passes exclusive, so it replaces only a host no other Peel
+// uses, also one another Peel started while the replaced host stopped.
 export interface HiresStart {
   remote?: boolean;
   build?: HostBuild;
   launch?: () => Promise<void>;
   watch?: () => Promise<() => Promise<boolean>>;
+  testRunning?: (version: string) => boolean;
+  exclusive?: boolean;
+}
+
+// Why ensureHires with exclusive did not replace the host: other Peels use it, or it does not say
+// how many do.
+export class SharedHost extends Error {
+  constructor(readonly others: number | undefined) { super("Other Peels use hi-res playback on this computer."); }
 }
 
 // How many times one call restarts an older host. A host that another Peel starts meanwhile
@@ -76,7 +90,7 @@ const maxRestarts = 3;
 // Starts the host when it is not running and waits until Android and Apple Music answer. Android
 // runs only while a Peel uses it, so this usually boots it, which takes about 7 seconds.
 export async function ensureHires(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal, start: HiresStart = {}) {
-  const mine = start.build ?? hostBuild(), remote = !!start.remote;
+  const mine = start.build ?? hostBuild(), remote = !!start.remote, running = start.testRunning ?? testRunning;
   const state = () => engine.state().catch(() => undefined);
   // The hosts this call asked to quit. One may still answer once while it exits, and only a host
   // that runs now counts.
@@ -86,8 +100,10 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
   for (let restarts = 0; ; restarts++) {
     // A host started before Peel updated itself keeps running the old code, while the interface
     // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
-    if (current && outdated(current, mine, remote)) {
+    if (current && outdated(current, mine, remote, running)) {
       if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} tries. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
+      // others counts the Peels besides this one. A host that does not say counts as used.
+      if (start.exclusive && current.others !== 0) throw new SharedHost(current.others);
       signal?.throwIfAborted();
       status("Restarting hi-res playback to load an update...");
       const running = await (start.watch ?? watchHost)();
@@ -112,7 +128,7 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
     const until = Date.now() + 3 * 60 * 1000;
     // The host that answers may be one that another Peel started from older code, while this
     // Peel restarted or started the host. It is restarted as well.
-    const older = () => !!current && outdated(current, mine, remote);
+    const older = () => !!current && outdated(current, mine, remote, running);
     while (!current?.ready && !older() && Date.now() < until) {
       if (current?.playback?.error) status(current.playback.error);
       await sleep(250, undefined, { signal });
@@ -131,11 +147,31 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
 // The SSH helper runs the newest installed version, which a window on this computer may not have
 // restarted into yet, so it never restarts a host that another Peel uses or that is playing.
 // A host that does not say how many Peels use it counts as used.
-export function outdated(host: { build?: HostBuild; others?: number; playback?: { state?: string } }, mine: HostBuild, remote = false) {
+//
+// A test build (peel --try) runs its own host code, also when its branch is older than the
+// installed release, so release numbers do not order it. While a test build runs, its host
+// counts as newer than any other build's, and a running test build's own build counts as newer
+// than any other host, so the test build restarts the installed Peel's host once and the
+// installed Peel's windows leave the test build's host alone. Of two test builds, the one started
+// last counts as newer. Once a test build ended, its host counts as older than any build, so the
+// next Peel restarts it into its own code. Two test builds of one version run the same code.
+export function outdated(host: { build?: HostBuild; others?: number; playback?: { state?: string } }, mine: HostBuild, remote = false, running: (version: string) => boolean = testRunning) {
   if (host.build?.hash === mine.hash) return false;
-  if (host.build && compareBuilds(host.build, mine) >= 0) return false;
+  const test = testVersion(host.build?.version), mineTest = testVersion(mine.version);
+  if (test && host.build!.version === mine.version) return false;
+  let older: boolean;
+  if (test && !running(host.build!.version)) older = true;
+  else if (test !== mineTest) older = mineTest;
+  else if (test) older = (host.build!.time ?? "") < mine.time;
+  else older = !host.build || compareBuilds(host.build, mine) < 0;
+  if (!older) return false;
   if (remote && (host.others !== 0 || host.playback?.state === "playing")) return false;
   return true;
+}
+
+// Whether a test build of this version runs on this computer.
+function testRunning(version: string) {
+  return testRuns(testRunsDir).live.some(run => run.version === version);
 }
 
 // The build of the code this Peel would start a host from, read once.
@@ -178,9 +214,10 @@ const unitLoaded = async () => {
   return output.trim() === "loaded";
 };
 
-async function launchHost() {
+// peel --try starts the host from a test build's src/hires.ts instead of this one.
+export async function launchHost(code = fileURLToPath(import.meta.url)) {
   // The host runs this file alone, without the interface's modules, in Bun's low-memory mode.
-  const args = [process.execPath, "--smol", fileURLToPath(import.meta.url), "--hires-host"];
+  const args = [process.execPath, "--smol", code, "--hires-host"];
   // The host uses the folders this Peel resolved, so it writes its key where this Peel reads it.
   // systemd's user manager has its own environment and would otherwise use its defaults.
   const environment: Record<string, string> = { PEEL_OWNER: String(process.pid), ...ownerRole(), PEEL_HIRES_HOME: hiresHome, PEEL_CONFIG_DIR: configDir, PEEL_CACHE_DIR: cacheDir };

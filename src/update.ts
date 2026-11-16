@@ -18,7 +18,7 @@ const appDir = fileURLToPath(new URL("..", import.meta.url));
 const checkInterval = 6 * 60 * 60 * 1000;
 
 // time is the commit's time in UTC. Releases from before it was recorded have only the build date.
-export interface Build { version: string; channel: Channel; commit: string; date: string; time?: string }
+export interface Build { version: string; channel: Channel | "try"; commit: string; date: string; time?: string }
 export interface Release extends Build { archive: string; sums: string }
 
 // The build this Peel runs from, or undefined for a source checkout.
@@ -154,6 +154,7 @@ export function checkForUpdate(channel: Channel, force = false, now = Date.now()
 
 async function update(channel: Channel, force: boolean, now: number, dir: string): Promise<UpdateResult> {
   const build = await currentBuild(dir), root = installRoot(dir);
+  if (build?.channel === "try") return { build, message: `Test build ${build.version}. It never updates. Close it and run peel to return to the installed Peel.` };
   if (!build || !root) return { message: "Running from a source folder, which updates through git. bun src/update.ts install sets up a release that updates itself." };
   const label = `Peel ${build.version}`;
   const record = join(root, "update.json");

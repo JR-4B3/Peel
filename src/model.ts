@@ -67,6 +67,8 @@ export class Model extends EventEmitter {
   // Counts changes to songs' favourite marks, which change the songs in place.
   lovedRevision = 0;
   status = "Loading your library...";
+  // "Test build #118 be400a9" while this Peel is a test build (peel --try).
+  testBuild?: string;
   playlists: Media[] = [];
   items: Media[] = [];
   title = "Home";
