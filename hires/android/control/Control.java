@@ -384,7 +384,7 @@ public final class Control {
           // 1.5 seconds on, the track of the song before counts too.
           boolean playing = code == 3 || code == 6 || code == 8;
           if (now >= next && (playing || checks < 6)) {
-            int[] track = Rates.inspect().apple(old, now - changed >= 1500);
+            int[] track = Rates.inspect().apple(Rates.applePids(), old, now - changed >= 1500);
             if (track != null) {
               if (own >= 0 && track[0] != own) System.out.println("song " + item + " moved to track " + track[0] + " at " + track[4] + " Hz");
               own = track[0]; rate = track[4]; songRate = track[4];
@@ -421,20 +421,23 @@ public final class Control {
     static volatile int known;
 
     // Android's first mixer output as AudioFlinger's dump shows it: its I/O handle and its tracks,
-    // each as { id, active (1 or 0), static (1 or 0), session, rate, ending (1 or 0) }. A track
-    // ends once it is stopped, stopping or terminated, as the track of the song before is.
+    // each as { id, active (1 or 0), static (1 or 0), session, rate, ending (1 or 0), client }. A
+    // track ends once it is stopped, stopping or terminated, as the track of the song before is.
+    // The client is the process ID of the app that opened the track.
     static final class Mixer {
       int io = -1;
       final java.util.List<int[]> tracks = new java.util.ArrayList<>();
 
       // Apple Music's newest track that has not ended: the newest active one, or the newest one
-      // at all while none plays, as after a song was prepared and before it starts. The track old,
-      // which played the song before, counts only with stale. Static tracks are short sounds, not
-      // songs. Null without a track.
-      int[] apple(int old, boolean stale) {
+      // at all while none plays, as after a song was prepared and before it starts. Only tracks
+      // of Apple's processes (clients) count, since a newer track of another app, such as a
+      // system sound at 48 kHz, would otherwise set the song's rate. The track old, which played
+      // the song before, counts only with stale. Static tracks are short sounds, not songs. Null
+      // without a track.
+      int[] apple(java.util.Set<Integer> clients, int old, boolean stale) {
         int[] best = null;
         for (int[] t : tracks) {
-          if (t[2] == 1 || t[5] == 1 || !stale && t[0] == old) continue;
+          if (!clients.contains(t[6]) || t[2] == 1 || t[5] == 1 || !stale && t[0] == old) continue;
           if (best == null || t[1] > best[1] || t[1] == best[1] && t[0] > best[0]) best = t;
         }
         return best;
@@ -450,7 +453,7 @@ public final class Control {
     // A track row of the dump: an optional fast-track index and type, then ID, active, client,
     // session, port, state, flags, format, channel mask and rate.
     static final java.util.regex.Pattern ROW = java.util.regex.Pattern.compile(
-      "^\\s*(?:F\\d+\\s+)?([SP?]\\s+)?(\\d+)\\s+(yes|no)\\s+\\d+\\s+(\\d+)\\s+\\d+\\s+(\\S{1,2})\\s+0x[0-9a-fA-F]+\\s+[0-9a-fA-F]+\\s+[0-9a-fA-F]+\\s+(\\d+)\\s");
+      "^\\s*(?:F\\d+\\s+)?([SP?]\\s+)?(\\d+)\\s+(yes|no)\\s+(\\d+)\\s+(\\d+)\\s+\\d+\\s+(\\S{1,2})\\s+0x[0-9a-fA-F]+\\s+[0-9a-fA-F]+\\s+[0-9a-fA-F]+\\s+(\\d+)\\s");
 
     static Mixer inspect() throws Exception {
       Process dump = Runtime.getRuntime().exec(new String[] { "dumpsys", "media.audio_flinger" });
@@ -476,11 +479,32 @@ public final class Control {
           // Patch tracks carry audio between outputs, not an app's sound.
           if (type == null || type.equals("P")) continue;
           mixer.tracks.add(new int[] { Integer.parseInt(m.group(2)), m.group(3).equals("yes") ? 1 : 0, type.equals("S") ? 1 : 0,
-            Integer.parseInt(m.group(4)), Integer.parseInt(m.group(6)), m.group(5).matches("T|S|s1|s2") ? 1 : 0 });
+            Integer.parseInt(m.group(5)), Integer.parseInt(m.group(7)), m.group(6).matches("T|S|s1|s2") ? 1 : 0, Integer.parseInt(m.group(4)) });
         }
       }
       if (mixer.io < 0) throw new IllegalStateException("Android has no mixer output");
       return mixer;
+    }
+
+    // The process IDs of Apple Music, its main process and any others it starts, read from /proc
+    // each time, since a restarted Apple Music gets new ones. The shell user may read every
+    // process's command line. Empty while Apple Music does not run.
+    static java.util.Set<Integer> applePids() {
+      java.util.Set<Integer> pids = new java.util.HashSet<>();
+      java.io.File[] all = new java.io.File("/proc").listFiles();
+      if (all == null) return pids;
+      for (java.io.File dir : all) {
+        String name = dir.getName();
+        if (name.isEmpty() || !Character.isDigit(name.charAt(0))) continue;
+        try {
+          byte[] line = java.nio.file.Files.readAllBytes(new java.io.File(dir, "cmdline").toPath());
+          int end = 0;
+          while (end < line.length && line[end] != 0) end++;
+          String process = new String(line, 0, end, StandardCharsets.UTF_8);
+          if (process.equals(APPLE) || process.startsWith(APPLE + ":")) pids.add(Integer.parseInt(name));
+        } catch (Exception gone) {}
+      }
+      return pids;
     }
 
     // The I/O handle of the first mixer output.

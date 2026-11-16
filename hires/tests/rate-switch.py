@@ -8,7 +8,12 @@ about one switch in three of these went silent or kept the old rate.
 Nothing is heard: Android's streams play into a silent test sink, every new stream is moved there
 at once, and Android's media volume stays at 7 percent, about -52 dB. A check needs only to tell
 sound from zeros, which that volume still shows. At 1 percent Android sends only zeros. Uses the account's one stream, so only run it when
-nothing plays. Stops playback afterwards and leaves the volume to the caller."""
+nothing plays. Stops playback afterwards and leaves the volume to the caller.
+
+Turns Apple Music's repeat and shuffle off first, since with repeat one the first song would play
+again instead of the next, and shuffle would change the order. It cannot turn them back on, because
+Apple Music does not tell its modes. Peel's host sets both itself when it connects and when it
+restores a queue."""
 import argparse, array, json, re, socket, subprocess, sys, threading, time
 sys.path.insert(0, __import__("os").path.dirname(__file__))
 import pwcap
@@ -122,6 +127,8 @@ with pwcap.TestSink(48000) as sink:
     try:
         guard.start()
         control("volume 0.07")
+        control("repeat 0")
+        control("shuffle 0")
         before = control("state").get("item")
         if control("state").get("state") == 3: control("pause")
         control(f"list 0 {','.join(SONGS)}")

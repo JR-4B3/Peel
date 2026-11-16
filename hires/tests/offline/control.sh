@@ -11,4 +11,4 @@ trap 'rm -rf "$build"' EXIT
 # javac searches the working folder for classes, so it runs in the empty build folder.
 (cd "$build" && java -m jdk.compiler/com.sun.tools.javac.Main -source 17 -target 17 -Xlint:-options -d . \
   "$here/../../android/control/Control.java" "$here/ControlDump.java")
-java -cp "$build" ControlDump "$here/audio-flinger.txt"
+java -cp "$build" ControlDump "$here/audio-flinger.txt" "$here/audio-flinger-other-app.txt"
