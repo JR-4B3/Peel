@@ -65,7 +65,9 @@ export interface AppleOptions {
 
 // How long Peel trusts its copy of Favourite Songs before reading it again.
 const favouriteVersionsAge = 10 * 60 * 1000;
-// Peel's copy of Favourite Songs in its cache folder, for the first answer after a start.
+// Peel's copy of Favourite Songs in its cache folder, for the first answer after a start. A song
+// whose catalog song Apple no longer serves is saved with an empty ISRC. Older versions of Peel
+// left the ISRC out both for those and for songs whose ISRC read failed.
 const favouriteVersionsFile = "favourite-songs.json";
 interface SavedVersions { base: string; songs: (Media & { isrc?: string })[] }
 // How long a removed favourite stays out of Peel's copy of Favourite Songs while Apple catches up.
@@ -207,9 +209,14 @@ export class AppleMusic implements Library {
     const songs = items.filter(item => /songs/.test(item.type));
     const [loved, versions] = await Promise.all([this.ownRatings(songs), this.options.favouriteVersions === false ? undefined : this.favouriteVersions()]);
     if (!versions) return loved;
-    const rest = songs.filter(item => !loved.has(item.id) && !versions.has(item));
-    await this.readIsrcs(rest.flatMap(item => item.isrc || !item.catalogId ? [] : [item.catalogId]));
-    for (const item of songs) if (!loved.has(item.id) && versions.has(item, item.isrc ?? this.isrcOf(item.catalogId))) loved.add(item.id);
+    // A song's ISRC is read before its title, artist and length can match, because a separate
+    // master has its own ISRC. A song whose ISRC could not be read matches by ID only.
+    const rest = songs.filter(item => !loved.has(item.id) && !versions.hasId(item));
+    await this.readIsrcs(rest.flatMap(item => item.isrc || !item.catalogId ? [] : [item.catalogId])).catch(() => {});
+    for (const item of songs) {
+      if (loved.has(item.id)) continue;
+      if (this.isrcRead(item) ? versions.has(item, item.isrc ?? this.isrcOf(item.catalogId)) : versions.hasId(item)) loved.add(item.id);
+    }
     return loved;
   }
 
@@ -261,28 +268,41 @@ export class AppleMusic implements Library {
       const pages = await Promise.all([0, 100, 200, 300].map(step => this.songs(playlist!.id, offset + step)));
       for (const page of pages) { songs.push(...page.items); if (!page.more) { more = false; break; } }
     }
+    // A favourite without its ISRC could match a separate master by title, so a failed ISRC read
+    // fails the whole read, which is tried again with the next question.
     await this.readIsrcs(songs.flatMap(song => song.catalogId ? [song.catalogId] : []));
     const saved = songs.map(song => ({ id: song.id, type: song.type, name: song.name, artist: song.artist, album: "", duration: song.duration,
       ...song.catalogId ? { catalogId: song.catalogId } : {}, ...song.reportingId ? { reportingId: song.reportingId } : {},
-      ...this.isrcOf(song.catalogId) ? { isrc: this.isrcOf(song.catalogId) } : {} }));
+      ...song.catalogId && this.isrcs.has(song.catalogId) ? { isrc: this.isrcs.get(song.catalogId) } : {} }));
     await saveJson(favouriteVersionsFile, { base: this.base, songs: saved } satisfies SavedVersions, this.options.cacheDir ?? cacheDir).catch(() => {});
     return this.versionsOf(saved);
   }
 
   // Apple updates Favourite Songs a little after a favourite is removed, so a song removed in the
   // last few minutes stays out although the list still holds it.
-  private versionsOf(songs: (Media & { isrc?: string })[]) {
+  //
+  // A favourite from a saved copy without an ISRC may come from a failed ISRC read, and then it
+  // could be a separate master of the song asked about. It matches by ID only until the fresh read,
+  // which reads every ISRC, replaces the copy. An ISRC read since then is copied into the
+  // favourite now. One read later does not count for this snapshot, since the favourite would
+  // still lack it and so match by title.
+  private versionsOf(listed: (Media & { isrc?: string })[]) {
+    const songs = listed.map(song => song.isrc === undefined && song.catalogId && this.isrcs.has(song.catalogId) ? { ...song, isrc: this.isrcs.get(song.catalogId) } : song);
+    const checked = (song: Media & { isrc?: string }) => song.isrc !== undefined || !song.catalogId || !/^\d+$/.test(song.catalogId);
     const forgotten = new Versions(this.forgotten.filter(entry => Date.now() - entry.at < forgottenAge).flatMap(entry => entry.songs));
-    return new Versions(songs.filter(song => !forgotten.has(song)));
+    return new Versions(songs.filter(song => !(checked(song) ? forgotten.has(song) : forgotten.hasId(song))), checked);
   }
 
   favouritesChanged() { this.versions = undefined; }
   private forgotten: { at: number; songs: (Media & { isrc?: string })[] }[] = [];
 
-  // Removes the mark from the song and from every version of it in Favourite Songs.
+  // Removes the mark from the song and from every version of it in Favourite Songs. Without the
+  // song's ISRC a separate master with the same title, artist and length would lose its mark too,
+  // so nothing is removed when it cannot be read.
   async forgetFavourite(song: Media) {
     const versions = this.options.favouriteVersions === false ? undefined : await this.favouriteVersions();
-    if (song.catalogId && !song.isrc) await this.readIsrcs([song.catalogId]);
+    if (song.catalogId && !song.isrc) await this.readIsrcs([song.catalogId]).catch(() => {});
+    if (versions && !this.isrcRead(song)) throw new Error(`Could not read the ISRC of catalog song ${song.catalogId}`);
     const isrc = song.isrc ?? this.isrcOf(song.catalogId);
     const all = [{ ...song, isrc }, ...versions?.of(song, isrc) ?? []];
     this.forgotten = [...this.forgotten.filter(entry => Date.now() - entry.at < forgottenAge), { at: Date.now(), songs: all }];
@@ -295,19 +315,25 @@ export class AppleMusic implements Library {
   }
 
   // ISRCs of catalog songs, read 300 at a time and kept. An ID Apple no longer serves is kept
-  // as unknown, so it is not asked again.
+  // as unknown, so it is not asked again. A failed read is asked again next time, and the read
+  // throws once every batch has finished.
   private isrcs = new Map<string, string>();
   private isrcOf(catalogId?: string) { return catalogId ? this.isrcs.get(catalogId) || undefined : undefined; }
+  // Whether the song's ISRC is known, or known to be missing because Apple no longer serves its
+  // catalog song.
+  private isrcRead(song: Media & { isrc?: string }) {
+    return !!song.isrc || !song.catalogId || !/^\d+$/.test(song.catalogId) || this.isrcs.has(song.catalogId);
+  }
   private async readIsrcs(ids: string[]) {
     const missing = [...new Set(ids)].filter(id => /^\d+$/.test(id) && !this.isrcs.has(id));
     const batches = Array.from({ length: Math.ceil(missing.length / 300) }, (_, index) => missing.slice(index * 300, index * 300 + 300));
-    await Promise.all(batches.map(async batch => {
-      try {
-        const response = await this.request(`v1/catalog/$STOREFRONT/songs?ids=${batch.join(",")}`);
-        for (const id of batch) this.isrcs.set(id, "");
-        for (const song of response.data ?? []) if (song.attributes?.isrc) this.isrcs.set(String(song.id), String(song.attributes.isrc));
-      } catch {}
+    const results = await Promise.allSettled(batches.map(async batch => {
+      const response = await this.request(`v1/catalog/$STOREFRONT/songs?ids=${batch.join(",")}`);
+      for (const id of batch) this.isrcs.set(id, "");
+      for (const song of response.data ?? []) if (song.attributes?.isrc) this.isrcs.set(String(song.id), String(song.attributes.isrc));
     }));
+    const failed = results.find(result => result.status === "rejected");
+    if (failed) throw failed.reason;
   }
 
   // Apple keeps an album's favourite mark on the catalog album, which library albums reach through
