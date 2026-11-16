@@ -5,9 +5,10 @@ import { expect, test } from "bun:test";
 // Windows runners skip it.
 const ready = process.platform === "linux" && ["bash", "python3", "cc"].every(name => Bun.which(name));
 
+// The suites take several seconds together, more than bun's default of 5 seconds per test.
 test.skipIf(!ready)("the hi-res pipeline's offline tests pass", () => {
   const run = Bun.spawnSync(["bash", new URL("../hires/tests/offline/run.sh", import.meta.url).pathname]);
   const output = run.stdout.toString() + run.stderr.toString();
   expect(output).not.toContain("FAIL");
   expect(run.exitCode).toBe(0);
-});
+}, 60000);
