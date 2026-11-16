@@ -3,7 +3,7 @@ import { existsSync } from "node:fs";
 import { mkdir, mkdtemp, readdir, readFile, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { hostState, installTry, releaseHost, resolveTarget, sharedHost, tryArgument, type TryTarget } from "../src/try";
+import { hostState, installTry, releaseHost, resolveTarget, sharedHost, takeHost, tryArgument, type TryTarget } from "../src/try";
 import { endTestRun, recordTestRun, testLabel, testRuns, testVersion } from "../src/try-runs";
 import { repository } from "../src/update";
 import { createTestRenderer } from "@opentui/core/testing";
@@ -188,35 +188,92 @@ test("peel --try runs only pull requests whose branch is in this repository", as
   await expect(resolveTarget(undefined, github([{ number: 7, repo: fork }]).get)).rejects.toThrow("There is no open pull request from a branch of");
 });
 
-test("peel --try starts only while no other Peel uses the hi-res host", async () => {
-  const home = await mkdtemp(join(tmpdir(), "peel-try-shared-"));
-  let others: number | undefined = 2, owner: string | null = null;
+// A hi-res host for hostState to ask, in a folder of its own. Each answer comes from reply.
+async function stubHost(reply: () => Response | Promise<Response>) {
+  const home = await mkdtemp(join(tmpdir(), "peel-try-shared-")), asked: { owner: string | null; path: string }[] = [];
   const server = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch(request) {
+    asked.push({ owner: request.headers.get("x-peel-owner"), path: new URL(request.url).pathname });
     if (request.headers.get("x-peel-key") !== "secret") return Response.json({ error: "Wrong engine key" }, { status: 403 });
-    owner = request.headers.get("x-peel-owner");
-    return Response.json({ ready: true, build: { hash: "h", version: "0.1.1", time: "" }, others });
+    return reply();
   } });
+  await writeFile(join(home, "key.json"), JSON.stringify({ port: server.port, key: "secret" }));
+  return { home, server, asked, async stop() { server.stop(true); await rm(home, { recursive: true, force: true }); } };
+}
+
+test("peel --try starts only while no other Peel uses the hi-res host", async () => {
+  let others: number | undefined = 2;
+  const host = await stubHost(() => Response.json({ ready: true, build: { hash: "h", version: "0.1.1", time: "" }, others }));
+  const empty = await mkdtemp(join(tmpdir(), "peel-try-none-"));
   try {
-    // No host runs: there is nothing to share.
-    expect(await hostState(home)).toBeUndefined();
+    // No host runs: there is no key file, it names no port, or nothing listens on the port.
+    expect(await hostState(empty)).toBeUndefined();
+    await writeFile(join(empty, "key.json"), JSON.stringify({ key: "secret" }));
+    expect(await hostState(empty)).toBeUndefined();
+    const closed = Bun.serve({ hostname: "127.0.0.1", port: 0, fetch: () => new Response() }), port = closed.port;
+    closed.stop(true);
+    await writeFile(join(empty, "key.json"), JSON.stringify({ port, key: "secret" }));
+    expect(await hostState(empty)).toBeUndefined();
     expect(sharedHost(undefined)).toBeUndefined();
-    await writeFile(join(home, "key.json"), JSON.stringify({ port: server.port, key: "secret" }));
     // Two installed Peel windows use it. peel --try asks without joining them.
-    expect(await hostState(home)).toEqual({ version: "0.1.1", others: 2 });
-    expect(owner).toBeNull();
-    expect(sharedHost(await hostState(home))).toStartWith("2 other Peel windows use hi-res playback");
+    expect(await hostState(host.home)).toEqual({ version: "0.1.1", others: 2 });
+    expect(host.asked.every(request => request.owner === null)).toBe(true);
+    expect(sharedHost(await hostState(host.home))).toStartWith("2 other Peel windows use hi-res playback");
     others = 1;
-    expect(sharedHost(await hostState(home))).toStartWith("Another Peel window uses hi-res playback");
+    expect(sharedHost(await hostState(host.home))).toStartWith("Another Peel window uses hi-res playback");
     // A host that does not say how many Peels use it counts as used.
     others = undefined;
-    expect(sharedHost(await hostState(home))).toStartWith("Other Peel windows use");
+    expect(sharedHost(await hostState(host.home))).toStartWith("Other Peel windows use");
     // A host that nobody uses any more lets the test build start.
     others = 0;
-    expect(sharedHost(await hostState(home))).toBeUndefined();
+    expect(sharedHost(await hostState(host.home))).toBeUndefined();
   } finally {
-    server.stop(true);
-    await rm(home, { recursive: true, force: true });
+    await host.stop();
+    await rm(empty, { recursive: true, force: true });
   }
+});
+
+// A host that runs but gives no state may have users, so peel --try does not start.
+test("peel --try does not start while the hi-res host runs but gives no state", async () => {
+  let reply: () => Response | Promise<Response> = () => new Response("Starting", { status: 503 });
+  const host = await stubHost(() => reply());
+  try {
+    expect(await hostState(host.home)).toEqual({ unreadable: "it answered HTTP 503" });
+    expect(sharedHost(await hostState(host.home))).toStartWith("peel --try could not ask the hi-res host on this computer which Peels use it: it answered HTTP 503. Run peel --try again in a moment.");
+    // A host that restarted wrote a new key, which key.json does not hold yet.
+    await writeFile(join(host.home, "key.json"), JSON.stringify({ port: host.server.port, key: "old" }));
+    expect(await hostState(host.home)).toEqual({ unreadable: "it did not take the key in key.json" });
+    await writeFile(join(host.home, "key.json"), JSON.stringify({ port: host.server.port, key: "secret" }));
+    // A host that waits for Android answers late.
+    reply = () => Bun.sleep(6000).then(() => Response.json({ others: 0 }));
+    expect(await hostState(host.home)).toEqual({ unreadable: "it did not answer within 5 seconds" });
+    expect(sharedHost({ unreadable: "it did not answer within 5 seconds" })).toContain("close other Peel windows");
+    reply = () => new Response("not json");
+    expect(await hostState(host.home)).toEqual({ unreadable: "its answer was not a state" });
+  } finally { await host.stop(); }
+}, 15000);
+
+// A Peel window that opens while the test build downloads uses the host by the time peel --try
+// would take it over.
+test("peel --try asks again before it takes the hi-res host over, and leaves a used host alone", async () => {
+  let others = 0;
+  const host = await stubHost(() => Response.json({ ready: true, build: { hash: "h", version: "0.1.1", time: "" }, others }));
+  const started: string[] = [];
+  const start = async (dir: string) => { started.push(dir); };
+  try {
+    // Before the download, nobody uses the host.
+    expect(sharedHost(await hostState(host.home))).toBeUndefined();
+    // A window opens during the download.
+    others = 1;
+    const refused = await takeHost("/try/pr1-1111111", () => {}, () => hostState(host.home), start);
+    expect(refused).toStartWith("Another Peel window uses hi-res playback");
+    expect(started).toEqual([]);
+    // peel --try only asked for the state, so the host still runs for that window.
+    expect(host.asked.map(request => request.path)).toEqual(["/state", "/state"]);
+    // Once the window closed, the test build takes the host over.
+    others = 0;
+    expect(await takeHost("/try/pr1-1111111", () => {}, () => hostState(host.home), start)).toBeUndefined();
+    expect(started).toEqual(["/try/pr1-1111111"]);
+  } finally { await host.stop(); }
 });
 
 test("a test build names its pull request and commit in the status line", async () => {
@@ -224,20 +281,32 @@ test("a test build names its pull request and commit in the status line", async 
   expect(testLabel("0.1.1-try.main.1a2b3c4")).toBe("Test build main 1a2b3c4");
   expect(testLabel("0.1.1-nightly.20261115.abcdef0")).toBeUndefined();
   expect(testLabel(undefined)).toBeUndefined();
-
-  const api = fixture(), setup = await createTestRenderer({ width: 120, height: 36 });
-  const model = new Model(api.library, api.player, structuredClone(defaults), async () => {}, { read: async () => undefined, write: async () => {} });
-  model.testBuild = testLabel("0.1.0-try.pr118.be400a9");
-  const ui = new PeelUI(setup.renderer, model);
-  try {
-    await model.start();
-    model.status = "Added to the queue: Soma"; model.changed();
-    await setup.flush();
-    // The label stays in front of other messages.
-    const footer = setup.captureCharFrame().trimEnd().split("\n").at(-1)!;
-    expect(footer).toContain("Test build #118 be400a9");
-    expect(footer).toContain("Added to the queue: Soma");
-  } finally {
-    ui.dispose(); setup.renderer.destroy(); api.server.stop(true);
-  }
 });
+
+// Narrow windows shorten the label, then drop it, so the key hints keep their place.
+for (const [width, label] of [[30, undefined], [40, "#118"], [50, "#118 be400a9"], [60, "Test build #118 be400a9"], [80, "Test build #118 be400a9"], [120, "Test build #118 be400a9"]] as const) {
+  test(`the test build's label leaves the key hints in place at ${width} columns`, async () => {
+    const api = fixture(), setup = await createTestRenderer({ width, height: 36 });
+    const model = new Model(api.library, api.player, structuredClone(defaults), async () => {}, { read: async () => undefined, write: async () => {} });
+    model.testBuild = testLabel("0.1.0-try.pr118.be400a9");
+    const ui = new PeelUI(setup.renderer, model);
+    try {
+      await model.start(); await model.releases;
+      model.status = "Added to the queue: Soma"; model.changed();
+      await setup.flush();
+      const footer = setup.captureCharFrame().trimEnd().split("\n").at(-1)!;
+      expect(footer).toEndWith("? more keys  q quit");
+      if (label) expect(footer).toStartWith(`  ${label}  Add`);
+      else expect(footer).not.toContain("#118");
+      // The status message gets the room that is left, all of it in a wide window.
+      if (width >= 120) expect(footer).toContain("Added to the queue: Soma");
+      // A window made wider or narrower fits the label again.
+      setup.resize(width === 40 ? 120 : 40, 36); await setup.flush();
+      const resized = setup.captureCharFrame().trimEnd().split("\n").at(-1)!;
+      expect(resized).toEndWith("? more keys  q quit");
+      expect(resized).toStartWith(width === 40 ? "  Test build #118 be400a9  Add" : "  #118  Add");
+    } finally {
+      ui.dispose(); setup.renderer.destroy(); api.server.stop(true);
+    }
+  });
+}

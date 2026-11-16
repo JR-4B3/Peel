@@ -5,7 +5,8 @@
 // are kept, and so is each build that runs or whose code the hi-res host runs. A test build never
 // updates itself.
 //
-// peel --try starts only while no other Peel uses the hi-res host on this computer (sharedHost).
+// peel --try starts only while no other Peel uses the hi-res host on this computer (sharedHost). It
+// asks before the download and again before it takes the host over (takeHost).
 // Before the test build starts, peel --try starts the hi-res host from the test build's code,
 // also for a branch older than the installed release, and records the test build as running
 // (src/try-runs.ts). While it runs, the installed Peel's windows leave that host alone. When the
@@ -142,32 +143,62 @@ async function prune(tries: string, runs: string, host?: string) {
   }
 }
 
-// What the hi-res host on this computer says about itself, or undefined when none runs: the version
-// of the code it runs, and how many Peels use it. It asks without the x-peel-owner header, which
-// would make peel --try one of the Peels that keep the host running, so others counts every Peel
-// that uses it. Tests pass their own folder with the host's key.
-export async function hostState(home = hiresHome): Promise<{ version?: string; others?: number } | undefined> {
+// What the hi-res host on this computer says about itself: the version of the code it runs, and
+// how many Peels use it. It asks without the x-peel-owner header, which would make peel --try one
+// of the Peels that keep the host running, so others counts every Peel that uses it.
+// It is undefined when no host runs: there is no key file, the key file names no port, or nothing
+// listens on that port. A host that runs but gives no state, because it answered with an error,
+// turned the key down while it restarts, or did not answer in time, is unreadable, with the reason.
+// Tests pass their own folder with the host's key.
+export type HostState = { version?: string; others?: number } | { unreadable: string };
+
+export async function hostState(home = hiresHome): Promise<HostState | undefined> {
+  const saved = await readFile(join(home, "key.json"), "utf8").then(text => JSON.parse(text) as { port?: unknown; key?: unknown } | null, () => undefined);
+  const port = Number(saved?.port);
+  if (!port) return undefined;
   try {
-    const { port, key } = JSON.parse(await readFile(join(home, "key.json"), "utf8")) as { port: number; key: string };
-    const response = await fetch(`http://127.0.0.1:${port}/state`, { headers: { "x-peel-key": key }, signal: AbortSignal.timeout(5000) });
-    if (!response.ok) return undefined;
-    const state = await response.json() as { build?: { version?: unknown }; others?: unknown } | null;
-    return { version: typeof state?.build?.version === "string" ? state.build.version : undefined, others: typeof state?.others === "number" ? state.others : undefined };
-  } catch { return undefined; }
+    const response = await fetch(`http://127.0.0.1:${port}/state`, { headers: { "x-peel-key": String(saved?.key ?? "") }, signal: AbortSignal.timeout(5000) });
+    if (response.status === 403) return { unreadable: "it did not take the key in key.json" };
+    if (!response.ok) return { unreadable: `it answered HTTP ${response.status}` };
+    const state = await response.json().catch(() => undefined) as { build?: { version?: unknown }; others?: unknown } | null | undefined;
+    if (!state || typeof state !== "object") return { unreadable: "its answer was not a state" };
+    return { version: typeof state.build?.version === "string" ? state.build.version : undefined, others: typeof state.others === "number" ? state.others : undefined };
+  } catch (error) {
+    const code = (error as { code?: unknown } | null)?.code;
+    if (code === "ConnectionRefused" || code === "ECONNREFUSED") return undefined;
+    if ((error as Error | null)?.name === "TimeoutError") return { unreadable: "it did not answer within 5 seconds" };
+    return { unreadable: error instanceof Error ? error.message : String(error) };
+  }
 }
 
-const hostVersion = async () => (await hostState())?.version;
+const hostVersion = async () => {
+  const state = await hostState();
+  return state && "version" in state ? state.version : undefined;
+};
 
 // Why peel --try does not start, when other Peels use the hi-res host. A Peel window of a version
 // from before peel --try orders builds only by release number. It restarts a test build's host
 // whose branch has an older release number into its own code, and after the test build closed it
 // keeps a host whose code is newer by time, so the installed Peel would not get its host back.
 // Those windows cannot be changed, so peel --try starts only while no other Peel uses the host.
-// A host that does not say how many Peels use it counts as used.
-export function sharedHost(host: { others?: number } | undefined) {
-  if (!host || host.others === 0) return undefined;
+// A host that does not say how many Peels use it counts as used, and so does one whose state
+// peel --try cannot read.
+export function sharedHost(host: HostState | undefined) {
+  if (!host) return undefined;
+  if ("unreadable" in host) return `peel --try could not ask the hi-res host on this computer which Peels use it: ${host.unreadable}. Run peel --try again in a moment. If it still fails, close other Peel windows, also Peels that control this computer from another one, and try again.`;
+  if (host.others === 0) return undefined;
   const count = host.others === undefined ? "Other Peel windows use" : host.others === 1 ? "Another Peel window uses" : `${host.others} other Peel windows use`;
   return `${count} hi-res playback on this computer. Close them, also Peels that control this computer from another one, and run peel --try again.`;
+}
+
+// Starts the test build's hi-res host, unless other Peels use the host now. runTry asks before
+// the download as well, so the listener learns it before a long wait. A Peel window may open
+// during the download, so this asks again right before it takes the host over. It returns why it
+// refused, and leaves the host alone then. Tests pass stand-ins for the host's state and the start.
+export async function takeHost(dir: string, status: (text: string) => void, state: () => Promise<HostState | undefined> = hostState, start = useOwnHost) {
+  const shared = sharedHost(await state());
+  if (shared) return shared;
+  await start(dir, status).catch(error => status(`The test build's hi-res playback did not start: ${error instanceof Error ? error.message : error}`));
 }
 
 // Runs the test build in this terminal and returns its exit code.
@@ -184,7 +215,10 @@ export async function runTry(args: string[]) {
   const { dir, version } = await installTry(resolved, installRoot(appDir) ?? defaultRoot(), status);
   let code: number;
   try {
-    if (ownHost) await useOwnHost(dir, status).catch(error => status(`The test build's hi-res playback did not start: ${error instanceof Error ? error.message : error}`));
+    if (ownHost) {
+      const refused = await takeHost(dir, status);
+      if (refused) { console.error(refused); return 1; }
+    }
     // The terminal's title names the test build, also for a branch from before Peel showed it.
     const label = testLabel(version);
     if (label && process.stdout.isTTY) process.stdout.write(`\x1b]2;Peel ${label}\x07`);
