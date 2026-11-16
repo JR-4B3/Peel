@@ -6,7 +6,9 @@ import type { Media } from "./types";
 // is one, so a song does not lose its heart because Apple shows it under another ID.
 //
 // Versions match by ID, then by ISRC, then by title, artist and length. The last rule is for a
-// library song whose catalog song Apple no longer serves, so no ISRC can be read for it.
+// library song whose catalog song Apple no longer serves, so no ISRC can be read for it. Two songs
+// whose ISRCs are both known and differ are separate masters, such as a remaster, and never match
+// by title, artist and length.
 
 // Two songs with the same title and a shared artist are the same recording when their lengths
 // differ by at most this many seconds. A live take, an extended mix or a radio edit has another
@@ -40,9 +42,14 @@ export class Versions {
 
   // Whether song is a version of one of the favourites. isrc is the song's ISRC when known.
   has(song: Media, isrc = (song as Version).isrc): boolean {
-    if ([song.id, song.catalogId, song.reportingId].some(id => id && this.ids.has(id))) return true;
+    if (this.hasId(song)) return true;
     if (isrc && this.isrcs.has(isrc)) return true;
-    return !!this.titles.get(title(song.name))?.some(favourite => sameTitle(favourite, song));
+    return !!this.titles.get(title(song.name))?.some(favourite => !(favourite.isrc && isrc) && sameTitle(favourite, song));
+  }
+
+  // Whether one of song's IDs is a favourite's.
+  hasId(song: Media): boolean {
+    return [song.id, song.catalogId, song.reportingId].some(id => id && this.ids.has(id));
   }
 
   // The favourites that are versions of song, for removing every mark it has.
@@ -61,6 +68,6 @@ function sameTitle(a: Media, b: Media) {
 export function sameRecording(a: Version, b: Media, isrc = (b as Version).isrc): boolean {
   const ids = new Set([b.id, b.catalogId, b.reportingId].filter(Boolean));
   if ([a.id, a.catalogId, a.reportingId].some(id => id && ids.has(id))) return true;
-  if (a.isrc && isrc && a.isrc === isrc) return true;
+  if (a.isrc && isrc) return a.isrc === isrc;
   return sameTitle(a, b);
 }
