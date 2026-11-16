@@ -85,7 +85,7 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
   let current = await state();
   for (let restarts = 0; ; restarts++) {
     // A host started before Peel updated itself keeps running the old code, while the interface
-    // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
+    // runs the new one. The new host uses the Android the old one ran.
     if (current && outdated(current, mine, remote)) {
       if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} tries. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
       signal?.throwIfAborted();
@@ -1311,9 +1311,11 @@ export async function runHiresHost() {
     clearTimeout(timer);
     idle = undefined;
   });
+  // A Peel that asks the host to quit while Peels still use it starts a newer host right after,
+  // which uses the same Android, so Android keeps running then.
   const quit = async () => {
     await control.request("pause").catch(() => {});
-    await stopAndroid();
+    if (!owners.size) await stopAndroid();
     process.exit(0);
   };
   // A Peel that attaches while the last one leaves keeps the host: ownership is checked again
