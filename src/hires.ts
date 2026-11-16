@@ -83,15 +83,23 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
   const replaced = new Set<string>();
   const live = (value: Awaited<ReturnType<typeof state>>) => value && !(value.instance && replaced.has(value.instance)) ? value : undefined;
   let current = await state();
-  for (let restarts = 0; ; restarts++) {
+  for (let restarts = 0; ;) {
     // A host started before Peel updated itself keeps running the old code, while the interface
     // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
     if (current && outdated(current, mine, remote)) {
       if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} tries. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
       signal?.throwIfAborted();
-      status("Restarting hi-res playback to load an update...");
+      // Another Peel may have replaced the host since its state was read, and the watch then
+      // follows the new host (#127). So the state is read again once the watch has begun, and a
+      // host that changed meanwhile is judged on its own.
       const running = await (start.watch ?? watchHost)();
+      const found = await state();
+      if (found && found.instance !== current.instance) { current = found; continue; }
+      status("Restarting hi-res playback to load an update...");
       if (current.instance) replaced.add(current.instance);
+      restarts++;
+      // When another Peel replaces the host before this quit reaches it, the new host refuses the
+      // old key. The watch then sees the new key and ends the wait.
       await engine.quit().catch(() => {});
       // The old host pauses and stops Android before it exits, which can take a while. Its /state
       // waits for Android meanwhile, so its port and key tell whether it still runs.
@@ -223,6 +231,9 @@ const repeats = ["none", "one", "all"] as const;
 interface Control { state?: number; position?: number; item?: number; title?: string; artist?: string; album?: string; id?: string; duration?: number; error?: string }
 interface Entry { queueId: number; song: Media; added: boolean; unknown?: boolean }
 interface Listed { song: Media; added: boolean; at: number }
+// What a stall or silence recovery was started for: the entry and position the host saw, and the
+// rate the silence watcher read.
+interface Cause { item?: number; position?: number; rate?: number }
 
 // Apple Music's Android app ignores a new queue of more than about 500 songs (#96), and its queue
 // answer lists only the playing entry and the next 100. A longer list goes to Apple as a window
@@ -403,10 +414,9 @@ export async function runHiresHost() {
     // An empty queue means Apple has nothing queued any more, so Peel's mirror empties too. Songs
     // of a long list not sent yet stay, so the list continues.
     if (!queue.length) { order = []; entries.clear(); sent.clear(); removed.clear(); synced = Date.now(); return; }
-    // The entries before the playing one are history, also those Apple skipped before listing them.
     for (const item of queue) align(item);
-    const before = [...order, ...hidden()], playing = queue[0]!.queueId, at = before.indexOf(playing);
-    order = [...(at >= 0 ? before.slice(0, at) : []), ...queue.map(item => item.queueId)];
+    order = [...history(queue.map(item => item.queueId)), ...queue.map(item => item.queueId)];
+    widest = Math.max(widest, queue.length);
     for (const item of queue) {
       if (entries.has(item.queueId)) continue;
       const queued = sent.get(batchOf(item.queueId))?.[item.queueId % 2 ** 32];
@@ -418,7 +428,27 @@ export async function runHiresHost() {
     for (const id of entries.keys()) if (!kept.has(id)) entries.delete(id);
     synced = Date.now();
   }
-  let synced = 0;
+  // The most entries one of Apple's queue answers listed. Apple lists as many as it has, up to its
+  // limit, so an answer with fewer lists the end of its queue.
+  let synced = 0, widest = 0;
+
+  // The entries before the playing one, which is the first in Apple's answer listed. Those the
+  // host saw before it are history. When the playing entry is one Apple had not listed, as after a
+  // jump past the end of its answer, some sent entries Apple never listed are history too:
+  // - With shuffle off, those sent before it, since Apple keeps the order the host sent.
+  // - With shuffle on, Apple mixed them, so their order is unknown (#126). Only an answer shorter
+  //   than widest shows that Apple's queue ends there, and then every one it leaves out is
+  //   history. Otherwise they stay upcoming, so no song Apple may still play counts as played.
+  // An entry in Apple's answer is never history, so each entry shows once.
+  function history(listed: number[]) {
+    const playing = listed[0]!, unseen = hidden(), shown = new Set(listed);
+    // A playing entry the host never sent or saw belongs to a queue another Peel sent.
+    if (!order.includes(playing) && !unseen.includes(playing)) return [];
+    const before = order.includes(playing) ? order.slice(0, order.indexOf(playing))
+      : shuffle ? [...order] : [...order, ...unseen.slice(0, unseen.indexOf(playing))];
+    if (shuffle && listed.length < widest) before.push(...unseen);
+    return before.filter(id => !shown.has(id));
+  }
 
   // Apple's entry holds another song than the host sent at its place when Apple dropped songs it
   // cannot play, which moves the later ones up. The dropped songs come out of the sent batch up to
@@ -481,6 +511,8 @@ export async function runHiresHost() {
   // place and never plays (#60). After stallLimit there, the host restarts Apple Music and
   // continues at the same song and position. If that stalls too, it pauses and says so. A song
   // that plays again allows the next recovery.
+  // The recovery waits for the command that runs, such as a Next pressed during the stall, so it
+  // takes the entry and position that stalled, and runs only if they still stall then (#128).
   const stallLimit = Number(process.env.PEEL_HIRES_STALL_MS) || 10000;
   let stall: { item?: number; position?: number; since: number } | undefined, recovered = false, recovering = false;
   function watchStall() {
@@ -491,7 +523,8 @@ export async function runHiresHost() {
     stall = undefined; recovering = true;
     const again = recovered;
     recovered = true;
-    void call("recover", [again, "stall"]).catch(error => say(`the recovery after a stall failed: ${message(error)}`)).finally(() => { recovering = false; });
+    const cause: Cause = { item: current.item, position: current.position };
+    void call("recover", [again, "stall", cause]).catch(error => say(`the recovery after a stall failed: ${message(error)}`)).finally(() => { recovering = false; });
   }
 
   // Apple Music can report playing, with its position advancing, while every sample it sends is
@@ -592,8 +625,9 @@ export async function runHiresHost() {
       notice = "Android's audio is silent, also after a restart of Apple Music. Quit Peel and open it again to restart Android.";
       return;
     }
-    silenced = listened; recovering = true;
-    void call("recover", [false, "silence", rate]).catch(error => say(`the recovery after silence failed: ${message(error)}`)).finally(() => { recovering = false; });
+    recovering = true;
+    const cause: Cause = { item, position: current.position, rate };
+    void call("recover", [false, "silence", cause]).catch(error => say(`the recovery after silence failed: ${message(error)}`)).finally(() => { recovering = false; });
   }
 
   type Stream = { index: number; corked?: boolean; mute?: boolean; volume?: Record<string, { value?: number }>; sample_specification?: string; properties?: Record<string, string> };
@@ -1215,8 +1249,21 @@ export async function runHiresHost() {
     // reason. A listener who paused meanwhile keeps the pause. A restart after silence says so in
     // a note, and so does a recovery whose song plays again after a step failed. A recovery that
     // failed says so in a notice.
-    recover: async (again: boolean, reason: "silence" | "stall" = "stall", rate?: number) => {
-      if (!wanted) { say(`no restart after ${reason === "stall" ? "a stall" : reason}, since the music was paused meanwhile: ${where(rate)}`); return; }
+    // A command sent while the song stalled or played silent runs first. When another entry plays
+    // then, or the stalled one plays or moved on, or the silent one stopped, the recovery has no
+    // cause any more and does nothing, so it neither restarts Apple Music nor pauses a song that
+    // started fine. A stall it skips does not count toward the pause after a second stall.
+    recover: async (again: boolean, reason: "silence" | "stall", seen: Cause) => {
+      const rate = seen.rate, what = reason === "stall" ? "a stall" : reason;
+      if (!wanted) { say(`no restart after ${what}, since the music was paused meanwhile: ${where(rate)}`); return; }
+      await read().catch(() => {});
+      const still = current.item === seen.item && (reason === "stall" ? current.state === BUFFERING && current.position === seen.position : current.state === PLAYING);
+      if (!still) {
+        // A song seen playing since allows the next recovery already.
+        if (reason === "stall" && recovered) recovered = again;
+        say(`no restart after ${what}, since the music changed meanwhile: ${where(rate)}`);
+        return;
+      }
       if (again) {
         say(`stalled again after a restart, so the music pauses: ${where(rate)}`);
         wanted = false;
@@ -1225,7 +1272,9 @@ export async function runHiresHost() {
         return;
       }
       const cause = reason === "silence" ? "Android played silence" : "Apple Music stopped streaming";
-      say(`restarting Apple Music after ${reason === "stall" ? "a stall" : reason}: ${where(rate)}`);
+      // Silence soon after this restart only says so, in listen.
+      if (reason === "silence") silenced = Date.now();
+      say(`restarting Apple Music after ${what}: ${where(rate)}`);
       // The note shows while Apple Music restarts, and stays with the song once it plays again.
       const silenceNote = "Android played silence, so Peel restarted Apple Music. The song continues where it was.";
       note = reason === "silence" ? { text: silenceNote, position: 0, until: Infinity } : undefined;

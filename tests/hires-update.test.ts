@@ -7,6 +7,7 @@ import { mkdir, mkdtemp, rm, utimes, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { compareBuilds, hiresBuild, type HostBuild } from "../src/build";
+import { Engine } from "../src/engine";
 import { ensureHires, hostBuild, watchHost, type HiresStart } from "../src/hires";
 
 const older: HostBuild = { hash: "a".repeat(64), version: "0.2.0-nightly.20261110.aaaaaaa", time: "2026-11-10T21:00:00.000Z" };
@@ -341,4 +342,72 @@ test("a host counts as running while its port answers and key.json holds its key
     server.stop(true);
     expect(await running()).toBe(false);
   } finally { server.stop(true); await rm(home, { recursive: true, force: true }); }
+});
+
+// Two windows of the new build find the same old host at once (#127). Here the hosts are real
+// HTTP servers in their own folder, reached through Peel's own engine client and host watch, so
+// a host's key decides which requests it takes, as a real host's does. A new host takes the old
+// one's port once it is gone, and writes its own key.
+function sharedPort(home: string) {
+  let server: ReturnType<typeof Bun.serve> | undefined, port = 0;
+  const counts = { starts: 0, quits: 0, refused: 0 };
+  const start = async (build: HostBuild) => {
+    const key = build.hash;
+    server = Bun.serve({ hostname: "127.0.0.1", port, fetch(request) {
+      if (request.headers.get("x-peel-key") !== key) { counts.refused++; return Response.json({ error: "Wrong engine key" }, { status: 403 }); }
+      if (new URL(request.url).pathname === "/quit") {
+        counts.quits++;
+        setTimeout(() => { server?.stop(true); server = undefined; }, 10);
+        return Response.json(null);
+      }
+      return Response.json({ ready: true, signIn: false, version: "hires", build, instance: key, others: 0 });
+    } });
+    port = server.port!; counts.starts++;
+    await writeFile(join(home, "key.json"), JSON.stringify({ port, key }));
+  };
+  const ensure = (engine: Engine, signal: AbortSignal) => ensureHires(engine, () => {}, signal, { build: newer, launch: () => start(newer), watch: () => watchHost(home) });
+  return { start, ensure, counts, build: async () => (await new Engine(home).state()).build, stop: () => server?.stop(true) };
+}
+
+test("a window whose state of the old host is stale does not wait for the host another window started", async () => {
+  const home = await mkdtemp(join(tmpdir(), "peel-hires-race-"));
+  const host = sharedPort(home);
+  try {
+    await host.start(older);
+    const first = new Engine(home), second = new Engine(home);
+    // The second window reads the old host's state. The first restarts the host before the second
+    // begins to watch it, as when the second waits for the disk meanwhile.
+    const read = second.state.bind(second);
+    let raced = false;
+    second.state = async () => {
+      const found = await read();
+      if (!raced) { raced = true; await host.ensure(first, AbortSignal.timeout(4000)); }
+      return found;
+    };
+    const began = Date.now();
+    await host.ensure(second, AbortSignal.timeout(2000));
+    expect(Date.now() - began).toBeLessThan(1000);
+    expect(host.counts).toMatchObject({ starts: 2, quits: 1, refused: 1 });
+    expect(await host.build()).toEqual(newer);
+  } finally { host.stop(); await rm(home, { recursive: true, force: true }); }
+});
+
+test("a window whose quit the new host refuses does not wait for that host to exit", async () => {
+  const home = await mkdtemp(join(tmpdir(), "peel-hires-race-"));
+  const host = sharedPort(home);
+  try {
+    await host.start(older);
+    const first = new Engine(home), second = new Engine(home);
+    // The second window confirmed the old host and asks it to quit, but the first restarted the
+    // host just before. The new host refuses the old key, and the second window's watch of the
+    // old host sees the new key.
+    const quit = second.quit.bind(second);
+    second.quit = async () => { await host.ensure(first, AbortSignal.timeout(4000)); return quit(); };
+    const began = Date.now();
+    await host.ensure(second, AbortSignal.timeout(2000));
+    expect(Date.now() - began).toBeLessThan(1000);
+    expect(host.counts).toMatchObject({ starts: 2, quits: 1 });
+    expect(host.counts.refused).toBeGreaterThan(0);
+    expect(await host.build()).toEqual(newer);
+  } finally { host.stop(); await rm(home, { recursive: true, force: true }); }
 });
