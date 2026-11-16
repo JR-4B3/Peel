@@ -110,6 +110,19 @@ function apply(name: string, args: string[]): unknown {
       android.queue.splice(args[0] === "end" ? android.queue.length : android.selected + 1, 0, ...batchOf(ids));
       break;
     }
+    case "remove": {
+      const at = android.queue.findIndex(item => item.queueId === Number(args[0]));
+      if (at >= 0) { android.queue.splice(at, 1); if (at < android.selected) android.selected--; }
+      break;
+    }
+    // Moves an entry right after (1) or right before (2) another one.
+    case "move": {
+      const at = android.queue.findIndex(item => item.queueId === Number(args[0]));
+      if (at < 0) break;
+      const [item] = android.queue.splice(at, 1), beside = android.queue.findIndex(other => other.queueId === Number(args[1]));
+      android.queue.splice(beside + (args[2] === "1" ? 1 : 0), 0, item!);
+      break;
+    }
     case "skip": { const at = android.queue.findIndex(item => item.queueId === Number(args[0])); if (at >= 0) { android.selected = at; android.position = 0; android.state = 3; } break; }
     case "seek": {
       const target = Number(args[0]);
@@ -483,6 +496,31 @@ test.skipIf(!supported)("jumps back and forth in a shuffled queue keep the songs
   expect(now.playing).toBe("9015");
   expect(now.left).toEqual(expect.arrayContaining(left));
 }, 30000);
+
+test.skipIf(!supported)("a song removed near the end of a shuffled queue is gone at once, also from the songs played", async () => {
+  // After the jump to 9004, Apple's answer ends its queue, so the songs it leaves out count as
+  // played. The removed 9003 must not count among them.
+  await jumpShuffled("9004");
+  const queue = (await call("queue")).body;
+  const result = await call("remove", ids(queue.items).indexOf("9003"), "9003");
+  expect(result.body?.error).toBeUndefined();
+  expect(result.status).toBe(200);
+  expect(ids(android.queue)).not.toContain("9003");
+  expect(await sameAsApple()).toBe(16);
+  expect(ids((await call("exportPlayback")).body.items)).not.toContain("9003");
+}, 20000);
+
+test.skipIf(!supported)("a song Apple drops from a list sent with shuffle on leaves no empty entry", async () => {
+  // The shuffled import makes Apple's answers 8 entries long, so the new list's shorter answer
+  // ends its queue.
+  expect((await call("importPlayback", { items: shuffled.map(id => song(id)), playing: true })).status).toBe(200);
+  expect((await call("shuffle", true)).status).toBe(200);
+  android.drops.add("9103");
+  expect((await call("play", ["9100", "9101", "9102", "9103", "9104", "9105"].map(id => song(id)), 0)).status).toBe(200);
+  const exported = (await call("exportPlayback")).body;
+  expect(ids(exported.items)).toEqual(ids(android.queue));
+  expect(exported.position).toBe(0);
+}, 20000);
 
 test.skipIf(!supported)("a song the catalog no longer has stays out of Apple's list, so the chosen song plays", async () => {
   // Clears songs added in earlier tests, which play would keep.

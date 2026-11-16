@@ -429,6 +429,9 @@ export async function runHiresHost() {
     // Songs of queues that were replaced are forgotten.
     const kept = new Set(order);
     for (const id of entries.keys()) if (!kept.has(id)) entries.delete(id);
+    // What the host knows of Apple's order covers only entries still in order or sent, so it does
+    // not grow with a long session. With shuffle off the host needs none of it.
+    if (shuffle) keepOnly(new Set([...order, ...hidden()])); else keepOnly(new Set());
     synced = Date.now();
   }
   // The most entries one of Apple's queue answers listed. Apple lists as many as it has, up to its
@@ -476,8 +479,23 @@ export async function runHiresHost() {
     const list = [...order, ...hidden()], at = position();
     regroup([...list.slice(0, at + 1).map(id => [id]), list.slice(at + 1)]);
   }
-  // A moved or removed entry has other neighbours, so what Apple listed beside it no longer holds.
+  // A moved entry has other neighbours, so what Apple listed beside it no longer holds.
   function unlink(id: number) { for (const [from, to] of links) if (from === id || to === id) links.delete(from); }
+  // Keeps only these entries in links and groups.
+  function keepOnly(keep: Set<number>) {
+    if (groups.some(group => group.some(id => !keep.has(id)))) regroup(groups.map(group => group.filter(id => keep.has(id))));
+    for (const [from, to] of links) if (!keep.has(from) || !keep.has(to)) links.delete(from);
+  }
+  // Drops entries Apple no longer has, such as one the listener removed or one Apple left out of
+  // a list, from everything the host keeps of them. None of them then shows again, as history or
+  // as upcoming, and no record of them is made anew.
+  function forget(ids: number[]) {
+    if (!ids.length) return;
+    const gone = new Set(ids);
+    order = order.filter(id => !gone.has(id));
+    for (const id of gone) entries.delete(id);
+    keepOnly(new Set([...rank.keys(), ...links.keys(), ...links.values()].filter(id => !gone.has(id))));
+  }
 
   // Learns from Apple's answer, listed, and returns the entries proved to come before its first.
   // known holds the other entries the host has: those in order and those Apple has not listed.
@@ -489,9 +507,8 @@ export async function runHiresHost() {
   // An entry the host has not placed yet, such as one of a part added at the end, goes in the last
   // group.
   function mixed(listed: number[], known: number[]) {
-    const keep = new Set([...known, ...listed]), shown = new Set(listed);
-    regroup(groups.map(group => group.filter(id => keep.has(id))));
-    for (const [from, to] of links) if (!keep.has(from) || !keep.has(to)) links.delete(from);
+    const shown = new Set(listed);
+    keepOnly(new Set([...known, ...listed]));
     // Two groups out of order with Apple's answer, as after an edit the host did not see, become
     // one, so nothing counts as known that the answer contradicts.
     const merge = (from: number, to: number) => regroup([...groups.slice(0, from), groups.slice(from, to + 1).flat(), ...groups.slice(to + 1)]);
@@ -561,6 +578,8 @@ export async function runHiresHost() {
     if (found < 0) return;
     const dropped = found - index;
     songs.splice(index, dropped);
+    // Apple numbers the songs it kept one after the other, so the last IDs of the batch are gone.
+    forget(Array.from({ length: dropped }, (_, at) => batch * 2 ** 32 + songs.length + at));
     for (const key of [...entries.keys()]) if (batchOf(key) === batch && key % 2 ** 32 >= index) entries.delete(key);
     for (const key of [...removed]) {
       if (batchOf(key) !== batch || key % 2 ** 32 < index) continue;
@@ -1321,10 +1340,13 @@ export async function runHiresHost() {
       if (index <= position()) return;
       const list = whole(), id = list[index]?.id;
       if (id === undefined) { rest.splice(index - (list.length - rest.length), 1); return; }
-      unlink(id);
-      await control.request(`remove ${id}`).catch(unless);
-      await syncUntil(() => !order.includes(id), "Apple Music did not remove the song.");
-      removed.add(id);
+      // The entry counts as removed at once, so a read of Apple's queue meanwhile does not take it
+      // for one Apple played. When Apple does not remove it, it counts again.
+      removed.add(id); forget([id]);
+      try {
+        await control.request(`remove ${id}`).catch(unless);
+        await syncUntil(() => !order.includes(id), "Apple Music did not remove the song.");
+      } catch (error) { removed.delete(id); throw error; }
     },
     // A song Apple has queued plays from its queue. One not sent yet starts a new window there.
     jump: async (index: number, expected?: string) => {
