@@ -42,6 +42,13 @@ const android = {
   commands: [] as string[],
   // When Apple Music was last restarted.
   restartedAt: 0,
+  // The rates the controller reports: its mixer's, and the playing song's track's, which belongs to
+  // the playing entry unless rateItem names another. Unset, it reports neither, like a controller
+  // that has not read them yet.
+  mixerRate: undefined as number | undefined, songRate: undefined as number | undefined, rateItem: undefined as number | undefined,
+  // How many times the host asked the controller to move Android's tracks to the mixer's current
+  // buffer, and whether that ends a silence, as it does for a track left on the old buffer.
+  rebinds: 0, rebindHelps: false,
   // Until this time Apple Music's playback service is not running, so commands that need its
   // session answer no-session, as after Android started or Apple Music stopped.
   noSessionUntil: 0,
@@ -60,10 +67,11 @@ const pacatRuns = () => readFileSync(join(temporary, "pacat-runs"), "utf8").leng
 // stream at that rate, before the playing one, as Android does for a moment after a rate change.
 const noStream = (on: boolean) => on ? writeFileSync(join(temporary, "no-stream"), "") : rmSync(join(temporary, "no-stream"), { force: true });
 const oldStream = (hz?: number) => hz ? writeFileSync(join(temporary, "old-stream"), String(hz)) : rmSync(join(temporary, "old-stream"), { force: true });
-// The rate the host reports for the quality tag, read while Peel polls, or undefined after a while.
+// The rate the host reports Android sends at, read from PipeWire while Peel polls, or undefined
+// after a while.
 const reportedRate = async (within = 4000) => {
   for (const end = Date.now() + within; Date.now() < end; await Bun.sleep(40)) {
-    const rate = (await send("/state")).body.playback?.sampleRate;
+    const rate = (await send("/state")).body.playback?.outputRate;
     if (rate) return rate as number;
   }
   return undefined;
@@ -79,13 +87,14 @@ const silence = (times: number) => {
 function reset() {
   // Queue IDs keep counting, as Apple's do: a new queue never reuses an old entry's ID.
   Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [], stall: 0, restarts: 0, seekDelay: 0, noSessionUntil: 0,
-    repeat: 0, shuffle: false, unshuffled: undefined, error: undefined });
+    repeat: 0, shuffle: false, unshuffled: undefined, error: undefined, mixerRate: undefined, songRate: undefined, rateItem: undefined, rebinds: 0, rebindHelps: false });
   silence(0); streamRate(96000); muteStream(false); noStream(false); oldStream();
   android.ignore.clear(); android.fail.clear(); android.dropAfter.clear(); android.drops.clear(); android.gone.clear();
 }
 const snapshot = () => {
   const item = android.queue[android.selected];
-  return { state: android.state, position: android.position, item: item?.queueId ?? -1, id: item?.id, title: item?.title, duration: 300000, ...android.error ? { error: android.error } : {} };
+  return { state: android.state, position: android.position, item: item?.queueId ?? -1, id: item?.id, title: item?.title, duration: 300000, ...android.error ? { error: android.error } : {},
+    ...android.mixerRate ? { mixerRate: android.mixerRate } : {}, ...android.songRate ? { songRate: android.songRate, rateItem: android.rateItem ?? item?.queueId ?? -1 } : {} };
 };
 const batchOf = (ids: string[]) => { android.batch++; return ids.filter(id => !android.drops.has(id)).map((id, index) => ({ queueId: android.batch * 2 ** 32 + index, id, title: `Song ${id}` })); };
 
@@ -95,6 +104,7 @@ function apply(name: string, args: string[]): unknown {
   if (android.fail.has(name) || android.fail.has([name, ...args].join(" "))) return { error: `simulated ${name} failure` };
   switch (name) {
     case "ping": return { ok: true };
+    case "rebind": android.rebinds++; if (android.rebindHelps) silence(0); return { sessions: 3 };
     case "queue": return { queue: android.queue.slice(android.selected, android.selected + android.view) };
     case "list": if (args[1]!.split(",").length > android.limit) return undefined; android.queue = batchOf(args[1]!.split(",")); android.unshuffled = [...android.queue]; android.selected = Number(args[0]); android.position = 0; android.state = android.stall ? 6 : 3; break;
     case "restart": android.restarts++; android.restartedAt = Date.now(); android.stall = Math.max(0, android.stall - 1); silence(android.silent - 1); android.queue = []; android.selected = 0; android.state = 1; android.repeat = 0; android.shuffle = false; return { ok: true };
@@ -114,6 +124,19 @@ function apply(name: string, args: string[]): unknown {
       android.queue.splice(args[0] === "end" ? android.queue.length : android.selected + 1, 0, ...batchOf(ids));
       break;
     }
+    case "remove": {
+      const at = android.queue.findIndex(item => item.queueId === Number(args[0]));
+      if (at >= 0) { android.queue.splice(at, 1); if (at < android.selected) android.selected--; }
+      break;
+    }
+    // Moves an entry right after (1) or right before (2) another one.
+    case "move": {
+      const at = android.queue.findIndex(item => item.queueId === Number(args[0]));
+      if (at < 0) break;
+      const [item] = android.queue.splice(at, 1), beside = android.queue.findIndex(other => other.queueId === Number(args[1]));
+      android.queue.splice(beside + (args[2] === "1" ? 1 : 0), 0, item!);
+      break;
+    }
     case "skip": { const at = android.queue.findIndex(item => item.queueId === Number(args[0])); if (at >= 0) { android.selected = at; android.position = 0; android.state = 3; } break; }
     case "seek": {
       const target = Number(args[0]);
@@ -124,7 +147,8 @@ function apply(name: string, args: string[]): unknown {
     case "pause": android.state = 2; break;
     case "stop": android.state = 1; break;
     case "play": android.state = android.stall ? 6 : 3; break;
-    case "next": if (android.selected + 1 < android.queue.length) { android.selected++; android.position = 0; } break;
+    // A song that plays or buffers goes on with the next one, which buffers while a stall lasts.
+    case "next": if (android.selected + 1 < android.queue.length) { android.selected++; android.position = 0; if (android.state === 3 || android.state === 6) android.state = android.stall ? 6 : 3; } break;
     case "previous": android.position = 0; break;
   }
   return undefined;
@@ -359,6 +383,161 @@ test.skipIf(!supported)("a song added to a long list pushes none of its songs ou
 
 const ids = (items: any[]) => items.map(item => item.id);
 
+// Shuffle mixes the songs Apple does not list too, so the host cannot know their order. A jump to
+// one of them must not take the songs it sent before that one as played (#126). The simulated
+// shuffle reverses the songs after the playing one, and Apple's answer lists 8 entries.
+const shuffled = Array.from({ length: 20 }, (_, at) => String(9000 + at));
+async function jumpShuffled(target: string) {
+  expect((await call("importPlayback", { items: shuffled.map(id => song(id)), playing: true })).status).toBe(200);
+  expect((await call("shuffle", true)).status).toBe(200);
+  const before = (await call("queue")).body;
+  expect(ids(before.items).slice(0, 8)).toEqual(["9000", "9019", "9018", "9017", "9016", "9015", "9014", "9013"]);
+  expect((await call("jump", ids(before.items).indexOf(target), target)).status).toBe(200);
+  expect(android.queue[android.selected]?.id).toBe(target);
+  const actual = ids(android.queue);
+  return { played: actual.slice(0, android.selected), left: actual.slice(android.selected + 1) };
+}
+const playingOnce = () => {
+  const queue = ids(android.queue);
+  expect(new Set(queue).size).toBe(queue.length);
+  return { playing: queue[android.selected], left: queue.slice(android.selected + 1) };
+};
+
+test.skipIf(!supported)("a jump in a shuffled queue to a song Apple did not list counts the songs it played, each once", async () => {
+  // Apple's answer after the jump ends its queue, so every song it leaves out has played.
+  const { played, left } = await jumpShuffled("9004");
+  const queue = (await call("queue")).body;
+  expect(new Set(ids(queue.items)).size).toBe(20);
+  expect(queue.position).toBe(played.length);
+  expect(ids(queue.items).slice(queue.position + 1)).toEqual(left);
+  expect(new Set(ids(queue.items).slice(0, queue.position))).toEqual(new Set(played));
+  const exported = (await call("exportPlayback")).body;
+  expect(exported.position).toBe(16);
+  expect(ids(exported.items).slice(exported.position)).toEqual(["9004", "9003", "9002", "9001"]);
+
+  // Moved to another device, the queue continues with the songs left, and plays none twice.
+  expect((await call("importPlayback", exported)).status).toBe(200);
+  let now = playingOnce();
+  expect(now.playing).toBe("9004");
+  expect(new Set(now.left)).toEqual(new Set(left));
+
+  // A recovery after a stall continues the same way.
+  android.stall = 1; android.state = 6;
+  await poll(() => android.restarts === 1 && android.state === 3);
+  now = playingOnce();
+  expect(now.playing).toBe("9004");
+  expect(new Set(now.left)).toEqual(new Set(left));
+}, 20000);
+
+test.skipIf(!supported)("a jump in a shuffled queue whose end Apple does not list counts no song as played that may still come", async () => {
+  // Apple's answer after the jump lists 8 entries, so the queue may go on after them. The songs
+  // it does not list could come before the jump or after, so they stay upcoming.
+  const { played, left } = await jumpShuffled("9010");
+  expect(left).toHaveLength(9);
+  const queue = (await call("queue")).body, shown = ids(queue.items);
+  expect(new Set(shown).size).toBe(20);
+  expect(shown[queue.position]).toBe("9010");
+  expect(played).toEqual(expect.arrayContaining(shown.slice(0, queue.position)));
+  expect(shown.slice(queue.position + 1)).toEqual(expect.arrayContaining(left));
+
+  // Another device gets every song Apple still had, and none twice.
+  expect((await call("importPlayback", (await call("exportPlayback")).body)).status).toBe(200);
+  const now = playingOnce();
+  expect(now.playing).toBe("9010");
+  expect(now.left).toEqual(expect.arrayContaining(left));
+}, 20000);
+
+// Jumps to a song at the index and with the ID the host's queue gives it, as Peel does.
+async function jumpTo(id: string) {
+  const queue = (await call("queue")).body;
+  const result = await call("jump", ids(queue.items).indexOf(id), id);
+  expect(result.body?.error).toBeUndefined();
+  expect(result.status).toBe(200);
+  expect(android.queue[android.selected]?.id).toBe(id);
+}
+// The host's queue next to Apple Music's: each song once and no song missing, the same song
+// playing, and every song the host counts as played has played. So every song Apple Music still
+// has is upcoming in the host's queue too. Returns the host's position.
+async function sameAsApple() {
+  const queue = (await call("queue")).body, shown = ids(queue.items), actual = ids(android.queue);
+  expect(new Set(shown).size).toBe(shown.length);
+  expect(new Set(shown)).toEqual(new Set(actual));
+  expect(shown[queue.position]).toBe(actual[android.selected]);
+  expect(actual.slice(0, android.selected)).toEqual(expect.arrayContaining(shown.slice(0, queue.position)));
+  return queue.position as number;
+}
+
+test.skipIf(!supported)("a song a shuffled jump counted as played can be jumped to again", async () => {
+  // The jump to 9004 counts the songs Apple's answer leaves out as played, 9012 among them.
+  await jumpShuffled("9004");
+  await jumpTo("9012");
+  expect(await sameAsApple()).toBe(8);
+}, 20000);
+
+test.skipIf(!supported)("a second jump in a shuffled queue counts no song as played that Apple still has", async () => {
+  // After the jump to 9010, Apple lists 9010 to 9003. 9012 comes before 9010, so after the jump
+  // to it, 9005 to 9003 still come too.
+  await jumpShuffled("9010");
+  await jumpTo("9012");
+  expect(await sameAsApple()).toBe(8);
+  const exported = (await call("exportPlayback")).body, actual = ids(android.queue);
+  expect(exported.position).toBe(8);
+  expect(ids(exported.items).slice(exported.position)).toEqual(expect.arrayContaining(actual.slice(android.selected)));
+  // Apple listed 9005 to 9003 right after 9006, the last song its new answer lists, so they follow it.
+  expect(ids(exported.items).slice(15, 18)).toEqual(["9005", "9004", "9003"]);
+}, 20000);
+
+test.skipIf(!supported)("jumps back and forth in a shuffled queue keep the songs Apple still has upcoming", async () => {
+  // Apple's queue is 9000, then 9019 down to 9001. Each jump compares the host's queue with it.
+  await jumpShuffled("9010");
+  await sameAsApple();
+  // Back past songs Apple's answers never listed, then back into the songs that played.
+  await jumpTo("9012");
+  expect(await sameAsApple()).toBe(8);
+  await jumpTo("9017");
+  expect(await sameAsApple()).toBe(3);
+  // To the last song, whose answer ends Apple's queue, so every other song has played.
+  await jumpTo("9001");
+  expect(await sameAsApple()).toBe(19);
+  // Back into those songs, with an answer as long as Apple lists.
+  await jumpTo("9008");
+  expect(await sameAsApple()).toBe(12);
+  await jumpTo("9015");
+  expect(await sameAsApple()).toBe(5);
+
+  // Another device gets every song Apple still has, and none twice.
+  const left = ids(android.queue).slice(android.selected + 1);
+  expect((await call("importPlayback", (await call("exportPlayback")).body)).status).toBe(200);
+  const now = playingOnce();
+  expect(now.playing).toBe("9015");
+  expect(now.left).toEqual(expect.arrayContaining(left));
+}, 30000);
+
+test.skipIf(!supported)("a song removed near the end of a shuffled queue is gone at once, also from the songs played", async () => {
+  // After the jump to 9004, Apple's answer ends its queue, so the songs it leaves out count as
+  // played. The removed 9003 must not count among them.
+  await jumpShuffled("9004");
+  const queue = (await call("queue")).body;
+  const result = await call("remove", ids(queue.items).indexOf("9003"), "9003");
+  expect(result.body?.error).toBeUndefined();
+  expect(result.status).toBe(200);
+  expect(ids(android.queue)).not.toContain("9003");
+  expect(await sameAsApple()).toBe(16);
+  expect(ids((await call("exportPlayback")).body.items)).not.toContain("9003");
+}, 20000);
+
+test.skipIf(!supported)("a song Apple drops from a list sent with shuffle on leaves no empty entry", async () => {
+  // The shuffled import makes Apple's answers 8 entries long, so the new list's shorter answer
+  // ends its queue.
+  expect((await call("importPlayback", { items: shuffled.map(id => song(id)), playing: true })).status).toBe(200);
+  expect((await call("shuffle", true)).status).toBe(200);
+  android.drops.add("9103");
+  expect((await call("play", ["9100", "9101", "9102", "9103", "9104", "9105"].map(id => song(id)), 0)).status).toBe(200);
+  const exported = (await call("exportPlayback")).body;
+  expect(ids(exported.items)).toEqual(ids(android.queue));
+  expect(exported.position).toBe(0);
+}, 20000);
+
 test.skipIf(!supported)("a song the catalog no longer has stays out of Apple's list, so the chosen song plays", async () => {
   // Clears songs added in earlier tests, which play would keep.
   await call("importPlayback", { items: [song("999")], playing: true });
@@ -560,6 +739,85 @@ test.skipIf(!supported)("a start that stays buffering restarts Apple Music once 
   expect(android.restarts).toBe(2);
 }, 20000);
 
+// A command sent during a stall runs before the recovery, since calls run one at a time. Its own
+// first read of the state can find the stall long enough and queue the recovery behind it (#128).
+// Peel reads the state only on request here, so the stall lasts exactly as the test lets it.
+const stallThenNext = async () => {
+  await send("/state");
+  await Bun.sleep(350);
+  const mark = hostLog().length;
+  expect((await call("next")).status).toBe(200);
+  await Bun.sleep(200); await send("/state");
+  return logSince(mark);
+};
+
+test.skipIf(!supported)("a Next that ends a stall cancels its recovery", async () => {
+  android.stall = 1;
+  await play("991", "992");
+  expect(android.state).toBe(6);
+  android.stall = 0;
+  const lines = await stallThenNext();
+  expect(lines).toEqual(["hires-recovery: no restart after a stall, since the music changed meanwhile: song 992 at 0.0 s, stream rate unknown"]);
+  expect(android.restarts).toBe(0);
+  expect(android.queue[android.selected]?.id).toBe("992");
+  expect(android.state).toBe(3);
+}, 20000);
+
+test.skipIf(!supported)("a Next to a song that stalls too cancels the recovery of the song before, so the new stall is a first one", async () => {
+  android.stall = 1;
+  await play("961", "962");
+  const lines = await stallThenNext();
+  expect(lines[0]).toBe("hires-recovery: no restart after a stall, since the music changed meanwhile: song 962 at 0.0 s, stream rate unknown");
+  expect(android.state).toBe(6);
+  // Apple Music restarts once and the song plays, instead of pausing as after a second stall.
+  await poll(() => android.restarts === 1 && android.state === 3);
+  expect(android.queue[android.selected]?.id).toBe("962");
+  expect((await send("/state")).body.playback.error).toBeUndefined();
+}, 20000);
+
+test.skipIf(!supported)("a Next after a restart is not paused by the recovery of a second stall it ended", async () => {
+  // The host log holds earlier tests' recoveries too.
+  let mark = hostLog().length;
+  const recovered = () => logSince(mark).some(line => line.includes("recovered after"));
+  android.stall = 2;
+  await play("981", "982");
+  await poll(() => android.restarts === 1 && android.state === 6);
+  await poll(recovered);
+  android.stall = 0;
+  await stallThenNext();
+  expect(android.queue[android.selected]?.id).toBe("982");
+  expect(android.state).toBe(3);
+  expect(android.restarts).toBe(1);
+  expect((await send("/state")).body.playback.error).toBeUndefined();
+
+  // The same, but the next song buffers right after it started, before Peel reads the state
+  // again. It played, so its stall is a first one: Apple Music restarts instead of pausing.
+  mark = hostLog().length;
+  android.stall = 2;
+  await play("984", "985");
+  await poll(() => android.restarts === 2 && android.state === 6);
+  await poll(recovered);
+  android.stall = 0;
+  await send("/state");
+  await Bun.sleep(350);
+  expect((await call("next")).status).toBe(200);
+  android.stall = 1; android.state = 6;
+  await poll(() => android.restarts === 3 && android.state === 3);
+  expect(android.queue[android.selected]?.id).toBe("985");
+  expect((await send("/state")).body.playback.error).toBeUndefined();
+}, 20000);
+
+test.skipIf(!supported)("a Next that Apple Music ignores during a stall leaves the recovery to run", async () => {
+  android.stall = 1;
+  await play("971", "972");
+  android.ignore.add("next");
+  await send("/state");
+  await Bun.sleep(350);
+  expect((await call("next")).status).toBe(500);
+  await poll(() => android.restarts === 1 && android.state === 3);
+  expect(android.queue[android.selected]?.id).toBe("971");
+}, 20000);
+
 test.skipIf(!supported)("a song that plays silent restarts Apple Music once and continues, and silence again soon after only says so", async () => {
   // Older dumps beyond the newest five are deleted. The stall test left dumps of its own.
   await rm(dumps(), { recursive: true, force: true });
@@ -645,8 +903,8 @@ test.skipIf(!supported)("the faster checks after a rate change end after ten che
   streamRate(44100); muteStream(true); android.position = 2000;
   const runs = pactlRuns();
   await poll(() => pactlRuns() - runs >= 10, 400);
-  // The quality tag shows the rate those checks read, without a pactl run of its own.
-  expect((await send("/state")).body.playback.sampleRate).toBe(44100);
+  // The state reports the rate those checks read, without a pactl run of its own.
+  expect((await send("/state")).body.playback.outputRate).toBe(44100);
   // After ten checks the faster checks end. Before 3 seconds the song then gets no more checks.
   await listen();
   expect(pactlRuns() - runs).toBe(10);
@@ -881,16 +1139,18 @@ test.skipIf(process.platform !== "linux")("a Peel that attaches while Android is
   } finally { unlinkSync(join(temporary, "idle-waits")); }
 }, 20000);
 
-test.skipIf(!supported)("the state reports the rate of Android's stream in PipeWire", async () => {
+test.skipIf(!supported)("without the controller's mixer rate, the state reports the rate of Android's stream in PipeWire as the rate it sends", async () => {
   expect((await call("play", ["501", "502"].map(id => song(id)), 0)).status).toBe(200);
   // The controller switches the rate about a second after a song starts, so the host reads it later.
   // The simulated pactl reports Android's stream at 96 kHz.
   let state: any;
   for (const end = Date.now() + 8000; Date.now() < end; await Bun.sleep(250)) {
     state = (await send("/state")).body;
-    if (state.playback?.sampleRate) break;
+    if (state.playback?.outputRate) break;
   }
-  expect(state.playback.sampleRate).toBe(96000);
+  expect(state.playback.outputRate).toBe(96000);
+  // The controller has not said which rate the song has, so the state names none.
+  expect(state.playback.sampleRate).toBeUndefined();
 }, 20000);
 
 test.skipIf(!supported)("a rate read that finds no stream waits five seconds, and the next song still gets its rate", async () => {
@@ -910,9 +1170,9 @@ test.skipIf(!supported)("a rate read that finds no stream waits five seconds, an
     let state: any;
     for (const end = Date.now() + 4000; Date.now() < end; await Bun.sleep(100)) {
       state = (await send("/state")).body;
-      if (state.playback?.sampleRate) break;
+      if (state.playback?.outputRate) break;
     }
-    expect(state.playback.sampleRate).toBe(96000);
+    expect(state.playback.outputRate).toBe(96000);
   } finally {
     noStream(false);
     await call("volume", 1);
@@ -959,6 +1219,41 @@ test.skipIf(!supported)("with two of Android's streams listed, the quality tag a
   expect(await reportedRate()).toBe(44100);
   await poll(() => android.restarts === 1 && android.state === 3);
   expect(logSince(mark)[0]).toBe("hires-recovery: heard only zeros after the stream changed rate: song 532 at 2.0 s, stream 44100 Hz");
+}, 20000);
+
+test.skipIf(!supported)("the state reports the song's own rate from the controller, and Android's mixer rate beside it", async () => {
+  await play("541", "542");
+  const item = android.queue[android.selected]!.queueId;
+  // Android resamples a 44.1 kHz song to 192 kHz, as when the rate helper is missing.
+  android.songRate = 44100; android.mixerRate = 192000;
+  let playback = (await send("/state")).body.playback;
+  expect([playback.sampleRate, playback.outputRate]).toEqual([44100, 192000]);
+  // Once the mixer follows the song, both match.
+  android.mixerRate = 44100;
+  playback = (await send("/state")).body.playback;
+  expect([playback.sampleRate, playback.outputRate]).toEqual([44100, 44100]);
+  // A rate the controller found for another entry, such as the song before, is not this song's.
+  android.rateItem = item - 1;
+  playback = (await send("/state")).body.playback;
+  expect(playback.sampleRate).toBeUndefined();
+  expect(playback.outputRate).toBe(44100);
+}, 20000);
+
+test.skipIf(!supported)("silence after a rate change first moves Android's tracks to the mixer's current buffer, and a song that sounds again is not restarted", async () => {
+  await afterLastRestart();
+  const mark = hostLog().length;
+  await play("551", "552");
+  android.position = 60000; await listen();
+  expect((await call("next")).status).toBe(200);
+  android.rebindHelps = true;
+  streamRate(44100); android.position = 2000; silence(1);
+  await poll(() => android.rebinds === 1 && android.silent === 0);
+  android.position = 5000; await listen();
+  expect(android.restarts).toBe(0);
+  expect(android.rebinds).toBe(1);
+  const lines = logSince(mark);
+  expect(lines[0]).toBe("hires-recovery: heard only zeros after the stream changed rate: song 552 at 2.0 s, stream 44100 Hz");
+  expect(lines[1]).toBe("hires-recovery: moved Android's tracks to the mixer's current buffer (3 sessions): song 552 at 2.0 s");
 }, 20000);
 
 // Last: the host exits at the end.

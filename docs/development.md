@@ -38,6 +38,20 @@ bun start
 
 On Linux with a systemd user session, the engine runs as the `peel-engine` user unit and the hi-res host as `peel-hires-host`, both in `app-peel.slice`. Without systemd, the engine runs as a detached process and logs to `engine.log` in its profile folder.
 
+## Trying a pull request
+
+`peel --try 118` starts Peel from the code of pull request #118 without a checkout and without changing the installed Peel. `peel --try` without a number takes the open pull request that changed last, and `peel --try main` takes the newest commit on `main` before the nightly release has it. Other options, such as `--local`, pass through to the test build.
+
+`--try` needs an installed Peel that has it. Check that `peel --help` lists `--try`, and update Peel if it does not. An older Peel ignores the option and opens the installed Peel, which looks the same as a test build. A test build shows `Test build #118 be400a9` at the left of the status line and in the terminal's title. Without that label, the installed Peel runs.
+
+`peel --try` runs only pull requests whose branch is in this repository. It refuses a pull request from a fork, and without a number it skips pull requests from forks, since it runs the downloaded code on your computer.
+
+Peel downloads each commit from GitHub once into a `try` folder beside its versions (on Linux `~/.local/share/peel/try`), runs `bun install`, and starts it in the same terminal. It keeps the three test builds used last, every test build that still runs, and the one whose code the hi-res host runs. A new push to the pull request is a new commit, so the same command picks it up. A test build never updates itself, and its version ends in `-try.pr118.<commit>`. Closing it and running `peel` returns to the installed Peel.
+
+With hi-res playback, `peel --try` starts only while no other Peel uses the hi-res host on this computer. Close the other Peel windows first, also Peels that control this computer from another one. A Peel window of a version from before `--try` would otherwise take the hi-res host back from the test build, or keep the test build's code running after it closed.
+
+While a test build runs, `peel --try` keeps a record of it in the `try` folder of the hi-res host's settings (`~/.config/peel-hires-host/try` on Linux). Before the test build starts, `peel --try` restarts the hi-res host with the test build's code, also for a branch older than the installed release. The installed Peel's windows leave that host alone while the record says the test build runs. When the test build closes, `peel --try` stops that host, also when a Peel window opened meanwhile still uses it. That window starts the installed code's host with its next command. When the terminal closed or crashed, the installed Peel's next command restarts the host with the installed code. A test build that controls another computer over SSH uses the Peel installed there.
+
 ## Files and variables
 
 | System | Settings and sign-in | Cache | Engine profile |
@@ -70,13 +84,13 @@ bun test
 
 The tests drive the real interface through OpenTUI's test renderer. They feed it the same mouse and keyboard sequences a terminal sends and read back the rendered cells. Playback runs against `tests/fixture.ts`, which keeps a queue the way `engine/engine.js` does and records each engine method Peel calls. Apple Music's API is a local server with fixed answers. Nothing reaches Apple, starts a real engine or plays sound.
 
-`tests/hires-host.test.ts` runs the real hi-res host against a simulated Android controller. `hires/tests/offline/run.sh` checks the hi-res updater, health checks and audio driver without Waydroid.
+`tests/hires-host.test.ts` runs the real hi-res host against a simulated Android controller. `hires/tests/offline/run.sh` checks the hi-res updater, health checks, audio driver and the controller's reading of Android's audio dump without Waydroid.
 
 Checks that need real machines:
 
 - `bun scripts/capture-ui.ts` saves the rendered interface at 48, 80 and 120 columns to `evidence/`, with fixture data.
 - `bun scripts/verify-devices.ts wait` on one computer and `bun scripts/verify-devices.ts pair` on another pair two real computers over the network and move a queue between stand-in engines. Neither computer's music changes.
-- `peel-hires test` on a hi-res machine boots the current release, plays a known signal through Android and checks that the samples reach PipeWire unchanged. With `APPLE_PLAY_TEST=on` it also plays a real Apple Music song.
+- `peel-hires test` on a hi-res machine boots the current release, plays a known signal through Android and checks that the samples reach PipeWire unchanged. With `APPLE_PLAY_TEST=on` it also plays real Apple Music songs: one at 192 kHz, and four at different rates to check that Android's mixer follows each song with sound.
 
 ## Releases
 

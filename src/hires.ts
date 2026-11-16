@@ -17,9 +17,12 @@ import { AppleMusic } from "./apple";
 import { compareBuilds, hiresBuild, type HostBuild } from "./build";
 import { cacheDir, configDir, readAppleSignIn, systemDir } from "./config";
 import { Engine, ownerRole, systemdSession } from "./engine";
+import { testRuns, testVersion } from "./try-runs";
 import { media, type Media, type Playback } from "./types";
 
 export const hiresHome = process.env.PEEL_HIRES_HOME ?? join(systemDir("config"), "peel-hires-host");
+// Where peel --try records the test builds that run (src/try-runs.ts).
+export const testRunsDir = join(hiresHome, "try");
 const hiresPort = Number(process.env.PEEL_HIRES_PORT ?? 10769);
 
 // Peel's own copy of peel-hires, so the controller always matches this version of Peel. The
@@ -60,13 +63,24 @@ export class Hires extends Engine {
   async appleTokens(): Promise<{ userToken: string; storefront?: string }> { throw new Error("The hi-res player has no Apple sign-in."); }
 }
 
-// How ensureHires treats a host of another build. The SSH helper passes remote. Tests also pass
-// the caller's build, a stand-in for starting a host, and one for telling whether a host runs.
+// How ensureHires treats a host of another build. The SSH helper passes remote. peel --try passes
+// the test build's build and a start of the test build's host. Tests also pass the caller's build,
+// a stand-in for starting a host, one for telling whether a host runs, and one for telling which
+// test builds run. peel --try also passes exclusive, so it replaces only a host no other Peel
+// uses, also one another Peel started while the replaced host stopped.
 export interface HiresStart {
   remote?: boolean;
   build?: HostBuild;
   launch?: () => Promise<void>;
   watch?: () => Promise<() => Promise<boolean>>;
+  testRunning?: (version: string) => boolean;
+  exclusive?: boolean;
+}
+
+// Why ensureHires with exclusive did not replace the host: other Peels use it, or it does not say
+// how many do.
+export class SharedHost extends Error {
+  constructor(readonly others: number | undefined) { super("Other Peels use hi-res playback on this computer."); }
 }
 
 // How many times one call restarts an older host. A host that another Peel starts meanwhile
@@ -76,22 +90,32 @@ const maxRestarts = 3;
 // Starts the host when it is not running and waits until Android and Apple Music answer. Android
 // runs only while a Peel uses it, so this usually boots it, which takes about 7 seconds.
 export async function ensureHires(engine: Engine, status: (text: string) => void = () => {}, signal?: AbortSignal, start: HiresStart = {}) {
-  const mine = start.build ?? hostBuild(), remote = !!start.remote;
+  const mine = start.build ?? hostBuild(), remote = !!start.remote, running = start.testRunning ?? testRunning;
   const state = () => engine.state().catch(() => undefined);
   // The hosts this call asked to quit. One may still answer once while it exits, and only a host
   // that runs now counts.
   const replaced = new Set<string>();
   const live = (value: Awaited<ReturnType<typeof state>>) => value && !(value.instance && replaced.has(value.instance)) ? value : undefined;
   let current = await state();
-  for (let restarts = 0; ; restarts++) {
+  for (let restarts = 0; ;) {
     // A host started before Peel updated itself keeps running the old code, while the interface
     // runs the new one. The new host uses the Android the old one ran.
-    if (current && outdated(current, mine, remote)) {
+    if (current && outdated(current, mine, remote, running)) {
       if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} tries. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
+      // others counts the Peels besides this one. A host that does not say counts as used.
+      if (start.exclusive && current.others !== 0) throw new SharedHost(current.others);
       signal?.throwIfAborted();
-      status("Restarting hi-res playback to load an update...");
+      // Another Peel may have replaced the host since its state was read, and the watch then
+      // follows the new host (#127). So the state is read again once the watch has begun, and a
+      // host that changed meanwhile is judged on its own.
       const running = await (start.watch ?? watchHost)();
+      const found = await state();
+      if (found && found.instance !== current.instance) { current = found; continue; }
+      status("Restarting hi-res playback to load an update...");
       if (current.instance) replaced.add(current.instance);
+      restarts++;
+      // When another Peel replaces the host before this quit reaches it, the new host refuses the
+      // old key. The watch then sees the new key and ends the wait.
       await engine.quit().catch(() => {});
       // The old host pauses and stops Android before it exits, which can take a while. Its /state
       // waits for Android meanwhile, so its port and key tell whether it still runs.
@@ -112,7 +136,7 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
     const until = Date.now() + 3 * 60 * 1000;
     // The host that answers may be one that another Peel started from older code, while this
     // Peel restarted or started the host. It is restarted as well.
-    const older = () => !!current && outdated(current, mine, remote);
+    const older = () => !!current && outdated(current, mine, remote, running);
     while (!current?.ready && !older() && Date.now() < until) {
       if (current?.playback?.error) status(current.playback.error);
       await sleep(250, undefined, { signal });
@@ -131,11 +155,31 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
 // The SSH helper runs the newest installed version, which a window on this computer may not have
 // restarted into yet, so it never restarts a host that another Peel uses or that is playing.
 // A host that does not say how many Peels use it counts as used.
-export function outdated(host: { build?: HostBuild; others?: number; playback?: { state?: string } }, mine: HostBuild, remote = false) {
+//
+// A test build (peel --try) runs its own host code, also when its branch is older than the
+// installed release, so release numbers do not order it. While a test build runs, its host
+// counts as newer than any other build's, and a running test build's own build counts as newer
+// than any other host, so the test build restarts the installed Peel's host once and the
+// installed Peel's windows leave the test build's host alone. Of two test builds, the one started
+// last counts as newer. Once a test build ended, its host counts as older than any build, so the
+// next Peel restarts it into its own code. Two test builds of one version run the same code.
+export function outdated(host: { build?: HostBuild; others?: number; playback?: { state?: string } }, mine: HostBuild, remote = false, running: (version: string) => boolean = testRunning) {
   if (host.build?.hash === mine.hash) return false;
-  if (host.build && compareBuilds(host.build, mine) >= 0) return false;
+  const test = testVersion(host.build?.version), mineTest = testVersion(mine.version);
+  if (test && host.build!.version === mine.version) return false;
+  let older: boolean;
+  if (test && !running(host.build!.version)) older = true;
+  else if (test !== mineTest) older = mineTest;
+  else if (test) older = (host.build!.time ?? "") < mine.time;
+  else older = !host.build || compareBuilds(host.build, mine) < 0;
+  if (!older) return false;
   if (remote && (host.others !== 0 || host.playback?.state === "playing")) return false;
   return true;
+}
+
+// Whether a test build of this version runs on this computer.
+function testRunning(version: string) {
+  return testRuns(testRunsDir).live.some(run => run.version === version);
 }
 
 // The build of the code this Peel would start a host from, read once.
@@ -178,9 +222,10 @@ const unitLoaded = async () => {
   return output.trim() === "loaded";
 };
 
-async function launchHost() {
+// peel --try starts the host from a test build's src/hires.ts instead of this one.
+export async function launchHost(code = fileURLToPath(import.meta.url)) {
   // The host runs this file alone, without the interface's modules, in Bun's low-memory mode.
-  const args = [process.execPath, "--smol", fileURLToPath(import.meta.url), "--hires-host"];
+  const args = [process.execPath, "--smol", code, "--hires-host"];
   // The host uses the folders this Peel resolved, so it writes its key where this Peel reads it.
   // systemd's user manager has its own environment and would otherwise use its defaults.
   const environment: Record<string, string> = { PEEL_OWNER: String(process.pid), ...ownerRole(), PEEL_HIRES_HOME: hiresHome, PEEL_CONFIG_DIR: configDir, PEEL_CACHE_DIR: cacheDir };
@@ -220,9 +265,14 @@ const STOPPED = 1, PAUSED = 2, PLAYING = 3, BUFFERING = 6, CONNECTING = 8;
 const stopped = (state: { state?: number }) => state.state === PAUSED || state.state === STOPPED || state.state === 0;
 const repeats = ["none", "one", "all"] as const;
 
-interface Control { state?: number; position?: number; item?: number; title?: string; artist?: string; album?: string; id?: string; duration?: number; error?: string }
+// mixerRate is the rate Android mixes at. songRate is the rate of the audio track Apple Music
+// plays the entry rateItem on, which is that song's own rate.
+interface Control { state?: number; position?: number; item?: number; title?: string; artist?: string; album?: string; id?: string; duration?: number; error?: string; mixerRate?: number; songRate?: number; rateItem?: number }
 interface Entry { queueId: number; song: Media; added: boolean; unknown?: boolean }
 interface Listed { song: Media; added: boolean; at: number }
+// What a stall or silence recovery was started for: the entry and position the host saw, and the
+// rate the silence watcher read.
+interface Cause { item?: number; position?: number; rate?: number }
 
 // Apple Music's Android app ignores a new queue of more than about 500 songs (#96), and its queue
 // answer lists only the playing entry and the next 100. A longer list goes to Apple as a window
@@ -238,7 +288,7 @@ const batchOf = (id: number) => Math.floor(id / 2 ** 32);
 // caller reads Apple Music's state to see whether it took effect.
 export class Uncertain extends Error {}
 // Commands that set a value, or only read, have the same effect when Android receives them twice.
-const repeatable = new Set(["ping", "state", "queue", "volume", "repeat", "shuffle", "autoplay", "seek", "pause", "stop", "play", "skip", "restart"]);
+const repeatable = new Set(["ping", "state", "queue", "volume", "repeat", "shuffle", "autoplay", "seek", "pause", "stop", "play", "skip", "restart", "rebind"]);
 
 // One line-based connection to the controller in Android. Requests go one at a time.
 class Controller {
@@ -410,23 +460,160 @@ export async function runHiresHost() {
     const queue: { queueId: number; id: string; title: string }[] = (await control.request("queue")).queue ?? [];
     // An empty queue means Apple has nothing queued any more, so Peel's mirror empties too. Songs
     // of a long list not sent yet stay, so the list continues.
-    if (!queue.length) { order = []; entries.clear(); sent.clear(); removed.clear(); synced = Date.now(); return; }
-    // The entries before the playing one are history, also those Apple skipped before listing them.
+    if (!queue.length) { order = []; entries.clear(); sent.clear(); removed.clear(); links.clear(); regroup([]); synced = Date.now(); return; }
     for (const item of queue) align(item);
-    const before = [...order, ...hidden()], playing = queue[0]!.queueId, at = before.indexOf(playing);
-    order = [...(at >= 0 ? before.slice(0, at) : []), ...queue.map(item => item.queueId)];
-    for (const item of queue) {
-      if (entries.has(item.queueId)) continue;
-      const queued = sent.get(batchOf(item.queueId))?.[item.queueId % 2 ** 32];
-      entries.set(item.queueId, queued ? { queueId: item.queueId, ...queued }
-        : { queueId: item.queueId, added: false, unknown: true, song: { id: item.id, type: "songs", name: item.title, artist: "", album: "", duration: 0, catalogId: item.id } });
+    order = [...history(queue.map(item => item.queueId)), ...queue.map(item => item.queueId)];
+    widest = Math.max(widest, queue.length);
+    // Every entry in order has its own record: one the host sent has its song, and one Apple added
+    // by itself has what Apple's answer names.
+    const listed = new Map(queue.map(item => [item.queueId, item]));
+    for (const id of order) {
+      if (entries.has(id)) continue;
+      const queued = sent.get(batchOf(id))?.[id % 2 ** 32], item = listed.get(id);
+      entries.set(id, queued ? { queueId: id, ...queued }
+        : { queueId: id, added: false, unknown: true, song: { id: item?.id ?? "", type: "songs", name: item?.title ?? "", artist: "", album: "", duration: 0, catalogId: item?.id } });
     }
     // Songs of queues that were replaced are forgotten.
     const kept = new Set(order);
     for (const id of entries.keys()) if (!kept.has(id)) entries.delete(id);
+    // What the host knows of Apple's order covers only entries still in order or sent, so it does
+    // not grow with a long session. With shuffle off the host needs none of it.
+    if (shuffle) keepOnly(new Set([...order, ...hidden()])); else keepOnly(new Set());
     synced = Date.now();
   }
-  let synced = 0;
+  // The most entries one of Apple's queue answers listed. Apple lists as many as it has, up to its
+  // limit, so an answer with fewer lists the end of its queue.
+  let synced = 0, widest = 0;
+
+  // The entries before the playing one, which is the first in Apple's answer listed. With shuffle
+  // off, Apple keeps the order the host sent, so the entries the host saw before the playing one
+  // are history, and when it plays one Apple had not listed, as after a jump past the end of its
+  // answer, so are the sent entries before it. With shuffle on, mixed tells the history (#126).
+  // An entry in Apple's answer is never history, so each entry shows once.
+  function history(listed: number[]) {
+    const playing = listed[0]!, unseen = hidden(), shown = new Set(listed);
+    // A playing entry the host never sent or saw belongs to a queue another Peel sent.
+    const foreign = !order.includes(playing) && !unseen.includes(playing);
+    if (shuffle) {
+      if (foreign) { links.clear(); regroup([]); }
+      return mixed(listed, foreign ? [] : [...order, ...unseen]);
+    }
+    if (foreign) return [];
+    const before = order.includes(playing) ? order.slice(0, order.indexOf(playing)) : [...order, ...unseen.slice(0, unseen.indexOf(playing))];
+    return before.filter(id => !shown.has(id));
+  }
+
+  // With shuffle on, the host's order says little about Apple's: Apple mixed the songs, also those
+  // its answers never listed, and a jump can land before songs it listed earlier. So the host keeps
+  // what Apple's answers prove about its order, and only an entry proved to come before the playing
+  // one is history. Every other entry stays upcoming, also when it may have played, so no song
+  // Apple still has counts as played.
+  // links holds, for an entry, the entry Apple listed right after it. groups holds the entries the
+  // host knows in groups, in Apple's order: each entry comes before every entry of a later group.
+  // Within a group the order is unknown, except where links tell it.
+  const links = new Map<number, number>();
+  let groups: number[][] = [];
+  const rank = new Map<number, number>();
+  function regroup(list: number[][]) {
+    groups = list.filter(group => group.length);
+    rank.clear();
+    groups.forEach((group, at) => { for (const id of group) rank.set(id, at); });
+  }
+  // When shuffle turns on, Apple keeps the entries up to the playing one where they were, and
+  // mixes the rest. A new list sent while shuffle is on counts the same way.
+  function unmixed() {
+    links.clear(); regroup([]);
+    const list = [...order, ...hidden()], at = position();
+    regroup([...list.slice(0, at + 1).map(id => [id]), list.slice(at + 1)]);
+  }
+  // A moved entry has other neighbours, so what Apple listed beside it no longer holds.
+  function unlink(id: number) { for (const [from, to] of links) if (from === id || to === id) links.delete(from); }
+  // Keeps only these entries in links and groups.
+  function keepOnly(keep: Set<number>) {
+    if (groups.some(group => group.some(id => !keep.has(id)))) regroup(groups.map(group => group.filter(id => keep.has(id))));
+    for (const [from, to] of links) if (!keep.has(from) || !keep.has(to)) links.delete(from);
+  }
+  // Drops entries Apple no longer has, such as one the listener removed or one Apple left out of
+  // a list, from everything the host keeps of them. None of them then shows again, as history or
+  // as upcoming, and no record of them is made anew.
+  function forget(ids: number[]) {
+    if (!ids.length) return;
+    const gone = new Set(ids);
+    order = order.filter(id => !gone.has(id));
+    for (const id of gone) entries.delete(id);
+    keepOnly(new Set([...rank.keys(), ...links.keys(), ...links.values()].filter(id => !gone.has(id))));
+  }
+
+  // Learns from Apple's answer, listed, and returns the entries proved to come before its first.
+  // known holds the other entries the host has: those in order and those Apple has not listed.
+  // - Apple lists entries one after the other, so each one comes right after the one before it,
+  //   and none of them comes before a group an earlier one of them is in.
+  // - An answer shorter than widest ends Apple's queue, so every entry it leaves out comes before.
+  // - An entry right after one of an earlier group starts its group, and the entry before it ends
+  //   its own. So the entries Apple listed after the last one known in place get their place too.
+  // An entry the host has not placed yet, such as one of a part added at the end, goes in the last
+  // group.
+  function mixed(listed: number[], known: number[]) {
+    const shown = new Set(listed);
+    keepOnly(new Set([...known, ...listed]));
+    // Two groups out of order with Apple's answer, as after an edit the host did not see, become
+    // one, so nothing counts as known that the answer contradicts.
+    const merge = (from: number, to: number) => regroup([...groups.slice(0, from), groups.slice(from, to + 1).flat(), ...groups.slice(to + 1)]);
+    let highest = -1;
+    for (const id of listed) {
+      const at = rank.get(id);
+      if (at === undefined) {
+        if (highest < 0) highest = groups.length;
+        regroup(highest < groups.length ? groups.map((group, index) => index === highest ? [...group, id] : group) : [...groups, [id]]);
+      } else if (at < highest) { merge(at, highest); highest = at; }
+      else highest = at;
+    }
+    const unplaced = known.filter(id => !rank.has(id));
+    if (unplaced.length) regroup(groups.length ? [...groups.slice(0, -1), [...groups.at(-1)!, ...unplaced]] : [unplaced]);
+    listed.forEach((id, at) => {
+      const next = listed[at + 1];
+      if (next === undefined) return;
+      for (const [from, to] of links) if (to === next && from !== id) links.delete(from);
+      links.set(id, next);
+    });
+    if (listed.length < widest) regroup([...groups.map(group => group.filter(id => !shown.has(id))), listed]);
+    for (let changed = true; changed;) {
+      changed = false;
+      for (const [from, to] of links) {
+        const a = rank.get(from)!, b = rank.get(to)!;
+        if (a >= b) continue;
+        if (b > a + 1) merge(a, b);
+        else if (groups[a]!.length > 1) regroup([...groups.slice(0, a), groups[a]!.filter(id => id !== from), [from], ...groups.slice(a + 1)]);
+        else if (groups[b]!.length > 1) regroup([...groups.slice(0, b), [to], groups[b]!.filter(id => id !== to), ...groups.slice(b + 1)]);
+        else continue;
+        changed = true;
+      }
+    }
+    // The entries of earlier groups, and those linked one after the other up to the playing entry.
+    const playing = listed[0]!, before = new Set(known.filter(id => rank.get(id)! < rank.get(playing)!));
+    const previous = new Map([...links].map(([from, to]) => [to, from]));
+    for (let id = previous.get(playing); id !== undefined && !before.has(id) && !shown.has(id); id = previous.get(id)) before.add(id);
+    return arrange([...before].filter(id => !shown.has(id)));
+  }
+
+  // Puts entries in the order the host knows: group by group, and within a group along links.
+  // Entries whose order is unknown keep the order they come in. One linked from after, which
+  // Apple listed right after it, comes first in its group.
+  function arrange(ids: number[], after?: number) {
+    const level = (id: number) => rank.get(id) ?? groups.length;
+    const sorted = [...ids].sort((a, b) => level(a) - level(b)), result: number[] = [], done = new Set<number>();
+    for (let start = 0, end = 0; start < sorted.length; start = end) {
+      while (end < sorted.length && level(sorted[end]!) === level(sorted[start]!)) end++;
+      const group = sorted.slice(start, end), members = new Set(group);
+      const followed = new Set(group.map(id => links.get(id)).filter(id => id !== undefined && members.has(id)));
+      const heads = group.filter(id => !followed.has(id)), first = after === undefined ? undefined : links.get(after);
+      heads.sort((a, b) => Number(b === first) - Number(a === first));
+      for (const head of [...heads, ...group]) {
+        for (let id: number | undefined = head; id !== undefined && members.has(id) && !done.has(id); id = links.get(id)) { result.push(id); done.add(id); }
+      }
+    }
+    return result;
+  }
 
   // Apple's entry holds another song than the host sent at its place when Apple dropped songs it
   // cannot play, which moves the later ones up. The dropped songs come out of the sent batch up to
@@ -438,6 +625,8 @@ export async function runHiresHost() {
     if (found < 0) return;
     const dropped = found - index;
     songs.splice(index, dropped);
+    // Apple numbers the songs it kept one after the other, so the last IDs of the batch are gone.
+    forget(Array.from({ length: dropped }, (_, at) => batch * 2 ** 32 + songs.length + at));
     for (const key of [...entries.keys()]) if (batchOf(key) === batch && key % 2 ** 32 >= index) entries.delete(key);
     for (const key of [...removed]) {
       if (batchOf(key) !== batch || key % 2 ** 32 < index) continue;
@@ -489,6 +678,8 @@ export async function runHiresHost() {
   // place and never plays (#60). After stallLimit there, the host restarts Apple Music and
   // continues at the same song and position. If that stalls too, it pauses and says so. A song
   // that plays again allows the next recovery.
+  // The recovery waits for the command that runs, such as a Next pressed during the stall, so it
+  // takes the entry and position that stalled, and runs only if they still stall then (#128).
   const stallLimit = Number(process.env.PEEL_HIRES_STALL_MS) || 10000;
   let stall: { item?: number; position?: number; since: number } | undefined, recovered = false, recovering = false;
   function watchStall() {
@@ -499,7 +690,8 @@ export async function runHiresHost() {
     stall = undefined; recovering = true;
     const again = recovered;
     recovered = true;
-    void call("recover", [again, "stall"]).catch(error => say(`the recovery after a stall failed: ${message(error)}`)).finally(() => { recovering = false; });
+    const cause: Cause = { item: current.item, position: current.position };
+    void call("recover", [again, "stall", cause]).catch(error => say(`the recovery after a stall failed: ${message(error)}`)).finally(() => { recovering = false; });
   }
 
   // Apple Music can report playing, with its position advancing, while every sample it sends is
@@ -512,7 +704,8 @@ export async function runHiresHost() {
   // 40 a second in normal playback.
   //
   // A silent song once followed a song at another rate: its track opened while the mixer still ran
-  // at the old rate, and the mixer switched in the same moment the song started. So when the
+  // at the old rate, and the mixer switched in the same moment the song started. The controller now
+  // keeps such tracks playing through a switch, and this watcher stays as the backstop. So when the
   // stream's rate differs from the one read before, the song's first check comes at 1.5 seconds,
   // a check follows every second, and fastLimit of zeros counts. That ends once the song sounds,
   // or after fastChecks checks that heard no sound, for example with the stream muted on the
@@ -524,9 +717,10 @@ export async function runHiresHost() {
   const checkEvery = Math.min(5000, silenceLimit / 2);
   const fastLimit = Math.min(3000, silenceLimit), fastEvery = Math.min(1000, fastLimit / 2), fastChecks = 10;
   const silenceAgain = Number(process.env.PEEL_HIRES_SILENCE_AGAIN_MS) || 60000;
-  let silent: { item?: number; since: number } | undefined, listened = 0, silenced = 0, quiet: number | undefined;
+  let silent: { item?: number; since: number } | undefined, listened = 0, silenced = 0, quiet: number | undefined, rebound: number | undefined;
   // The stream's rate as last read and the entry it was read for, and the entry whose stream
-  // changed rate with the fast checks it has left. The player's quality tag shows the same rate.
+  // changed rate with the fast checks it has left. The quality tag uses it as the rate Android sends
+  // only when the controller does not report its mixer's rate.
   let heard: { item?: number; rate: number } | undefined, switched: { item?: number; left: number } | undefined;
   function noteRate(item: number | undefined, rate: number | undefined) {
     if (!rate) return;
@@ -547,12 +741,11 @@ export async function runHiresHost() {
   }
   const early = (item: number | undefined) => (current.position ?? 0) < 3000 && !fastFor(item);
 
-  // Android's streams are read in this one place, for the rate on the player's quality tag and for
-  // the silence watcher, so the two never disagree and pactl never runs twice for one moment. It
-  // reads from Android's stream in PipeWire, not from the controller, whose rate lookups can wait
-  // seconds on Android's mixer. The controller switches the mixer to each song's own rate about a
-  // second after the song changes, so a song's first reading comes 1.5 seconds after the host saw
-  // it start, or sooner once its position reaches 1.5 seconds while the silence watcher listens.
+  // Android's streams are read in this one place, for the silence watcher and for the rate Android
+  // sends when the controller does not report it, so pactl never runs twice for one moment. The
+  // controller switches the mixer to each song's own rate within about a second of the song
+  // change, so a song's first reading comes 1.5 seconds after the host saw it start, or sooner
+  // once its position reaches 1.5 seconds while the silence watcher listens.
   // That reading tells the silence watcher whether the rate changed, and when it did, the watcher
   // records at once from the same listing. After that a reading comes whenever the silence watcher
   // is due to check, every checkEvery or every fastEvery after a rate change. While it does not
@@ -590,6 +783,15 @@ export async function runHiresHost() {
       return;
     }
     say(`heard only zeros${fast ? " after the stream changed rate" : ""}: ${where(rate)}`);
+    // A track that Android's mixer left on its old buffer when it changed rate stays silent until
+    // the track moves to the new one. The controller moves every track at once, which changes
+    // nothing for a song that is silent on purpose, so the first zeros after a rate change ask for
+    // it before any restart.
+    if (fast && rebound !== item) {
+      rebound = item;
+      void control.request("rebind").then(answer => say(`moved Android's tracks to the mixer's current buffer (${answer.sessions ?? 0} sessions): ${spot()}`))
+        .catch(error => say(`could not move Android's tracks to the mixer's current buffer: ${message(error)}`));
+    }
     const since = silent && silent.item === item ? silent.since : listened;
     silent = { item, since };
     if (listened - since < (fast ? fastLimit : silenceLimit)) return;
@@ -600,13 +802,14 @@ export async function runHiresHost() {
       notice = "Android's audio is silent, also after a restart of Apple Music. Quit Peel and open it again to restart Android.";
       return;
     }
-    silenced = listened; recovering = true;
-    void call("recover", [false, "silence", rate]).catch(error => say(`the recovery after silence failed: ${message(error)}`)).finally(() => { recovering = false; });
+    recovering = true;
+    const cause: Cause = { item, position: current.position, rate };
+    void call("recover", [false, "silence", cause]).catch(error => say(`the recovery after silence failed: ${message(error)}`)).finally(() => { recovering = false; });
   }
 
   type Stream = { index: number; corked?: boolean; mute?: boolean; volume?: Record<string, { value?: number }>; sample_specification?: string; properties?: Record<string, string> };
   // Android's playing streams in PipeWire, or undefined without PulseAudio's tools. Only
-  // readStreams runs it, so each pactl run serves the quality tag and the silence watcher alike.
+  // readStreams runs it, so each pactl run serves the silence watcher and the rate it reads alike.
   async function streams(): Promise<Stream[] | undefined> {
     if (!Bun.which("pactl")) return undefined;
     const list = Bun.spawn(["pactl", "-f", "json", "list", "sink-inputs"], { stdout: "pipe", stderr: "ignore" });
@@ -616,7 +819,7 @@ export async function runHiresHost() {
   }
   const rateOf = (stream: Stream) => Number(/(\d+)Hz/.exec(stream.sample_specification ?? "")?.[1]) || undefined;
   // The rate Android's mixer runs at, from a listing of streams(). This is the one place that
-  // decides which stream plays, for the quality tag and the silence watcher alike. It takes the
+  // decides which stream plays, for the silence watcher and the rate it reads alike. It takes the
   // newest stream, the one with the highest index, since PipeWire counts its indexes up. Android
   // has two streams open only for a moment: when the mixer changes rate, as during a song change,
   // Android's driver opens a new stream at the new rate while the old one is still listed, and
@@ -819,7 +1022,7 @@ export async function runHiresHost() {
     sent.clear(); removed.clear();
     sent.set(batchOf(base), playable.map(entry => ({ song: entry.song, added: marks.has(entry.at) })));
     rest = listed.slice(to).map((song, at) => ({ song, added: marks.has(to + at), at: to + at }));
-    if (shuffle) mix(rest);
+    if (shuffle) { mix(rest); unmixed(); }
     extendAfter = 0; part = undefined;
     await sync();
     return playable[start]!.at;
@@ -829,10 +1032,12 @@ export async function runHiresHost() {
   const upcoming = () => order.length - position() - 1 + hidden().length;
   // Entries the host sent that Apple's answer does not list, in the order they were sent: those
   // beyond its 101 entries, also ones an added song pushed back out of them.
+  // With shuffle on, they come in the order the host knows of them, the ones Apple listed right
+  // after the last entry in order first.
   function hidden() {
     const listed = new Set(order), ids: number[] = [];
     for (const [batch, songs] of sent) songs.forEach((_, index) => { const id = batch * 2 ** 32 + index; if (!listed.has(id) && !removed.has(id)) ids.push(id); });
-    return ids;
+    return shuffle && groups.length ? arrange(ids, order.at(-1)) : ids;
   }
   const mix = (list: Listed[]) => { for (let i = list.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [list[i], list[j]] = [list[j]!, list[i]!]; } };
 
@@ -1005,6 +1210,15 @@ export async function runHiresHost() {
     if (playingSong()?.id === song.id && value !== undefined) rated = { id: song.id, value, checked: Date.now() };
   }
 
+  // The playing song's own rate, from the audio track Apple Music plays it on, and the rate
+  // Android mixes at, which the stream in PipeWire also runs at. The two differ when the
+  // controller could not switch the mixer, and then Android resamples the song.
+  function rates(): Pick<Playback, "sampleRate" | "outputRate"> {
+    const song = current.rateItem === current.item ? current.songRate : undefined;
+    const output = current.mixerRate ?? knownRate();
+    return { ...song ? { sampleRate: song } : {}, ...output ? { outputRate: output } : {} };
+  }
+
   function playback(): Playback {
     if (current.title) lookUp();
     const song = playingSong();
@@ -1019,7 +1233,7 @@ export async function runHiresHost() {
       } : null,
       time: { currentTime: (current.position ?? 0) / 1000, duration: (current.duration ?? 0) / 1000 },
       volume, repeatMode: repeats[repeat] ?? "none", shuffleMode: shuffle, queueRevision: revision(),
-      ...(knownRate() && current.title ? { sampleRate: knownRate() } : {}),
+      ...current.title ? rates() : {},
       ...(notice ? { error: notice } : current.error ? { error: current.error } : note && Date.now() <= note.until ? { error: note.text } : {}),
     };
   }
@@ -1029,6 +1243,7 @@ export async function runHiresHost() {
   // Songs of a long list not sent yet are mixed and put back here, in the same way.
   async function setShuffle(enabled: boolean) {
     if (enabled !== shuffle) { if (enabled) mix(rest); else rest.sort((a, b) => a.at - b.at); }
+    if (enabled && !shuffle) { shuffle = true; unmixed(); }
     shuffle = enabled;
     const before = order.join();
     await control.request(`shuffle ${enabled ? 1 : 0}`);
@@ -1182,6 +1397,7 @@ export async function runHiresHost() {
       const at = position();
       if (Math.min(from, to) <= at) return;
       const id = order[from]!, beside = order[to]!, after = to > from;
+      unlink(id);
       await control.request(`move ${id} ${beside} ${after ? 1 : 2}`).catch(unless);
       await syncUntil(() => order.indexOf(id) === order.indexOf(beside) + (after ? 1 : -1), "Apple Music did not move the song.");
     },
@@ -1190,9 +1406,13 @@ export async function runHiresHost() {
       if (index <= position()) return;
       const list = whole(), id = list[index]?.id;
       if (id === undefined) { rest.splice(index - (list.length - rest.length), 1); return; }
-      await control.request(`remove ${id}`).catch(unless);
-      await syncUntil(() => !order.includes(id), "Apple Music did not remove the song.");
-      removed.add(id);
+      // The entry counts as removed at once, so a read of Apple's queue meanwhile does not take it
+      // for one Apple played. When Apple does not remove it, it counts again.
+      removed.add(id); forget([id]);
+      try {
+        await control.request(`remove ${id}`).catch(unless);
+        await syncUntil(() => !order.includes(id), "Apple Music did not remove the song.");
+      } catch (error) { removed.delete(id); throw error; }
     },
     // A song Apple has queued plays from its queue. One not sent yet starts a new window there.
     jump: async (index: number, expected?: string) => {
@@ -1223,8 +1443,21 @@ export async function runHiresHost() {
     // reason. A listener who paused meanwhile keeps the pause. A restart after silence says so in
     // a note, and so does a recovery whose song plays again after a step failed. A recovery that
     // failed says so in a notice.
-    recover: async (again: boolean, reason: "silence" | "stall" = "stall", rate?: number) => {
-      if (!wanted) { say(`no restart after ${reason === "stall" ? "a stall" : reason}, since the music was paused meanwhile: ${where(rate)}`); return; }
+    // A command sent while the song stalled or played silent runs first. When another entry plays
+    // then, or the stalled one plays or moved on, or the silent one stopped, the recovery has no
+    // cause any more and does nothing, so it neither restarts Apple Music nor pauses a song that
+    // started fine. A stall it skips does not count toward the pause after a second stall.
+    recover: async (again: boolean, reason: "silence" | "stall", seen: Cause) => {
+      const rate = seen.rate, what = reason === "stall" ? "a stall" : reason;
+      if (!wanted) { say(`no restart after ${what}, since the music was paused meanwhile: ${where(rate)}`); return; }
+      await read().catch(() => {});
+      const still = current.item === seen.item && (reason === "stall" ? current.state === BUFFERING && current.position === seen.position : current.state === PLAYING);
+      if (!still) {
+        // A song seen playing since allows the next recovery already.
+        if (reason === "stall" && recovered) recovered = again;
+        say(`no restart after ${what}, since the music changed meanwhile: ${where(rate)}`);
+        return;
+      }
       if (again) {
         say(`stalled again after a restart, so the music pauses: ${where(rate)}`);
         wanted = false;
@@ -1233,7 +1466,9 @@ export async function runHiresHost() {
         return;
       }
       const cause = reason === "silence" ? "Android played silence" : "Apple Music stopped streaming";
-      say(`restarting Apple Music after ${reason === "stall" ? "a stall" : reason}: ${where(rate)}`);
+      // Silence soon after this restart only says so, in listen.
+      if (reason === "silence") silenced = Date.now();
+      say(`restarting Apple Music after ${what}: ${where(rate)}`);
       // The note shows while Apple Music restarts, and stays with the song once it plays again.
       const silenceNote = "Android played silence, so Peel restarted Apple Music. The song continues where it was.";
       note = reason === "silence" ? { text: silenceNote, position: 0, until: Infinity } : undefined;

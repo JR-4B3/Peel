@@ -1,0 +1,40 @@
+Hardware status: 0
+Standby Time mSec: 3000
+
+Output thread 0x7f2ba2015030, name AudioOut_15, tid 210, type 1 (DIRECT):
+  I/O handle: 21
+  Standby: yes
+  Sample rate: 44100 Hz
+  1 Tracks of which 0 are active
+    Type     Id Active Client Session Port Id S  Flags   Format Chn mask  SRate ST Usg CT  G db  L dB  R dB  VS dB   Server FrmCnt  FrmRdy F Underruns  Flushed   Latency
+             40     no   1583  107801       9 I  0x000 00000005 00000003 176400  3   1  0  -inf     0     0     0  00000000  11025       0 f         0        0       new
+
+Output thread 0x7f2c87b159a0, name AudioOut_D, tid 203, type 0 (MIXER):
+  I/O handle: 13
+  Standby: no
+  Sample rate: 44100 Hz
+  HAL frame count: 1024
+  Normal frame count: 1024
+  FastMixer thread 0x7f2c87a5fcb0 tid=202  FastMixer command=MIX_WRITE writeSequence=48571 framesWritten=24867840
+  Fast tracks: sMaxFastTracks=8 activeMask=0x1
+  Index Active Full Partial Empty  Recent Ready    Written
+      0    yes  728       0     0    full 16384   24861696
+      1     no    0       0     0    full     0          0
+  7 Tracks of which 2 are active
+    Type     Id Active Client Session Port Id S  Flags   Format Chn mask  SRate ST Usg CT  G db  L dB  R dB  VS dB   Server FrmCnt  FrmRdy F Underruns  Flushed   Latency
+             60    yes   1583  107905      13 A  0x000 00000001 00000003  44100  3   1  0   -23     0     0     0  0004AC00  11025   11025 A         0        0   unavail
+             59     no   1583  107905      12 T  0x600 00000005 00000003 192000  3   1  0   -23     0     0     0  005619BB  11025       0 f         0    10319   unavail
+             62     no   1583  107929      15 I  0x000 00000005 00000003  96000  3   1  0  -inf     0     0     0  00000000  57400       0 f         0        0       new
+             63     no   1583  107929      16 s1 0x000 00000005 00000003  48000  3   1  0  -inf     0     0     0  00000000  21616       0 f         0        0       new
+       S     58     no   1583  107913      11 I  0x000 00000001 00000001   4000  3   1  2  -inf     0     0     0  00000000      1       1 I         0        0       new
+F2 S         71     no   1583  107937      17 I  0x004 00000001 00000001   4000  3   1  2  -inf     0     0     0  00000000      1       1 I         0        0       new
+       P     70    yes      0       0      18 A  0x000 00000005 00000003  48000  3   1  0     0     0     0     0  00000000   2048    2048 A         0        0   unavail
+  0 Effect Chains
+  Local log:
+   11-14 14:42:00.147 AT::add       (0x7f2af2007360)          64     no   1583  107905      13 A  0x000 00000001 00000003  88200  3   1  0  -inf     0     0     0  00000000  11025       0 f         0        0       new
+
+Output thread 0x7f2c87b15000, name AudioOut_1D, tid 220, type 0 (MIXER):
+  I/O handle: 29
+  1 Tracks of which 1 are active
+    Type     Id Active Client Session Port Id S  Flags   Format Chn mask  SRate ST Usg CT  G db  L dB  R dB  VS dB   Server FrmCnt  FrmRdy F Underruns  Flushed   Latency
+             80    yes   1583  107999      30 A  0x000 00000001 00000003  22050  3   1  0     0     0     0     0  00000000  11025   11025 A         0        0   unavail

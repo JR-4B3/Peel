@@ -97,6 +97,9 @@ public final class Control {
     // rate [hz]: switches the rate Android mixes at, through Peel's rate helper, and answers the
     // rate it mixes at. Without the helper the rate stays as it is.
     if (name.equals("rate")) return "{\"rate\":" + (arg.isEmpty() ? Rates.mixer() : Rates.set(Integer.parseInt(arg))) + "}";
+    // rebind: moves every track on the mixer to its current buffer, as a switch does, for a song
+    // that stays silent after a switch. Answers how many sessions it reached.
+    if (name.equals("rebind")) return "{\"sessions\":" + Rates.rebind() + "}";
     // restart: stops Apple Music, for a player that no longer streams or went silent. The next
     // command finds no session, and the host starts Apple Music's playback service again. The
     // stopped app's session stays listed for a moment, and commands sent to it then are lost, so
@@ -277,6 +280,10 @@ public final class Control {
       }
       json.append(json.length() > 1 ? "," : "").append("\"duration\":").append(call(meta, "getLong", "android.media.metadata.DURATION"));
     }
+    // The rate Android mixes at, and the rate of the playing song's audio track once known, with
+    // the entry it belongs to.
+    if (Rates.known > 0) json.append(json.length() > 1 ? "," : "").append("\"mixerRate\":").append(Rates.known);
+    if (songRate > 0) json.append(json.length() > 1 ? "," : "").append("\"songRate\":").append(songRate).append(",\"rateItem\":").append(rateItem);
     return json.append("}").toString();
   }
 
@@ -308,13 +315,17 @@ public final class Control {
     return out.append('"').toString();
   }
 
-  // Makes Android mix at the playing song's own rate. Apple Music logs a song's decoded format when
-  // it prepares the song, about a second ahead, and again when the song starts, and opens a new
-  // audio track at the song change when the format differs. When the playing entry changes, the
-  // rate logged from just before that change on belongs to the new song, and the mixer switches
-  // to it then. The mixer never switches during a song. Without the rate helper, Rates.set changes
-  // nothing.
+  // Makes Android mix at the playing song's own rate. Two signs give the song's rate. Apple Music
+  // logs a song's decoded format when it prepares the song, from about a second ahead to just
+  // after the song change, which is early but says nothing about which song it belongs to. Apple
+  // Music also opens an audio track at the song's own rate when it prepares the song, and
+  // AudioFlinger's dump lists that track. The track is the song's rate, so it decides, and the
+  // logged format only lets the mixer switch before the track starts. Without the rate helper,
+  // Rates.set changes nothing, and the state reports the song's rate beside the mixer's.
   static final java.util.ArrayDeque<long[]> decoded = new java.util.ArrayDeque<>();
+  // The playing entry and the rate of its newest audio track, for the state. 0 while unknown.
+  static volatile long rateItem = Long.MIN_VALUE;
+  static volatile int songRate;
 
   static void follow() {
     Thread reader = new Thread(() -> {
@@ -339,31 +350,51 @@ public final class Control {
     reader.setDaemon(true);
     reader.start();
     Thread switcher = new Thread(() -> {
-      // The playing entry, when it started, the rate found for it (0 while looking, -1 for none
-      // found), and when a switch last failed.
-      long item = Long.MIN_VALUE, changed = 0, failed = 0;
-      int rate = 0;
+      // The playing entry and when it started, when a switch last failed, and when AudioFlinger's
+      // tracks are read next. The rate the entry should mix at: 0 while looking, -1 when no logged
+      // format came within a second and no track was found yet. How often the tracks were read.
+      long item = Long.MIN_VALUE, changed = 0, failed = 0, next = 0;
+      int rate = 0, checks = 0;
+      // The track the song plays on, once found, and the one the song before played on. That one
+      // still plays for a moment after the change, while Apple Music opens the new song's track
+      // after a skip, or it plays on when the next song has the same format.
+      int own = -1, old = -1;
       while (true) {
         try {
           Thread.sleep(40);
           Object c = session(false);
           Object state = c == null ? null : call(c, "getPlaybackState");
           if (state == null) continue;
-          long now = (Long) call(state, "getActiveQueueItemId");
+          long now = System.currentTimeMillis(), current = (Long) call(state, "getActiveQueueItemId");
           int code = (Integer) call(state, "getState");
-          // A new queue starts paused and logs its first song's format then, so the song change is
-          // noticed in any state, and the switch waits until it plays.
-          if (now != item) { item = now; changed = System.currentTimeMillis(); rate = 0; failed = 0; }
+          if (current != item) {
+            item = current; changed = now; rate = 0; failed = 0; next = now + 100; checks = 0; old = own; own = -1;
+            rateItem = item; songRate = 0;
+          }
           if (rate == 0) {
             // The song's start line comes a few tens of milliseconds before the change shows, or
-            // shortly after it. A song that logged none within a second keeps the mixer's rate.
+            // shortly after it.
             synchronized (decoded) {
               for (long[] entry : decoded) if (entry[0] >= changed - 300) { rate = (int) entry[1]; break; }
             }
-            if (rate == 0 && System.currentTimeMillis() - changed > 1000) rate = -1;
+            if (rate == 0 && now - changed > 1000) rate = -1;
           }
-          // Tried again every two seconds until the mixer runs at the rate, while the song plays.
-          if ((code == 3 || code == 6 || code == 8) && rate > 0 && System.currentTimeMillis() - failed > 2000 && Rates.mixer() != rate) {
+          // Apple Music's newest track, read 0.1, 0.25, 0.5, 1, 2 and 4 seconds after the song
+          // change, then every 10 seconds while it plays. Its rate replaces the logged one. From
+          // 1.5 seconds on, the track of the song before counts too.
+          boolean playing = code == 3 || code == 6 || code == 8;
+          if (now >= next && (playing || checks < 6)) {
+            int[] track = Rates.inspect().apple(Rates.applePids(), old, now - changed >= 1500);
+            if (track != null) {
+              if (own >= 0 && track[0] != own) System.out.println("song " + item + " moved to track " + track[0] + " at " + track[4] + " Hz");
+              own = track[0]; rate = track[4]; songRate = track[4];
+            }
+            checks++;
+            next = now + (checks < 6 ? new int[] { 150, 250, 500, 1000, 2000 }[checks - 1] : 10000);
+          }
+          // A new song switches at once, also while paused, so the track it starts with already
+          // runs at its rate. A failed switch is tried again every two seconds.
+          if ((playing || code == 2) && rate > 0 && now - failed > 2000 && Rates.mixer() != rate) {
             if (Rates.set(rate) != rate) failed = System.currentTimeMillis();
           }
         } catch (InterruptedException stop) { return; }
@@ -375,22 +406,111 @@ public final class Control {
   }
 
   // The rate Android mixes at, and switching it through RateServe, which runs as audioserver.
+  //
+  // Android 13's AudioFlinger frees its mixer's buffers and allocates new ones when the rate
+  // changes (readOutputParameters_l). An open track still mixes into the buffer of its effect
+  // chain, or, without one, into the old buffer that was just freed, so it plays silence from then
+  // on. It moves to the new buffer only when its session's effect chain comes or goes. A switch
+  // therefore attaches a disabled effect to every session on the mixer first, which AudioFlinger
+  // carries over to the new buffers, and releases it afterwards, which leaves each track on the
+  // new buffer. A disabled effect copies its input unchanged.
   static final class Rates {
     static final int SAMPLE_RATE = 1 + 2;
     static int output = -1;
+    // The rate last read or set, for the state, which must not wait for a switch.
+    static volatile int known;
 
-    // The I/O handle of the first mixer output, read from AudioFlinger's dump.
-    static int output() throws Exception {
-      if (output >= 0) return output;
+    // Android's first mixer output as AudioFlinger's dump shows it: its I/O handle and its tracks,
+    // each as { id, active (1 or 0), static (1 or 0), session, rate, ending (1 or 0), client }. A
+    // track ends once it is stopped, stopping or terminated, as the track of the song before is.
+    // The client is the process ID of the app that opened the track.
+    static final class Mixer {
+      int io = -1;
+      final java.util.List<int[]> tracks = new java.util.ArrayList<>();
+
+      // Apple Music's newest track that has not ended: the newest active one, or the newest one
+      // at all while none plays, as after a song was prepared and before it starts. Only tracks
+      // of Apple's processes (clients) count, since a newer track of another app, such as a
+      // system sound at 48 kHz, would otherwise set the song's rate. The track old, which played
+      // the song before, counts only with stale. Static tracks are short sounds, not songs. Null
+      // without a track.
+      int[] apple(java.util.Set<Integer> clients, int old, boolean stale) {
+        int[] best = null;
+        for (int[] t : tracks) {
+          if (!clients.contains(t[6]) || t[2] == 1 || t[5] == 1 || !stale && t[0] == old) continue;
+          if (best == null || t[1] > best[1] || t[1] == best[1] && t[0] > best[0]) best = t;
+        }
+        return best;
+      }
+
+      java.util.Set<Integer> sessions() {
+        java.util.Set<Integer> all = new java.util.TreeSet<>();
+        for (int[] t : tracks) all.add(t[3]);
+        return all;
+      }
+    }
+
+    // A track row of the dump: an optional fast-track index and type, then ID, active, client,
+    // session, port, state, flags, format, channel mask and rate.
+    static final java.util.regex.Pattern ROW = java.util.regex.Pattern.compile(
+      "^\\s*(?:F\\d+\\s+)?([SP?]\\s+)?(\\d+)\\s+(yes|no)\\s+(\\d+)\\s+(\\d+)\\s+\\d+\\s+(\\S{1,2})\\s+0x[0-9a-fA-F]+\\s+[0-9a-fA-F]+\\s+[0-9a-fA-F]+\\s+(\\d+)\\s");
+
+    static Mixer inspect() throws Exception {
       Process dump = Runtime.getRuntime().exec(new String[] { "dumpsys", "media.audio_flinger" });
       try (java.io.BufferedReader in = new java.io.BufferedReader(new java.io.InputStreamReader(dump.getInputStream(), StandardCharsets.UTF_8))) {
-        boolean mixer = false;
-        for (String line; (line = in.readLine()) != null; ) {
-          if (line.startsWith("Output thread")) mixer = line.contains("(MIXER)");
-          else if (mixer && line.trim().startsWith("I/O handle:")) return output = Integer.parseInt(line.trim().substring(11).trim());
-        }
+        return parse(in);
       } finally { dump.destroy(); }
-      throw new IllegalStateException("Android has no mixer output");
+    }
+
+    // Reads the first mixer output from AudioFlinger's dump. hires/tests/offline/control.sh tests it.
+    static Mixer parse(java.io.BufferedReader in) throws Exception {
+      Mixer mixer = new Mixer();
+      // 0 before the first mixer, 1 in it, 2 in its track list, 3 after it.
+      int part = 0;
+      for (String line; (line = in.readLine()) != null && part < 3; ) {
+        String text = line.trim();
+        if (part == 0) { if (line.startsWith("Output thread") && line.contains("(MIXER)")) part = 1; }
+        else if (line.startsWith("Output thread") || line.startsWith("Input thread") || text.startsWith("Local log:")) part = 3;
+        else if (part == 1 && text.startsWith("I/O handle:")) mixer.io = Integer.parseInt(text.substring(11).trim());
+        else if (part == 1 && text.contains("Tracks of which")) part = 2;
+        else if (part == 2) {
+          java.util.regex.Matcher m = ROW.matcher(line);
+          String type = m.find() ? m.group(1) == null ? "" : m.group(1).trim() : null;
+          // Patch tracks carry audio between outputs, not an app's sound.
+          if (type == null || type.equals("P")) continue;
+          mixer.tracks.add(new int[] { Integer.parseInt(m.group(2)), m.group(3).equals("yes") ? 1 : 0, type.equals("S") ? 1 : 0,
+            Integer.parseInt(m.group(5)), Integer.parseInt(m.group(7)), m.group(6).matches("T|S|s1|s2") ? 1 : 0, Integer.parseInt(m.group(4)) });
+        }
+      }
+      if (mixer.io < 0) throw new IllegalStateException("Android has no mixer output");
+      return mixer;
+    }
+
+    // The process IDs of Apple Music, its main process and any others it starts, read from /proc
+    // each time, since a restarted Apple Music gets new ones. The shell user may read every
+    // process's command line. Empty while Apple Music does not run.
+    static java.util.Set<Integer> applePids() {
+      java.util.Set<Integer> pids = new java.util.HashSet<>();
+      java.io.File[] all = new java.io.File("/proc").listFiles();
+      if (all == null) return pids;
+      for (java.io.File dir : all) {
+        String name = dir.getName();
+        if (name.isEmpty() || !Character.isDigit(name.charAt(0))) continue;
+        try {
+          byte[] line = java.nio.file.Files.readAllBytes(new java.io.File(dir, "cmdline").toPath());
+          int end = 0;
+          while (end < line.length && line[end] != 0) end++;
+          String process = new String(line, 0, end, StandardCharsets.UTF_8);
+          if (process.equals(APPLE) || process.startsWith(APPLE + ":")) pids.add(Integer.parseInt(name));
+        } catch (Exception gone) {}
+      }
+      return pids;
+    }
+
+    // The I/O handle of the first mixer output.
+    static int output() throws Exception {
+      if (output >= 0) return output;
+      return output = inspect().io;
     }
 
     static int read(int io) throws Exception {
@@ -409,13 +529,39 @@ public final class Control {
     // AudioFlinger answers 0 for an output that no longer exists, for example after audioserver
     // restarted, so the handle is looked up again then.
     static synchronized int mixer() throws Exception {
-      try { int rate = read(output()); if (rate > 0) return rate; } catch (Exception stale) {}
+      try { int rate = read(output()); if (rate > 0) return known = rate; } catch (Exception stale) {}
       output = -1;
-      return read(output());
+      return known = read(output());
+    }
+
+    // A disabled effect on each session, or none where Android refuses one. Released by release.
+    static java.util.List<Object> attach(java.util.Collection<Integer> sessions) {
+      java.util.List<Object> effects = new java.util.ArrayList<>();
+      for (int session : sessions) {
+        try { effects.add(Class.forName("android.media.audiofx.LoudnessEnhancer").getConstructor(int.class).newInstance(session)); }
+        catch (Throwable refused) { System.out.println("no effect for session " + session + ": " + (refused.getCause() != null ? refused.getCause() : refused)); }
+      }
+      return effects;
+    }
+
+    static void release(java.util.List<Object> effects) {
+      for (Object effect : effects) try { call(effect, "release"); } catch (Exception ignored) {}
+    }
+
+    // Moves every track on the mixer to the mixer's current buffer, as a switch does. Answers how
+    // many sessions it reached.
+    static synchronized int rebind() throws Exception {
+      java.util.List<Object> effects = attach(inspect().sessions());
+      release(effects);
+      return effects.size();
     }
 
     static synchronized int set(int rate) throws Exception {
       if (mixer() == rate) return rate;
+      Mixer before;
+      try { before = inspect(); output = before.io; } catch (Exception unreadable) { before = new Mixer(); }
+      java.util.List<Object> effects = attach(before.sessions());
+      int result;
       Object socket = Class.forName("android.net.LocalSocket").getConstructor().newInstance();
       try {
         Object address = Class.forName("android.net.LocalSocketAddress").getConstructor(String.class).newInstance("peel-rate");
@@ -427,10 +573,24 @@ public final class Control {
         java.io.InputStream in = (java.io.InputStream) call(socket, "getInputStream");
         StringBuilder answer = new StringBuilder();
         for (int b; (b = in.read()) >= 0 && b != '\n' && answer.length() < 16; ) answer.append((char) b);
-        return Integer.parseInt(answer.toString().trim());
+        result = known = Integer.parseInt(answer.toString().trim());
       } catch (Exception missing) {
-        return mixer();
-      } finally { call(socket, "close"); }
+        result = mixer();
+      } finally {
+        call(socket, "close");
+        release(effects);
+      }
+      System.out.println("mixer at " + result + " Hz, asked for " + rate + " Hz, " + effects.size() + " of " + before.sessions().size() + " sessions held");
+      // A session that opened its first track between the dump and the switch still mixes into
+      // the freed buffer, so it gets an effect now, which moves its tracks to the new one.
+      if (result == rate) {
+        try {
+          java.util.Set<Integer> late = inspect().sessions();
+          late.removeAll(before.sessions());
+          if (!late.isEmpty()) release(attach(late));
+        } catch (Exception unreadable) {}
+      }
+      return result;
     }
   }
 }
