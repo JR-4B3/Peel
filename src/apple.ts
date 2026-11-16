@@ -283,9 +283,12 @@ export class AppleMusic implements Library {
   //
   // A favourite from a saved copy without an ISRC may come from a failed ISRC read, and then it
   // could be a separate master of the song asked about. It matches by ID only until the fresh read,
-  // which reads every ISRC, replaces the copy.
-  private versionsOf(songs: (Media & { isrc?: string })[]) {
-    const checked = (song: Media & { isrc?: string }) => song.isrc !== undefined || this.isrcRead(song);
+  // which reads every ISRC, replaces the copy. An ISRC read since then is copied into the
+  // favourite now. One read later does not count for this snapshot, since the favourite would
+  // still lack it and so match by title.
+  private versionsOf(listed: (Media & { isrc?: string })[]) {
+    const songs = listed.map(song => song.isrc === undefined && song.catalogId && this.isrcs.has(song.catalogId) ? { ...song, isrc: this.isrcs.get(song.catalogId) } : song);
+    const checked = (song: Media & { isrc?: string }) => song.isrc !== undefined || !song.catalogId || !/^\d+$/.test(song.catalogId);
     const forgotten = new Versions(this.forgotten.filter(entry => Date.now() - entry.at < forgottenAge).flatMap(entry => entry.songs));
     return new Versions(songs.filter(song => !(checked(song) ? forgotten.has(song) : forgotten.hasId(song))), checked);
   }

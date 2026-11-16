@@ -451,3 +451,33 @@ test("a lookup that started before a favourite changed here does not undo the ch
     expect(model.favourite).toBe(false);
   } finally { setSystemTime(); }
 });
+
+test("an ISRC read while removing a separate master's favourite does not let a saved favourite without one match by title", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "peel-favourites-"));
+  let release!: () => void;
+  const gate = new Promise<void>(resolve => release = resolve);
+  const deletes: string[] = [];
+  const original = { id: "i.original", type: "library-songs", name: "Song", artist: "Artist", album: "", duration: 180, catalogId: "111" };
+  let library!: AppleMusic;
+  const server = Bun.serve({ port: 0, async fetch(request) {
+    const url = new URL(request.url), path = url.pathname;
+    if (request.method === "DELETE") { deletes.push(path); return new Response(null, { status: 204 }); }
+    if (path.endsWith("/playlists")) return Response.json({ data: [{ id: "p.fav", type: "library-playlists", attributes: { tags: ["favorited"] } }] });
+    if (path.endsWith("/tracks")) {
+      await gate;
+      return Response.json({ data: Number(url.searchParams.get("offset")) ? [] : [{ id: original.id, type: original.type, attributes: { name: original.name, artistName: original.artist, durationInMillis: 180000, playParams: { catalogId: "111" } } }] });
+    }
+    if (path === "/v1/catalog/de/songs") {
+      const id = url.searchParams.get("ids")!;
+      // The fresh read of Favourite Songs learns the original's ISRC while the remaster's is read.
+      if (id === "888") { release(); while (!(library as any).isrcs.has("111")) await Bun.sleep(1); }
+      return Response.json({ data: [{ id, attributes: { isrc: id === "111" ? "ORIGINAL" : "REMASTER" } }] });
+    }
+    return Response.json({ data: [] });
+  } });
+  cleanup.push(() => { release(); server.stop(true); rmSync(dir, { recursive: true, force: true }); });
+  library = new AppleMusic("fixture", { base: server.url.origin, storefront: "de", cacheDir: dir, developerToken: async () => "fixture" });
+  writeFileSync(join(dir, "favourite-songs.json"), JSON.stringify({ base: server.url.origin, songs: [original] }));
+  await library.forgetFavourite({ ...original, id: "888", catalogId: "888", type: "songs" });
+  expect(deletes).toEqual(["/v1/me/ratings/songs/888"]);
+});
