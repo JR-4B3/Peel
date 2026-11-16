@@ -32,11 +32,13 @@ export class Versions {
   private titles = new Map<string, Version[]>();
 
   // songs are the favourites, each with the ISRC of the catalog song it links to when Apple serves it.
-  constructor(readonly songs: Version[]) {
+  // byTitle says whether a favourite may match by title, artist and length. A favourite whose ISRC
+  // was never read could be a separate master of the song, so it matches by ID only.
+  constructor(readonly songs: Version[], private byTitle: (song: Version) => boolean = () => true) {
     for (const song of songs) {
       for (const id of [song.id, song.catalogId, song.reportingId]) if (id) this.ids.add(id);
       if (song.isrc) this.isrcs.add(song.isrc);
-      if (song.duration > 0 && song.name) this.titles.set(title(song.name), [...this.titles.get(title(song.name)) ?? [], song]);
+      if (song.duration > 0 && song.name && byTitle(song)) this.titles.set(title(song.name), [...this.titles.get(title(song.name)) ?? [], song]);
     }
   }
 
@@ -54,7 +56,7 @@ export class Versions {
 
   // The favourites that are versions of song, for removing every mark it has.
   of(song: Media, isrc = (song as Version).isrc): Version[] {
-    return this.songs.filter(favourite => sameRecording(favourite, song, isrc));
+    return this.songs.filter(favourite => sameRecording(favourite, song, isrc, this.byTitle(favourite)));
   }
 }
 
@@ -65,9 +67,10 @@ function sameTitle(a: Media, b: Media) {
   return [...artists(b.artist)].some(name => credited.has(name));
 }
 
-export function sameRecording(a: Version, b: Media, isrc = (b as Version).isrc): boolean {
+// byTitle false lets only the IDs and ISRCs decide.
+export function sameRecording(a: Version, b: Media, isrc = (b as Version).isrc, byTitle = true): boolean {
   const ids = new Set([b.id, b.catalogId, b.reportingId].filter(Boolean));
   if ([a.id, a.catalogId, a.reportingId].some(id => id && ids.has(id))) return true;
   if (a.isrc && isrc) return a.isrc === isrc;
-  return sameTitle(a, b);
+  return byTitle && sameTitle(a, b);
 }

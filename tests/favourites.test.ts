@@ -29,7 +29,7 @@ test("a library song's favourite uses its library rating even when it has a cata
 
 // One recording under several IDs (#108).
 
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { Versions } from "../src/versions";
@@ -263,6 +263,63 @@ test("Favourite Songs read while an ISRC read fails is not used, and is read aga
   fail = false;
   expect(await library.ratings([remaster])).toEqual(new Set());
   expect(await library.ratings([track("999", { isrc: "QM0000000001" })])).toEqual(new Set(["999"]));
+});
+
+// A new start of Peel against the fake Apple, whose Favourite Songs read waits until released, so
+// answers come from the copy saved in dir. songs replaces the songs in that copy first.
+function restart(first: ReturnType<typeof apple>, songs?: unknown[]) {
+  let release!: () => void;
+  const slow = new Promise<void>(resolve => { release = resolve; });
+  const server = Bun.serve({ port: 0, async fetch(request) {
+    if (new URL(request.url).pathname.endsWith("/p.fav/tracks")) await slow;
+    return first.server.fetch(request);
+  } });
+  cleanup.unshift(() => { release(); server.stop(true); });
+  const file = join(first.dir, "favourite-songs.json");
+  const saved = JSON.parse(readFileSync(file, "utf8"));
+  writeFileSync(file, JSON.stringify({ base: server.url.origin, songs: songs ?? saved.songs }));
+  const library = new AppleMusic("fixture-user", { base: server.url.origin, developerToken: async () => "fixture-developer", storefront: "de", cacheDir: first.dir });
+  return { library, release };
+}
+
+// Older versions of Peel saved a favourite without its ISRC when the ISRC read failed.
+const withoutIsrcs = [
+  { id: "i.money", type: "library-songs", name: "$ (Money)", artist: "JPEGMAFIA", album: "", duration: 135, catalogId: "111" },
+  { id: "i.dark", type: "library-songs", name: "Dark Loop", artist: "OG Keemo & GERDA", album: "", duration: 144, catalogId: "222" },
+];
+
+test("a saved favourite without an ISRC matches by ID only, so a separate master is not a favourite after a start", async () => {
+  const first = apple();
+  await first.library.ratings([]);
+  const { library, release } = restart(first, withoutIsrcs);
+  const remaster = track("888", { catalogId: "888", name: "$ (Money)", artist: "JPEGMAFIA", duration: 135 });
+  expect(await library.ratings([remaster, track("111", { catalogId: "111" })])).toEqual(new Set(["111"]));
+  // The fresh read knows every ISRC and replaces the copy.
+  release();
+  for (let count = 0; count < 50 && !(await library.ratings([track("999", { catalogId: "999" })])).size; count++) await Bun.sleep(10);
+  expect(await library.ratings([remaster])).toEqual(new Set());
+  expect(await library.ratings([track("777", { catalogId: "777", name: "Dark Loop", artist: "GERDA", duration: 144 })])).toEqual(new Set(["777"]));
+});
+
+test("removing a separate master's favourite first thing after a start keeps the marks of a saved favourite without an ISRC", async () => {
+  const first = apple();
+  await first.library.ratings([]);
+  const { library } = restart(first, withoutIsrcs);
+  await library.forgetFavourite(track("888", { catalogId: "888", name: "$ (Money)", artist: "JPEGMAFIA", duration: 135 }));
+  expect(first.calls.filter(call => call.startsWith("DELETE"))).toEqual(["DELETE /v1/me/ratings/songs/888"]);
+  expect([...first.marks].sort()).toEqual(["i.dark", "i.money"]);
+});
+
+test("the saved copy keeps a favourite whose catalog song is gone matching by title after a start", async () => {
+  const first = apple();
+  await first.library.ratings([track("500", { catalogId: "500" })]);
+  const saved = JSON.parse(readFileSync(join(first.dir, "favourite-songs.json"), "utf8"));
+  expect(saved.songs.map((song: { isrc?: string }) => song.isrc)).toEqual(["QM0000000001", ""]);
+  const { library } = restart(first);
+  const reads = first.calls.filter(call => call.startsWith("GET /v1/catalog/de/songs")).length;
+  expect(await library.ratings([track("777", { catalogId: "777", isrc: "QM0000000777", name: "Dark Loop", artist: "GERDA", duration: 144 })])).toEqual(new Set(["777"]));
+  // Its ISRC is not read again.
+  expect(first.calls.filter(call => call.startsWith("GET /v1/catalog/de/songs")).length).toBe(reads);
 });
 
 // The playing song's heart after a change in another app or Peel window (#121).

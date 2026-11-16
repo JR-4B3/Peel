@@ -65,7 +65,9 @@ export interface AppleOptions {
 
 // How long Peel trusts its copy of Favourite Songs before reading it again.
 const favouriteVersionsAge = 10 * 60 * 1000;
-// Peel's copy of Favourite Songs in its cache folder, for the first answer after a start.
+// Peel's copy of Favourite Songs in its cache folder, for the first answer after a start. A song
+// whose catalog song Apple no longer serves is saved with an empty ISRC. Older versions of Peel
+// left the ISRC out both for those and for songs whose ISRC read failed.
 const favouriteVersionsFile = "favourite-songs.json";
 interface SavedVersions { base: string; songs: (Media & { isrc?: string })[] }
 // How long a removed favourite stays out of Peel's copy of Favourite Songs while Apple catches up.
@@ -271,16 +273,21 @@ export class AppleMusic implements Library {
     await this.readIsrcs(songs.flatMap(song => song.catalogId ? [song.catalogId] : []));
     const saved = songs.map(song => ({ id: song.id, type: song.type, name: song.name, artist: song.artist, album: "", duration: song.duration,
       ...song.catalogId ? { catalogId: song.catalogId } : {}, ...song.reportingId ? { reportingId: song.reportingId } : {},
-      ...this.isrcOf(song.catalogId) ? { isrc: this.isrcOf(song.catalogId) } : {} }));
+      ...song.catalogId && this.isrcs.has(song.catalogId) ? { isrc: this.isrcs.get(song.catalogId) } : {} }));
     await saveJson(favouriteVersionsFile, { base: this.base, songs: saved } satisfies SavedVersions, this.options.cacheDir ?? cacheDir).catch(() => {});
     return this.versionsOf(saved);
   }
 
   // Apple updates Favourite Songs a little after a favourite is removed, so a song removed in the
   // last few minutes stays out although the list still holds it.
+  //
+  // A favourite from a saved copy without an ISRC may come from a failed ISRC read, and then it
+  // could be a separate master of the song asked about. It matches by ID only until the fresh read,
+  // which reads every ISRC, replaces the copy.
   private versionsOf(songs: (Media & { isrc?: string })[]) {
+    const checked = (song: Media & { isrc?: string }) => song.isrc !== undefined || this.isrcRead(song);
     const forgotten = new Versions(this.forgotten.filter(entry => Date.now() - entry.at < forgottenAge).flatMap(entry => entry.songs));
-    return new Versions(songs.filter(song => !forgotten.has(song)));
+    return new Versions(songs.filter(song => !(checked(song) ? forgotten.has(song) : forgotten.hasId(song))), checked);
   }
 
   favouritesChanged() { this.versions = undefined; }
