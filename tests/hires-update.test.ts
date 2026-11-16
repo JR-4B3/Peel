@@ -33,7 +33,8 @@ function computer(build: HostBuild | undefined, options: { others?: number; play
     next.times--;
     await next.run();
   };
-  function peel(mine: HostBuild, remote = false) {
+  // testRunning says which test builds (peel --try) run, as their records in the hi-res folder do.
+  function peel(mine: HostBuild, remote = false, testRunning: (version: string) => boolean = () => false) {
     const messages: string[] = [];
     const engine = {
       async state() {
@@ -43,7 +44,7 @@ function computer(build: HostBuild | undefined, options: { others?: number; play
       async quit() { counts.quits++; stopping = 3; },
     };
     const start: HiresStart = {
-      remote, build: mine,
+      remote, build: mine, testRunning,
       launch: async () => {
         await race("launch");
         if (host) return;
@@ -217,6 +218,52 @@ test("builds order by release number, then commit time or build date", async () 
   // A build date ties with any time on the same day, and with a missing one.
   expect(compareBuilds({ version: "0.2.0", time: "2026-11-11" }, newer)).toBe(0);
   expect(compareBuilds({ version: "0.2.0" }, newer)).toBe(0);
+});
+
+// #124: peel --try starts a pull request's code, whose branch may be older than the installed
+// release. Its host runs its own code while it runs, and the installed code again afterwards.
+const installed: HostBuild = { hash: "c".repeat(64), version: "0.1.1-nightly.20261115.ccccccc", time: "2026-11-15T21:00:00.000Z" };
+const tested: HostBuild = { hash: "d".repeat(64), version: "0.1.0-try.pr1.abcdef0", time: "2026-11-16T12:00:00.000Z" };
+
+test("a test build of an older release takes over the installed Peel's newer host, without restarts back and forth", async () => {
+  const runs = new Set([tested.version]), running = (version: string) => runs.has(version);
+  const machine = computer(installed), test = machine.peel(tested, false, running), window = machine.peel(installed, false, running);
+  const helper = machine.peel(installed, true, running);
+  // Each command of the test build and of the installed Peel's window ensures the host first.
+  for (let round = 0; round < 4; round++) { await test.ensure(); await window.ensure(); await helper.ensure(); }
+  expect(machine.counts).toMatchObject({ quits: 1, starts: 1 });
+  expect(machine.build()).toEqual(tested);
+
+  // The test build closed. The installed Peel's next command restarts the host into its code.
+  runs.clear();
+  await window.ensure();
+  expect(machine.counts).toMatchObject({ quits: 2, starts: 2 });
+  expect(machine.build()).toEqual(installed);
+  await window.ensure();
+  expect(machine.counts).toMatchObject({ quits: 2, starts: 2 });
+});
+
+test("a test build that ended counts as older than any build, also one of an older release", async () => {
+  const machine = computer({ ...tested, version: "0.9.0-try.pr2.abcdef0", time: "2027-01-01T00:00:00.000Z" });
+  await machine.peel(older).ensure();
+  expect(machine.build()).toEqual(older);
+  // The SSH helper still leaves a host alone that another Peel uses.
+  const used = computer(tested, { others: 1 });
+  await used.peel(installed, true).ensure();
+  expect(used.counts.quits).toBe(0);
+});
+
+test("of two running test builds the one started last runs the host, and one version shares it", async () => {
+  const later: HostBuild = { hash: "e".repeat(64), version: "0.0.9-try.pr2.1234567", time: "2026-11-16T13:00:00.000Z" };
+  const running = () => true;
+  const machine = computer(tested), first = machine.peel(tested, false, running), second = machine.peel(later, false, running);
+  for (let round = 0; round < 3; round++) { await second.ensure(); await first.ensure(); }
+  expect(machine.counts).toMatchObject({ quits: 1, starts: 1 });
+  expect(machine.build()).toEqual(later);
+  // A branch's own build.ts may hash the host's files differently from the installed one's.
+  const same = computer(tested);
+  await same.peel({ ...tested, hash: "f".repeat(64), time: "2026-11-16T14:00:00.000Z" }, false, running).ensure();
+  expect(same.counts.quits).toBe(0);
 });
 
 // A host that exited leaves its systemd unit behind for a moment. A unit that stays while no host
