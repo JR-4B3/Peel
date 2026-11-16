@@ -120,6 +120,19 @@ function apply(name: string, args: string[]): unknown {
       android.queue.splice(args[0] === "end" ? android.queue.length : android.selected + 1, 0, ...batchOf(ids));
       break;
     }
+    case "remove": {
+      const at = android.queue.findIndex(item => item.queueId === Number(args[0]));
+      if (at >= 0) { android.queue.splice(at, 1); if (at < android.selected) android.selected--; }
+      break;
+    }
+    // Moves an entry right after (1) or right before (2) another one.
+    case "move": {
+      const at = android.queue.findIndex(item => item.queueId === Number(args[0]));
+      if (at < 0) break;
+      const [item] = android.queue.splice(at, 1), beside = android.queue.findIndex(other => other.queueId === Number(args[1]));
+      android.queue.splice(beside + (args[2] === "1" ? 1 : 0), 0, item!);
+      break;
+    }
     case "skip": { const at = android.queue.findIndex(item => item.queueId === Number(args[0])); if (at >= 0) { android.selected = at; android.position = 0; android.state = 3; } break; }
     case "seek": {
       const target = Number(args[0]);
@@ -130,7 +143,8 @@ function apply(name: string, args: string[]): unknown {
     case "pause": android.state = 2; break;
     case "stop": android.state = 1; break;
     case "play": android.state = android.stall ? 6 : 3; break;
-    case "next": if (android.selected + 1 < android.queue.length) { android.selected++; android.position = 0; } break;
+    // A song that plays or buffers goes on with the next one, which buffers while a stall lasts.
+    case "next": if (android.selected + 1 < android.queue.length) { android.selected++; android.position = 0; if (android.state === 3 || android.state === 6) android.state = android.stall ? 6 : 3; } break;
     case "previous": android.position = 0; break;
   }
   return undefined;
@@ -363,6 +377,161 @@ test.skipIf(!supported)("a song added to a long list pushes none of its songs ou
 
 const ids = (items: any[]) => items.map(item => item.id);
 
+// Shuffle mixes the songs Apple does not list too, so the host cannot know their order. A jump to
+// one of them must not take the songs it sent before that one as played (#126). The simulated
+// shuffle reverses the songs after the playing one, and Apple's answer lists 8 entries.
+const shuffled = Array.from({ length: 20 }, (_, at) => String(9000 + at));
+async function jumpShuffled(target: string) {
+  expect((await call("importPlayback", { items: shuffled.map(id => song(id)), playing: true })).status).toBe(200);
+  expect((await call("shuffle", true)).status).toBe(200);
+  const before = (await call("queue")).body;
+  expect(ids(before.items).slice(0, 8)).toEqual(["9000", "9019", "9018", "9017", "9016", "9015", "9014", "9013"]);
+  expect((await call("jump", ids(before.items).indexOf(target), target)).status).toBe(200);
+  expect(android.queue[android.selected]?.id).toBe(target);
+  const actual = ids(android.queue);
+  return { played: actual.slice(0, android.selected), left: actual.slice(android.selected + 1) };
+}
+const playingOnce = () => {
+  const queue = ids(android.queue);
+  expect(new Set(queue).size).toBe(queue.length);
+  return { playing: queue[android.selected], left: queue.slice(android.selected + 1) };
+};
+
+test.skipIf(!supported)("a jump in a shuffled queue to a song Apple did not list counts the songs it played, each once", async () => {
+  // Apple's answer after the jump ends its queue, so every song it leaves out has played.
+  const { played, left } = await jumpShuffled("9004");
+  const queue = (await call("queue")).body;
+  expect(new Set(ids(queue.items)).size).toBe(20);
+  expect(queue.position).toBe(played.length);
+  expect(ids(queue.items).slice(queue.position + 1)).toEqual(left);
+  expect(new Set(ids(queue.items).slice(0, queue.position))).toEqual(new Set(played));
+  const exported = (await call("exportPlayback")).body;
+  expect(exported.position).toBe(16);
+  expect(ids(exported.items).slice(exported.position)).toEqual(["9004", "9003", "9002", "9001"]);
+
+  // Moved to another device, the queue continues with the songs left, and plays none twice.
+  expect((await call("importPlayback", exported)).status).toBe(200);
+  let now = playingOnce();
+  expect(now.playing).toBe("9004");
+  expect(new Set(now.left)).toEqual(new Set(left));
+
+  // A recovery after a stall continues the same way.
+  android.stall = 1; android.state = 6;
+  await poll(() => android.restarts === 1 && android.state === 3);
+  now = playingOnce();
+  expect(now.playing).toBe("9004");
+  expect(new Set(now.left)).toEqual(new Set(left));
+}, 20000);
+
+test.skipIf(!supported)("a jump in a shuffled queue whose end Apple does not list counts no song as played that may still come", async () => {
+  // Apple's answer after the jump lists 8 entries, so the queue may go on after them. The songs
+  // it does not list could come before the jump or after, so they stay upcoming.
+  const { played, left } = await jumpShuffled("9010");
+  expect(left).toHaveLength(9);
+  const queue = (await call("queue")).body, shown = ids(queue.items);
+  expect(new Set(shown).size).toBe(20);
+  expect(shown[queue.position]).toBe("9010");
+  expect(played).toEqual(expect.arrayContaining(shown.slice(0, queue.position)));
+  expect(shown.slice(queue.position + 1)).toEqual(expect.arrayContaining(left));
+
+  // Another device gets every song Apple still had, and none twice.
+  expect((await call("importPlayback", (await call("exportPlayback")).body)).status).toBe(200);
+  const now = playingOnce();
+  expect(now.playing).toBe("9010");
+  expect(now.left).toEqual(expect.arrayContaining(left));
+}, 20000);
+
+// Jumps to a song at the index and with the ID the host's queue gives it, as Peel does.
+async function jumpTo(id: string) {
+  const queue = (await call("queue")).body;
+  const result = await call("jump", ids(queue.items).indexOf(id), id);
+  expect(result.body?.error).toBeUndefined();
+  expect(result.status).toBe(200);
+  expect(android.queue[android.selected]?.id).toBe(id);
+}
+// The host's queue next to Apple Music's: each song once and no song missing, the same song
+// playing, and every song the host counts as played has played. So every song Apple Music still
+// has is upcoming in the host's queue too. Returns the host's position.
+async function sameAsApple() {
+  const queue = (await call("queue")).body, shown = ids(queue.items), actual = ids(android.queue);
+  expect(new Set(shown).size).toBe(shown.length);
+  expect(new Set(shown)).toEqual(new Set(actual));
+  expect(shown[queue.position]).toBe(actual[android.selected]);
+  expect(actual.slice(0, android.selected)).toEqual(expect.arrayContaining(shown.slice(0, queue.position)));
+  return queue.position as number;
+}
+
+test.skipIf(!supported)("a song a shuffled jump counted as played can be jumped to again", async () => {
+  // The jump to 9004 counts the songs Apple's answer leaves out as played, 9012 among them.
+  await jumpShuffled("9004");
+  await jumpTo("9012");
+  expect(await sameAsApple()).toBe(8);
+}, 20000);
+
+test.skipIf(!supported)("a second jump in a shuffled queue counts no song as played that Apple still has", async () => {
+  // After the jump to 9010, Apple lists 9010 to 9003. 9012 comes before 9010, so after the jump
+  // to it, 9005 to 9003 still come too.
+  await jumpShuffled("9010");
+  await jumpTo("9012");
+  expect(await sameAsApple()).toBe(8);
+  const exported = (await call("exportPlayback")).body, actual = ids(android.queue);
+  expect(exported.position).toBe(8);
+  expect(ids(exported.items).slice(exported.position)).toEqual(expect.arrayContaining(actual.slice(android.selected)));
+  // Apple listed 9005 to 9003 right after 9006, the last song its new answer lists, so they follow it.
+  expect(ids(exported.items).slice(15, 18)).toEqual(["9005", "9004", "9003"]);
+}, 20000);
+
+test.skipIf(!supported)("jumps back and forth in a shuffled queue keep the songs Apple still has upcoming", async () => {
+  // Apple's queue is 9000, then 9019 down to 9001. Each jump compares the host's queue with it.
+  await jumpShuffled("9010");
+  await sameAsApple();
+  // Back past songs Apple's answers never listed, then back into the songs that played.
+  await jumpTo("9012");
+  expect(await sameAsApple()).toBe(8);
+  await jumpTo("9017");
+  expect(await sameAsApple()).toBe(3);
+  // To the last song, whose answer ends Apple's queue, so every other song has played.
+  await jumpTo("9001");
+  expect(await sameAsApple()).toBe(19);
+  // Back into those songs, with an answer as long as Apple lists.
+  await jumpTo("9008");
+  expect(await sameAsApple()).toBe(12);
+  await jumpTo("9015");
+  expect(await sameAsApple()).toBe(5);
+
+  // Another device gets every song Apple still has, and none twice.
+  const left = ids(android.queue).slice(android.selected + 1);
+  expect((await call("importPlayback", (await call("exportPlayback")).body)).status).toBe(200);
+  const now = playingOnce();
+  expect(now.playing).toBe("9015");
+  expect(now.left).toEqual(expect.arrayContaining(left));
+}, 30000);
+
+test.skipIf(!supported)("a song removed near the end of a shuffled queue is gone at once, also from the songs played", async () => {
+  // After the jump to 9004, Apple's answer ends its queue, so the songs it leaves out count as
+  // played. The removed 9003 must not count among them.
+  await jumpShuffled("9004");
+  const queue = (await call("queue")).body;
+  const result = await call("remove", ids(queue.items).indexOf("9003"), "9003");
+  expect(result.body?.error).toBeUndefined();
+  expect(result.status).toBe(200);
+  expect(ids(android.queue)).not.toContain("9003");
+  expect(await sameAsApple()).toBe(16);
+  expect(ids((await call("exportPlayback")).body.items)).not.toContain("9003");
+}, 20000);
+
+test.skipIf(!supported)("a song Apple drops from a list sent with shuffle on leaves no empty entry", async () => {
+  // The shuffled import makes Apple's answers 8 entries long, so the new list's shorter answer
+  // ends its queue.
+  expect((await call("importPlayback", { items: shuffled.map(id => song(id)), playing: true })).status).toBe(200);
+  expect((await call("shuffle", true)).status).toBe(200);
+  android.drops.add("9103");
+  expect((await call("play", ["9100", "9101", "9102", "9103", "9104", "9105"].map(id => song(id)), 0)).status).toBe(200);
+  const exported = (await call("exportPlayback")).body;
+  expect(ids(exported.items)).toEqual(ids(android.queue));
+  expect(exported.position).toBe(0);
+}, 20000);
+
 test.skipIf(!supported)("a song the catalog no longer has stays out of Apple's list, so the chosen song plays", async () => {
   // Clears songs added in earlier tests, which play would keep.
   await call("importPlayback", { items: [song("999")], playing: true });
@@ -545,6 +714,85 @@ test.skipIf(!supported)("a start that stays buffering restarts Apple Music once 
   expect((await send("/state")).body.playback.error).toContain("stopped streaming");
   await Bun.sleep(500); await send("/state");
   expect(android.restarts).toBe(2);
+}, 20000);
+
+// A command sent during a stall runs before the recovery, since calls run one at a time. Its own
+// first read of the state can find the stall long enough and queue the recovery behind it (#128).
+// Peel reads the state only on request here, so the stall lasts exactly as the test lets it.
+const stallThenNext = async () => {
+  await send("/state");
+  await Bun.sleep(350);
+  const mark = hostLog().length;
+  expect((await call("next")).status).toBe(200);
+  await Bun.sleep(200); await send("/state");
+  return logSince(mark);
+};
+
+test.skipIf(!supported)("a Next that ends a stall cancels its recovery", async () => {
+  android.stall = 1;
+  await play("991", "992");
+  expect(android.state).toBe(6);
+  android.stall = 0;
+  const lines = await stallThenNext();
+  expect(lines).toEqual(["hires-recovery: no restart after a stall, since the music changed meanwhile: song 992 at 0.0 s, stream rate unknown"]);
+  expect(android.restarts).toBe(0);
+  expect(android.queue[android.selected]?.id).toBe("992");
+  expect(android.state).toBe(3);
+}, 20000);
+
+test.skipIf(!supported)("a Next to a song that stalls too cancels the recovery of the song before, so the new stall is a first one", async () => {
+  android.stall = 1;
+  await play("961", "962");
+  const lines = await stallThenNext();
+  expect(lines[0]).toBe("hires-recovery: no restart after a stall, since the music changed meanwhile: song 962 at 0.0 s, stream rate unknown");
+  expect(android.state).toBe(6);
+  // Apple Music restarts once and the song plays, instead of pausing as after a second stall.
+  await poll(() => android.restarts === 1 && android.state === 3);
+  expect(android.queue[android.selected]?.id).toBe("962");
+  expect((await send("/state")).body.playback.error).toBeUndefined();
+}, 20000);
+
+test.skipIf(!supported)("a Next after a restart is not paused by the recovery of a second stall it ended", async () => {
+  // The host log holds earlier tests' recoveries too.
+  let mark = hostLog().length;
+  const recovered = () => logSince(mark).some(line => line.includes("recovered after"));
+  android.stall = 2;
+  await play("981", "982");
+  await poll(() => android.restarts === 1 && android.state === 6);
+  await poll(recovered);
+  android.stall = 0;
+  await stallThenNext();
+  expect(android.queue[android.selected]?.id).toBe("982");
+  expect(android.state).toBe(3);
+  expect(android.restarts).toBe(1);
+  expect((await send("/state")).body.playback.error).toBeUndefined();
+
+  // The same, but the next song buffers right after it started, before Peel reads the state
+  // again. It played, so its stall is a first one: Apple Music restarts instead of pausing.
+  mark = hostLog().length;
+  android.stall = 2;
+  await play("984", "985");
+  await poll(() => android.restarts === 2 && android.state === 6);
+  await poll(recovered);
+  android.stall = 0;
+  await send("/state");
+  await Bun.sleep(350);
+  expect((await call("next")).status).toBe(200);
+  android.stall = 1; android.state = 6;
+  await poll(() => android.restarts === 3 && android.state === 3);
+  expect(android.queue[android.selected]?.id).toBe("985");
+  expect((await send("/state")).body.playback.error).toBeUndefined();
+}, 20000);
+
+test.skipIf(!supported)("a Next that Apple Music ignores during a stall leaves the recovery to run", async () => {
+  android.stall = 1;
+  await play("971", "972");
+  android.ignore.add("next");
+  await send("/state");
+  await Bun.sleep(350);
+  expect((await call("next")).status).toBe(500);
+  await poll(() => android.restarts === 1 && android.state === 3);
+  expect(android.queue[android.selected]?.id).toBe("971");
 }, 20000);
 
 test.skipIf(!supported)("a song that plays silent restarts Apple Music once and continues, and silence again soon after only says so", async () => {
