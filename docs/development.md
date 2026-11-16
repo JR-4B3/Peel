@@ -70,13 +70,13 @@ bun test
 
 The tests drive the real interface through OpenTUI's test renderer. They feed it the same mouse and keyboard sequences a terminal sends and read back the rendered cells. Playback runs against `tests/fixture.ts`, which keeps a queue the way `engine/engine.js` does and records each engine method Peel calls. Apple Music's API is a local server with fixed answers. Nothing reaches Apple, starts a real engine or plays sound.
 
-`tests/hires-host.test.ts` runs the real hi-res host against a simulated Android controller. `hires/tests/offline/run.sh` checks the hi-res updater, health checks and audio driver without Waydroid.
+`tests/hires-host.test.ts` runs the real hi-res host against a simulated Android controller. `hires/tests/offline/run.sh` checks the hi-res updater, health checks, audio driver and the controller's reading of Android's audio dump without Waydroid.
 
 Checks that need real machines:
 
 - `bun scripts/capture-ui.ts` saves the rendered interface at 48, 80 and 120 columns to `evidence/`, with fixture data.
 - `bun scripts/verify-devices.ts wait` on one computer and `bun scripts/verify-devices.ts pair` on another pair two real computers over the network and move a queue between stand-in engines. Neither computer's music changes.
-- `peel-hires test` on a hi-res machine boots the current release, plays a known signal through Android and checks that the samples reach PipeWire unchanged. With `APPLE_PLAY_TEST=on` it also plays a real Apple Music song.
+- `peel-hires test` on a hi-res machine boots the current release, plays a known signal through Android and checks that the samples reach PipeWire unchanged. With `APPLE_PLAY_TEST=on` it also plays real Apple Music songs: one at 192 kHz, and four at different rates to check that Android's mixer follows each song with sound.
 
 ## Releases
 

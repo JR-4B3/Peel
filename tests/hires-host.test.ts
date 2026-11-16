@@ -42,6 +42,13 @@ const android = {
   commands: [] as string[],
   // When Apple Music was last restarted.
   restartedAt: 0,
+  // The rates the controller reports: its mixer's, and the playing song's track's, which belongs to
+  // the playing entry unless rateItem names another. Unset, it reports neither, like a controller
+  // that has not read them yet.
+  mixerRate: undefined as number | undefined, songRate: undefined as number | undefined, rateItem: undefined as number | undefined,
+  // How many times the host asked the controller to move Android's tracks to the mixer's current
+  // buffer, and whether that ends a silence, as it does for a track left on the old buffer.
+  rebinds: 0, rebindHelps: false,
 };
 // The simulated pactl reports Android's stream at this rate.
 const streamRate = (hz: number) => writeFileSync(join(temporary, "rate"), String(hz));
@@ -57,10 +64,11 @@ const pacatRuns = () => readFileSync(join(temporary, "pacat-runs"), "utf8").leng
 // stream at that rate, before the playing one, as Android does for a moment after a rate change.
 const noStream = (on: boolean) => on ? writeFileSync(join(temporary, "no-stream"), "") : rmSync(join(temporary, "no-stream"), { force: true });
 const oldStream = (hz?: number) => hz ? writeFileSync(join(temporary, "old-stream"), String(hz)) : rmSync(join(temporary, "old-stream"), { force: true });
-// The rate the host reports for the quality tag, read while Peel polls, or undefined after a while.
+// The rate the host reports Android sends at, read from PipeWire while Peel polls, or undefined
+// after a while.
 const reportedRate = async (within = 4000) => {
   for (const end = Date.now() + within; Date.now() < end; await Bun.sleep(40)) {
-    const rate = (await send("/state")).body.playback?.sampleRate;
+    const rate = (await send("/state")).body.playback?.outputRate;
     if (rate) return rate as number;
   }
   return undefined;
@@ -76,13 +84,14 @@ const silence = (times: number) => {
 function reset() {
   // Queue IDs keep counting, as Apple's do: a new queue never reuses an old entry's ID.
   Object.assign(android, { selected: 0, position: 0, state: 2, volume: 1, queue: [], partialAdd: false, splitAt: undefined, commands: [], stall: 0, restarts: 0, seekDelay: 0,
-    repeat: 0, shuffle: false, unshuffled: undefined, error: undefined });
+    repeat: 0, shuffle: false, unshuffled: undefined, error: undefined, mixerRate: undefined, songRate: undefined, rateItem: undefined, rebinds: 0, rebindHelps: false });
   silence(0); streamRate(96000); muteStream(false); noStream(false); oldStream();
   android.ignore.clear(); android.fail.clear(); android.dropAfter.clear(); android.drops.clear(); android.gone.clear();
 }
 const snapshot = () => {
   const item = android.queue[android.selected];
-  return { state: android.state, position: android.position, item: item?.queueId ?? -1, id: item?.id, title: item?.title, duration: 300000, ...android.error ? { error: android.error } : {} };
+  return { state: android.state, position: android.position, item: item?.queueId ?? -1, id: item?.id, title: item?.title, duration: 300000, ...android.error ? { error: android.error } : {},
+    ...android.mixerRate ? { mixerRate: android.mixerRate } : {}, ...android.songRate ? { songRate: android.songRate, rateItem: android.rateItem ?? item?.queueId ?? -1 } : {} };
 };
 const batchOf = (ids: string[]) => { android.batch++; return ids.filter(id => !android.drops.has(id)).map((id, index) => ({ queueId: android.batch * 2 ** 32 + index, id, title: `Song ${id}` })); };
 
@@ -91,6 +100,7 @@ function apply(name: string, args: string[]): unknown {
   if (android.fail.has(name) || android.fail.has([name, ...args].join(" "))) return { error: `simulated ${name} failure` };
   switch (name) {
     case "ping": return { ok: true };
+    case "rebind": android.rebinds++; if (android.rebindHelps) silence(0); return { sessions: 3 };
     case "queue": return { queue: android.queue.slice(android.selected, android.selected + android.view) };
     case "list": if (args[1]!.split(",").length > android.limit) return undefined; android.queue = batchOf(args[1]!.split(",")); android.unshuffled = [...android.queue]; android.selected = Number(args[0]); android.position = 0; android.state = android.stall ? 6 : 3; break;
     case "restart": android.restarts++; android.restartedAt = Date.now(); android.stall = Math.max(0, android.stall - 1); silence(android.silent - 1); android.queue = []; android.selected = 0; android.state = 1; android.repeat = 0; android.shuffle = false; return { ok: true };
@@ -622,8 +632,8 @@ test.skipIf(!supported)("the faster checks after a rate change end after ten che
   streamRate(44100); muteStream(true); android.position = 2000;
   const runs = pactlRuns();
   await poll(() => pactlRuns() - runs >= 10, 400);
-  // The quality tag shows the rate those checks read, without a pactl run of its own.
-  expect((await send("/state")).body.playback.sampleRate).toBe(44100);
+  // The state reports the rate those checks read, without a pactl run of its own.
+  expect((await send("/state")).body.playback.outputRate).toBe(44100);
   // After ten checks the faster checks end. Before 3 seconds the song then gets no more checks.
   await listen();
   expect(pactlRuns() - runs).toBe(10);
@@ -847,16 +857,18 @@ test.skipIf(!supported)("a Peel that attaches while Android stops plays after An
   expect(await Promise.race([host.exited, Bun.sleep(1500).then(() => "running")])).toBe("running");
 }, 20000);
 
-test.skipIf(!supported)("the state reports the rate of Android's stream in PipeWire", async () => {
+test.skipIf(!supported)("without the controller's mixer rate, the state reports the rate of Android's stream in PipeWire as the rate it sends", async () => {
   expect((await call("play", ["501", "502"].map(id => song(id)), 0)).status).toBe(200);
   // The controller switches the rate about a second after a song starts, so the host reads it later.
   // The simulated pactl reports Android's stream at 96 kHz.
   let state: any;
   for (const end = Date.now() + 8000; Date.now() < end; await Bun.sleep(250)) {
     state = (await send("/state")).body;
-    if (state.playback?.sampleRate) break;
+    if (state.playback?.outputRate) break;
   }
-  expect(state.playback.sampleRate).toBe(96000);
+  expect(state.playback.outputRate).toBe(96000);
+  // The controller has not said which rate the song has, so the state names none.
+  expect(state.playback.sampleRate).toBeUndefined();
 }, 20000);
 
 test.skipIf(!supported)("a rate read that finds no stream waits five seconds, and the next song still gets its rate", async () => {
@@ -876,9 +888,9 @@ test.skipIf(!supported)("a rate read that finds no stream waits five seconds, an
     let state: any;
     for (const end = Date.now() + 4000; Date.now() < end; await Bun.sleep(100)) {
       state = (await send("/state")).body;
-      if (state.playback?.sampleRate) break;
+      if (state.playback?.outputRate) break;
     }
-    expect(state.playback.sampleRate).toBe(96000);
+    expect(state.playback.outputRate).toBe(96000);
   } finally {
     noStream(false);
     await call("volume", 1);
@@ -925,6 +937,41 @@ test.skipIf(!supported)("with two of Android's streams listed, the quality tag a
   expect(await reportedRate()).toBe(44100);
   await poll(() => android.restarts === 1 && android.state === 3);
   expect(logSince(mark)[0]).toBe("hires-recovery: heard only zeros after the stream changed rate: song 532 at 2.0 s, stream 44100 Hz");
+}, 20000);
+
+test.skipIf(!supported)("the state reports the song's own rate from the controller, and Android's mixer rate beside it", async () => {
+  await play("541", "542");
+  const item = android.queue[android.selected]!.queueId;
+  // Android resamples a 44.1 kHz song to 192 kHz, as when the rate helper is missing.
+  android.songRate = 44100; android.mixerRate = 192000;
+  let playback = (await send("/state")).body.playback;
+  expect([playback.sampleRate, playback.outputRate]).toEqual([44100, 192000]);
+  // Once the mixer follows the song, both match.
+  android.mixerRate = 44100;
+  playback = (await send("/state")).body.playback;
+  expect([playback.sampleRate, playback.outputRate]).toEqual([44100, 44100]);
+  // A rate the controller found for another entry, such as the song before, is not this song's.
+  android.rateItem = item - 1;
+  playback = (await send("/state")).body.playback;
+  expect(playback.sampleRate).toBeUndefined();
+  expect(playback.outputRate).toBe(44100);
+}, 20000);
+
+test.skipIf(!supported)("silence after a rate change first moves Android's tracks to the mixer's current buffer, and a song that sounds again is not restarted", async () => {
+  await afterLastRestart();
+  const mark = hostLog().length;
+  await play("551", "552");
+  android.position = 60000; await listen();
+  expect((await call("next")).status).toBe(200);
+  android.rebindHelps = true;
+  streamRate(44100); android.position = 2000; silence(1);
+  await poll(() => android.rebinds === 1 && android.silent === 0);
+  android.position = 5000; await listen();
+  expect(android.restarts).toBe(0);
+  expect(android.rebinds).toBe(1);
+  const lines = logSince(mark);
+  expect(lines[0]).toBe("hires-recovery: heard only zeros after the stream changed rate: song 552 at 2.0 s, stream 44100 Hz");
+  expect(lines[1]).toBe("hires-recovery: moved Android's tracks to the mixer's current buffer (3 sessions): song 552 at 2.0 s");
 }, 20000);
 
 // Last: the host exits at the end.
