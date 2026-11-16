@@ -28,6 +28,11 @@ apple_playing() { [ -f "$STATE/playing" ]; }
 host_running() { [ -f "$STATE/host" ]; }
 android_streaming() { [ -f "$STATE/playing" ]; }
 systemctl() { return 1; }
+# Standby is off here, so these cases see Android stop. standby.sh covers standby.
+android_frozen() { return 1; }
+thaw_android() { :; }
+standby_android() { return 1; }
+reclaim_later() { :; }
 # The root helper's records. Activation fails when asked to and then restores what was current,
 # as the real helper's transaction does.
 root() {

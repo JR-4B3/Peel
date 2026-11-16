@@ -10,7 +10,7 @@ Peel started on 1 October 2026. Everything below is on `main` and in the nightly
 - Home, search, Favourite Songs, playlists, albums and artists, filters and sorting, the queue, lyrics and hearts.
 - Hi-Res Lossless on Linux through Apple Music's Android app in Waydroid, at each song's own sample rate, with nightly updates that test themselves and roll back.
 - Hi-res plays playlists of any length, also over about 500 songs, and restarts Apple Music when it plays only silence. Library songs whose catalog ID Apple no longer has play under their second ID, so a click plays the song chosen.
-- Android for hi-res boots in about 6 seconds instead of 37, and it stops when the last Peel closes, so it holds no memory while nobody listens.
+- Android for hi-res boots in about 6 seconds instead of 37. When the last Peel closes it is frozen in standby for up to 24 hours, holding about 290 MB, so the next Peel plays its first song about 2 seconds after the click. After that it stops and holds no memory.
 - Devices: pairing, moving the music between computers, and control from any Peel, also away from home through Tailscale.
 - Release installs that update themselves from the nightly or stable channel. v0.1.0 is the first stable release, and nightlies are 0.1.1.
 - The mouse wheel over the player changes the volume, and Settings has a Text size row for Peel's Ghostty menu entry and Mac app.

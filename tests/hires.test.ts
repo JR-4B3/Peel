@@ -13,6 +13,7 @@ const suiteSeconds = 90;
 const killAfterSeconds = 5;
 const testBudgetMs = (suiteSeconds + killAfterSeconds + 15) * 1000;
 
+// The suites take several seconds together, more than bun's default of 5 seconds per test.
 test.skipIf(!ready)("the hi-res pipeline's offline tests pass", () => {
   const script = new URL("../hires/tests/offline/run.sh", import.meta.url).pathname;
   const run = Bun.spawnSync(["timeout", "--kill-after", `${killAfterSeconds}s`, `${suiteSeconds}s`, "bash", script]);

@@ -27,6 +27,7 @@
 #   logcat [lines]                     the end of Android's log (read-only)
 #   adb-auth                           authorize the caller's adb key inside Android
 #   rate-helper                        start the release's rate helper inside Android as audioserver
+#   reclaim                            move a frozen Android's memory to swap (only while frozen)
 #   prune                              delete stock Waydroid's images once nothing refers to them
 #   list                               releases, current and previous
 set -euo pipefail
@@ -40,6 +41,14 @@ BUILD=$STATE/build
 DOWNLOADS=$STATE/downloads
 WAYDROID=/var/lib/waydroid
 WAYDROID_CFG=$WAYDROID/waydroid.cfg
+# Waydroid's LXC container.
+LXC_PATH=$WAYDROID/lxc
+LXC_NAME=waydroid
+CGROUPS=/sys/fs/cgroup
+PROC=/proc
+# Seconds that probe's shell in Android may take, and that reclaim may take in all.
+PROBE_SECONDS=15
+RECLAIM_SECONDS=5
 SYSTEM_OTA=https://ota.waydro.id/system/lineage/waydroid_x86_64/VANILLA.json
 VENDOR_OTA=https://ota.waydro.id/vendor/waydroid_x86_64/MAINLINE.json
 INPUTS=(manifest.conf audio.primary.waydroid.32.so audio.primary.waydroid.64.so audio_policy_configuration.xml)
@@ -457,19 +466,26 @@ cmd_remove() {
 # the user it attaches as (fchown, mode 600), so it must never inherit the caller's: a caller could
 # pass any file they can open as input or output. Input comes from $1 (a root-owned file, or - for
 # none) and output goes to a root-only file that is printed afterwards. waydroid does not pass the
-# command's exit status on, so callers that need one look for a line the command prints.
-in_android() {  # in_android <input-file|-> <waydroid shell arguments...>
-  local input=$1 out; shift
+# command's exit status on, so callers that need one look for a line the command prints. The shell
+# gets $1 seconds: one attached to a frozen Android would otherwise wait until Android wakes.
+in_android() {  # in_android <seconds> <input-file|-> <waydroid shell arguments...>
+  local seconds=$1 input=$2 out; shift 2
   [ "$input" = - ] && input=/dev/null
   out=$(mktemp "$BUILD/android.XXXXXX")
-  waydroid shell "$@" <"$input" >"$out" 2>&1 || true
+  timeout -k 2 "$seconds" waydroid shell "$@" <"$input" >"$out" 2>&1 || true
   cat "$out"; rm -f "$out"
 }
 
 cmd_probe() {
   waydroid status 2>/dev/null </dev/null | sed -n 's/^Session:\s*/session=/p; s/^Container:\s*/container=/p'
-  local answer
-  answer=$(in_android - -- sh -c '
+  local answer cg=/sys/fs/cgroup/lxc.payload.waydroid
+  # A shell attached to a frozen Android would freeze with it. Android can still freeze between
+  # this check and the shell, so the shell also has PROBE_SECONDS.
+  if [ "$(container_state)" = FROZEN ]; then
+    if [ -r "$cg/memory.current" ]; then echo "mem_current=$(( $(cat "$cg/memory.current") / 1048576 ))"; fi
+    return 0
+  fi
+  answer=$(in_android "$PROBE_SECONDS" - -- sh -c '
     p=/data/data/com.apple.android.music/shared_prefs/com.apple.android.music.playback_preferences.xml
     echo "boot_completed=$(getprop sys.boot_completed)"
     echo "zygote=$(getprop ro.zygote)"
@@ -480,7 +496,6 @@ cmd_probe() {
     echo "apple_bitstream_switching=$(grep -o "key_is_bit_stream_switching_enabled\" value=\"[a-z]*" $p 2>/dev/null | grep -o "[a-z]*$")"
     echo "fake_wifi=$(getprop persist.waydroid.fake_wifi)"')
   if grep -q '^boot_completed=' <<<"$answer"; then grep '^[a-z_0-9]*=' <<<"$answer"; else echo "container=unreachable"; fi
-  local cg=/sys/fs/cgroup/lxc.payload.waydroid
   if [ -r "$cg/memory.stat" ]; then awk '/^anon |^shmem |^kernel /{printf "mem_%s=%d\n", $1, $2/1048576}' "$cg/memory.stat"; fi
   return 0
 }
@@ -488,7 +503,7 @@ cmd_probe() {
 cmd_logcat() {
   local n=${1:-2000}
   [[ $n =~ ^[0-9]{1,6}$ ]] || die "invalid line count"
-  in_android - -- logcat -d -b all -t "$n"
+  in_android 60 - -- logcat -d -b all -t "$n"
 }
 
 cmd_adb_auth() {
@@ -498,7 +513,7 @@ cmd_adb_auth() {
   [[ $key =~ ^QAAAA[A-Za-z0-9+/=]+\ [[:print:]]*$ ]] || die "the adb key does not look like an adb public key"
   lock
   file=$(mktemp "$BUILD/adbkey.XXXXXX"); printf '%s\n' "$key" > "$file"
-  in_android "$file" -- sh -c 'mkdir -p /data/misc/adb; touch /data/misc/adb/adb_keys; cat > /data/misc/adb/key.new;
+  in_android 30 "$file" -- sh -c 'mkdir -p /data/misc/adb; touch /data/misc/adb/adb_keys; cat > /data/misc/adb/key.new;
     grep -qxF -f /data/misc/adb/key.new /data/misc/adb/adb_keys || cat /data/misc/adb/key.new >> /data/misc/adb/adb_keys
     rm /data/misc/adb/key.new; chown system:shell /data/misc/adb/adb_keys; chmod 640 /data/misc/adb/adb_keys' >/dev/null
   rm -f "$file"
@@ -513,7 +528,7 @@ cmd_adb_auth() {
 cmd_rate_helper() {
   lock
   local answer
-  answer=$(in_android - -u 1041 -g 1041 -- /system/bin/sh -c '
+  answer=$(in_android 30 - -u 1041 -g 1041 -- /system/bin/sh -c '
     # Ready when the helper process runs and its socket exists. A socket without the helper, or the
     # helper without its socket, is not.
     listening() { pidof peel-rate >/dev/null && grep -q " @peel-rate\$" /proc/net/unix; }
@@ -526,6 +541,52 @@ cmd_rate_helper() {
   local result; result=$(sed -n 's/^result=//p' <<<"$answer" | tail -1)
   [ "$result" = ready ] || die "${result:-could not reach Android}"
   echo "rate helper ready"
+}
+
+# The container's state as LXC reports it: RUNNING, FROZEN, STOPPED, or empty when LXC can't tell.
+container_state() { timeout 10 lxc-info -P "$LXC_PATH" -n "$LXC_NAME" -sH 2>/dev/null </dev/null || true; }
+
+# The cgroup the container is frozen at, found from the kernel's own records: the cgroup of the
+# container's init process, or the nearest ancestor of it, whose cgroup.freeze is set. Nothing comes
+# from the caller. Fails unless the kernel reports that cgroup as fully frozen.
+frozen_cgroup() {
+  local pid rel dir
+  pid=$(timeout 10 lxc-info -P "$LXC_PATH" -n "$LXC_NAME" -pH 2>/dev/null </dev/null) || return 1
+  [[ $pid =~ ^[0-9]+$ ]] && [ "$pid" -gt 1 ] || return 1
+  rel=$(sed -n 's/^0:://p' "$PROC/$pid/cgroup" 2>/dev/null | head -1)
+  [[ $rel == /?* ]] && [[ $rel != *..* ]] || return 1
+  dir=$CGROUPS$rel
+  while [ "$dir" != "$CGROUPS" ]; do
+    if [ "$(cat "$dir/cgroup.freeze" 2>/dev/null)" = 1 ]; then
+      grep -qx 'frozen 1' "$dir/cgroup.events" 2>/dev/null && [ -w "$dir/memory.reclaim" ] || return 1
+      echo "$dir"; return 0
+    fi
+    dir=${dir%/*}
+  done
+  return 1
+}
+
+# Moves a frozen Android's memory out of RAM: the kernel drops its page cache and compresses the
+# rest into swap (zswap or zram where the system has them). Waking stays as fast. It takes no
+# input and works only while the container is frozen, so it can't slow a playing Android: it
+# reclaims in steps of 64 MB and checks between them that the container is still frozen. All steps
+# together get RECLAIM_SECONDS; reclaiming 1.5 GB at once took about 2 seconds. A step still
+# running at the deadline is interrupted, which the kernel allows between its reclaim passes.
+cmd_reclaim() {
+  [ "$(container_state)" = FROZEN ] || die "Android is not frozen; nothing reclaimed"
+  local cg; cg=$(frozen_cgroup) || die "could not find Android's frozen cgroup; nothing reclaimed"
+  local before after steps i left deadline=$((SECONDS + RECLAIM_SECONDS))
+  before=$(cat "$cg/memory.current")
+  steps=$(( before / 67108864 + 1 ))
+  for ((i = 0; i < steps; i++)); do
+    left=$((deadline - SECONDS))
+    [ "$left" -gt 0 ] || break
+    [ "$(cat "$cg/cgroup.freeze" 2>/dev/null)" = 1 ] && grep -qx 'frozen 1' "$cg/cgroup.events" 2>/dev/null || break
+    # The kernel answers EAGAIN once it can reclaim no more, which ends the loop.
+    timeout -k 1 "$left" sh -c 'echo 64M > "$1"' sh "$cg/memory.reclaim" 2>/dev/null || break
+  done
+  after=$(cat "$cg/memory.current")
+  echo "reclaimed Android's memory in standby: $(( before / 1048576 )) MB -> $(( after / 1048576 )) MB"
 }
 
 # Deletes Waydroid's stock images once no state refers to them: releases replace them, and
@@ -564,7 +625,8 @@ case "$verb" in
   logcat)   cmd_logcat "${1:-2000}" ;;
   adb-auth) cmd_adb_auth ;;
   rate-helper) cmd_rate_helper ;;
+  reclaim)  [ $# = 0 ] || die "usage: reclaim"; cmd_reclaim ;;
   prune)    cmd_prune ;;
   list)     cmd_list ;;
-  *) die "unknown verb '${verb}'. Verbs: latest repack activate confirm rollback remove prune probe logcat adb-auth rate-helper list" ;;
+  *) die "unknown verb '${verb}'. Verbs: latest repack activate confirm rollback remove prune probe logcat adb-auth rate-helper reclaim list" ;;
 esac
