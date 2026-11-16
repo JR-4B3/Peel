@@ -19,7 +19,7 @@ import { setTimeout as sleep } from "node:timers/promises";
 import { fileURLToPath } from "node:url";
 import { hiresBuild } from "./build";
 import { readPreferences } from "./config";
-import { ensureHires, Hires, hiresHome, hiresSelected, launchHost, testRunsDir } from "./hires";
+import { ensureHires, Hires, hiresHome, hiresSelected, launchHost, SharedHost, testRunsDir } from "./hires";
 import { endTestRun, recordTestRun, testLabel, testRuns } from "./try-runs";
 import { defaultRoot, installRoot, repository } from "./update";
 
@@ -198,7 +198,12 @@ export function sharedHost(host: HostState | undefined) {
 export async function takeHost(dir: string, status: (text: string) => void, state: () => Promise<HostState | undefined> = hostState, start = useOwnHost) {
   const shared = sharedHost(await state());
   if (shared) return shared;
-  await start(dir, status).catch(error => status(`The test build's hi-res playback did not start: ${error instanceof Error ? error.message : error}`));
+  // Another Peel can also start a host while the replaced one stops. ensureHires then refuses.
+  try { await start(dir, status); }
+  catch (error) {
+    if (error instanceof SharedHost) return sharedHost({ others: error.others });
+    status(`The test build's hi-res playback did not start: ${error instanceof Error ? error.message : error}`);
+  }
 }
 
 // Runs the test build in this terminal and returns its exit code.
@@ -240,7 +245,7 @@ async function useOwnHost(dir: string, status: (text: string) => void) {
   const code = join(dir, "src", "hires.ts");
   if (!existsSync(code)) return;
   const { hash, version, time } = hiresBuild(dir);
-  await ensureHires(new Hires(), status, undefined, { build: { hash, version, time }, launch: () => launchHost(code) });
+  await ensureHires(new Hires(), status, undefined, { build: { hash, version, time }, launch: () => launchHost(code), exclusive: true });
 }
 
 // Once the test build closed, a hi-res host that runs its code stops, so the installed Peel starts

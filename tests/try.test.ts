@@ -10,6 +10,7 @@ import { createTestRenderer } from "@opentui/core/testing";
 import { defaults } from "../src/config";
 import { Model } from "../src/model";
 import { PeelUI } from "../src/ui";
+import { ensureHires } from "../src/hires";
 import { fixture } from "./fixture";
 import { checkForUpdate } from "../src/update";
 
@@ -274,6 +275,27 @@ test("peel --try asks again before it takes the hi-res host over, and leaves a u
     expect(await takeHost("/try/pr1-1111111", () => {}, () => hostState(host.home), start)).toBeUndefined();
     expect(started).toEqual(["/try/pr1-1111111"]);
   } finally { await host.stop(); }
+});
+
+// Another Peel window can start its own host while the host peel --try replaces is stopping.
+// peel --try leaves that host alone too, instead of stopping it under the other window.
+test("peel --try does not stop a host another Peel started while the replaced host stopped", async () => {
+  const mine = { hash: "test", version: "0.1.0-try.pr1.abcdef0", time: "2026-11-16T12:00:00Z" };
+  const installed = { hash: "installed", version: "0.1.1", time: "" };
+  let current: any = { build: installed, others: 0, ready: true, instance: "first" };
+  const quits: string[] = [];
+  const engine = { state: async () => current, quit: async () => { quits.push(current?.instance); current = undefined; } };
+  const refused = await takeHost("/try/pr1-1111111", () => {}, async () => ({ others: 0 }), async () => {
+    await ensureHires(engine as any, () => {}, undefined, {
+      build: mine, testRunning: () => true, exclusive: true,
+      // The other window's host answers once the first one stopped.
+      watch: async () => async () => { current = { build: installed, others: 1, ready: true, instance: "other-window" }; return false; },
+      launch: async () => { current = { build: mine, others: 0, ready: true, instance: "test" }; },
+    });
+  });
+  expect(refused).toStartWith("Another Peel window uses hi-res playback");
+  expect(quits).toEqual(["first"]);
+  expect(current.instance).toBe("other-window");
 });
 
 test("a test build names its pull request and commit in the status line", async () => {

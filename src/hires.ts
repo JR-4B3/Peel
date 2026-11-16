@@ -66,13 +66,21 @@ export class Hires extends Engine {
 // How ensureHires treats a host of another build. The SSH helper passes remote. peel --try passes
 // the test build's build and a start of the test build's host. Tests also pass the caller's build,
 // a stand-in for starting a host, one for telling whether a host runs, and one for telling which
-// test builds run.
+// test builds run. peel --try also passes exclusive, so it replaces only a host no other Peel
+// uses, also one another Peel started while the replaced host stopped.
 export interface HiresStart {
   remote?: boolean;
   build?: HostBuild;
   launch?: () => Promise<void>;
   watch?: () => Promise<() => Promise<boolean>>;
   testRunning?: (version: string) => boolean;
+  exclusive?: boolean;
+}
+
+// Why ensureHires with exclusive did not replace the host: other Peels use it, or it does not say
+// how many do.
+export class SharedHost extends Error {
+  constructor(readonly others: number | undefined) { super("Other Peels use hi-res playback on this computer."); }
 }
 
 // How many times one call restarts an older host. A host that another Peel starts meanwhile
@@ -94,6 +102,8 @@ export async function ensureHires(engine: Engine, status: (text: string) => void
     // runs the new one. Restarting it also restarts Android, as when the last Peel closes.
     if (current && outdated(current, mine, remote, running)) {
       if (restarts >= maxRestarts) throw new Error(`Hi-res playback still runs code older than this Peel after ${maxRestarts} tries. A Peel window of an older version starts it again. Close that window or restart it into the update.`);
+      // others counts the Peels besides this one. A host that does not say counts as used.
+      if (start.exclusive && current.others !== 0) throw new SharedHost(current.others);
       signal?.throwIfAborted();
       status("Restarting hi-res playback to load an update...");
       const running = await (start.watch ?? watchHost)();
